@@ -6,7 +6,13 @@ from pathlib import Path
 import pytest
 
 from core.packets import Verdict
-from policies.sable import evaluate_preflight, valid_allow_entries
+from policies.sable import (
+    evaluate_preflight,
+    valid_allow_entries,
+    scan_tests_for_risks,
+    _arg_looks_tmp,
+    install_runtime_guards,
+)
 
 
 def _pytest_cmd(target: Path) -> list[str]:
@@ -243,3 +249,83 @@ def test_sable_blocks_rootdir_and_cwd_outside_isolated_root(tmp_path: Path):
         cwd=elsewhere,
     )
     assert cwd_decision.verdict == Verdict.BLOCK.value
+
+
+def test_sable_scans_conftest_py(tmp_path: Path):
+    iso = tmp_path / "iso"
+    live = tmp_path / "live"
+    iso.mkdir()
+    live.mkdir()
+    (iso / "conftest.py").write_text("import subprocess\n", encoding="utf-8")
+    decision = evaluate_preflight(
+        command=_pytest_cmd(iso),
+        isolated_root=iso,
+        live_root=live,
+        allow_network=False,
+        env={},
+        cwd=iso,
+    )
+    assert decision.verdict == Verdict.BLOCK.value
+    assert any("subprocess" in r for r in decision.blocked_reasons)
+
+
+def test_sable_arg_looks_tmp_checks_segments_not_substring(tmp_path: Path):
+    iso = tmp_path / "iso"
+    iso.mkdir()
+    # Call on template.py must NOT be treated as tmp
+    (iso / "test_tmp.py").write_text(
+        "import os\n\ndef test_fn():\n    os.remove('template.py')\n",
+        encoding="utf-8",
+    )
+    hits, _ = scan_tests_for_risks(iso)
+    assert any("os.remove" in h for h in hits)
+
+    # Call on /tmp/foo.txt is treated as tmp and allowed
+    (iso / "test_tmp.py").write_text(
+        "import os\n\ndef test_fn():\n    os.remove('/tmp/foo.txt')\n",
+        encoding="utf-8",
+    )
+    hits, _ = scan_tests_for_risks(iso)
+    assert not any("os.remove" in h for h in hits)
+
+
+def test_sable_runtime_guard_blocks_socket_only_when_no_network(tmp_path: Path):
+    import ast
+    iso = tmp_path / "iso"
+    iso.mkdir()
+    conftest = install_runtime_guards(iso)
+    assert conftest.is_file()
+
+    content = conftest.read_text(encoding="utf-8")
+    assert 'os.environ.get("NO_NETWORK") != "1"' in content
+    assert "socket.connect" in content
+    assert "Sable: socket.connect is blocked in the isolated copy" in content
+
+    tree = ast.parse(content)
+    assert any(
+        isinstance(node, ast.FunctionDef) and node.name == "_sable_block_socket_connect"
+        for node in ast.walk(tree)
+    )
+
+
+@pytest.mark.parametrize(
+    "code,expected_token",
+    [
+        ("from shutil import rmtree\n", "from shutil import rmtree"),
+        ("from os import system\n", "from os import system"),
+        ("from os import popen\n", "from os import popen"),
+        ("from os import remove\n", "from os import remove"),
+        ("from os import unlink\n", "from os import unlink"),
+        ("def test_x(): eval('1+1')\n", "call eval"),
+        ("def test_x(): exec('x=1')\n", "call exec"),
+        ("def test_x(): __import__('os')\n", "call __import__"),
+    ],
+)
+def test_sable_blocks_direct_imports_and_eval_exec(tmp_path: Path, code: str, expected_token: str):
+    iso = tmp_path / "iso"
+    iso.mkdir(exist_ok=True)
+    test_file = iso / "test_sample.py"
+    test_file.write_text(code, encoding="utf-8")
+    hits, _ = scan_tests_for_risks(iso)
+    assert any(expected_token in h for h in hits), f"Expected {expected_token} in hits: {hits}"
+

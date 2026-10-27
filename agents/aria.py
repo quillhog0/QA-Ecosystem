@@ -12,17 +12,6 @@ from agents.adapters import complete, complete_with_status, format_llm_error, lo
 from agents.inventory import doc_tokens, list_python, public_names, split_code_and_tests
 from core.packets import Scenario, TestPlan
 
-_orig_scenario_to_dict = Scenario.to_dict
-
-
-def _scenario_to_dict(self: Scenario) -> dict[str, Any]:
-    d = _orig_scenario_to_dict(self)
-    d["score"] = getattr(self, "score", 0)
-    return d
-
-
-Scenario.to_dict = _scenario_to_dict
-Scenario.score = 0
 
 
 STOP_WORDS = {

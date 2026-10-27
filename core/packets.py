@@ -104,6 +104,7 @@ class Scenario:
     acceptance: list[str]
     negative: bool = False
     covered_by: list[str] = field(default_factory=list)
+    score: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

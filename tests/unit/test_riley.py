@@ -117,3 +117,63 @@ def test_riley_records_gap_for_uncovered_claim():
     )
     assert review.verdict == Verdict.CLEAR.value
     assert "claim not covered by tests: C1" in review.gaps
+
+
+def test_riley_monotonic_veto_llm_cannot_override_to_clear(monkeypatch):
+    import agents.riley
+    monkeypatch.setattr(
+        agents.riley,
+        "complete_with_status",
+        lambda **kwargs: ("verdict: CLEAR\nroot_cause: ''\nnotes: looks fine to me", "ok"),
+    )
+    plan = TestPlan(
+        scenarios=[
+            Scenario(id="S1", title="happy", steps=["run"], acceptance=["ok"], negative=False),
+            Scenario(id="S2", title="negative", steps=["run"], acceptance=["fail"], negative=True),
+        ]
+    )
+    execution = {
+        "collected": 1,
+        "passed": 0,
+        "failed": 1,
+        "errors": 0,
+        "exit_code": 1,
+        "stdout": "FAILED test_x.py::test_fail",
+        "stderr": "",
+    }
+    review = review_results(
+        plan, execution, config={"llm": {"provider": "mock"}, "dry_run": False}
+    )
+    assert review.verdict == Verdict.VETO.value
+    assert review.root_cause
+
+
+def test_riley_vetoes_on_uncovered_claims_when_configured():
+    plan = TestPlan(
+        scenarios=[
+            Scenario(id="C1", title="claim without test", steps=["verify"], acceptance=["pass"], negative=False, covered_by=[]),
+            Scenario(id="S1", title="negative", steps=["run"], acceptance=["fail"], negative=True),
+        ]
+    )
+    execution = {
+        "collected": 1,
+        "passed": 1,
+        "failed": 0,
+        "errors": 0,
+        "exit_code": 0,
+        "stdout": "1 passed",
+        "stderr": "",
+    }
+    # When false (default): CLEAR
+    review_clear = review_results(
+        plan, execution, config={"riley": {"veto_on_uncovered_claims": False}, "llm": {"provider": "none"}, "dry_run": True}
+    )
+    assert review_clear.verdict == Verdict.CLEAR.value
+
+    # When true: VETO
+    review_veto = review_results(
+        plan, execution, config={"riley": {"veto_on_uncovered_claims": True}, "llm": {"provider": "none"}, "dry_run": True}
+    )
+    assert review_veto.verdict == Verdict.VETO.value
+    assert "uncovered claims" in review_veto.root_cause
+

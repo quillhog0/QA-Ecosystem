@@ -15,6 +15,8 @@ def _check_unsafe_requirement(line: str) -> str | None:
         return stripped
     if "://" in stripped:
         return stripped
+    if "@" in stripped:
+        return stripped
     if stripped == "-e" or stripped.startswith("-e ") or stripped.startswith("-e="):
         return stripped
     if stripped.startswith("-r") or stripped.startswith("-c"):
@@ -68,7 +70,11 @@ def prepare_venv(isolated_root: Path, work_dir: Path, *, timeout: int) -> tuple[
             except Exception:
                 pass
     elif pyproject_toml.is_file():
-        deps_to_install.extend(_read_pyproject_deps(pyproject_toml))
+        for dep in _read_pyproject_deps(pyproject_toml):
+            unsafe = _check_unsafe_requirement(dep)
+            if unsafe:
+                return None, f"pip install failed: unsafe requirement: {unsafe}"
+            deps_to_install.append(dep)
 
     if not deps_to_install:
         return None, "no dependency manifest"
@@ -102,7 +108,7 @@ def prepare_venv(isolated_root: Path, work_dir: Path, *, timeout: int) -> tuple[
         result = subprocess.run(
             pip_command,
             env=env,
-            cwd=isolated_root,
+            cwd=work_dir,
             timeout=timeout,
             check=True,
             capture_output=True,

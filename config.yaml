@@ -10,6 +10,9 @@ nova:
   install_deps: true
   pip_timeout: 300
 
+riley:
+  veto_on_uncovered_claims: false
+
 llm:
   # none | openrouter | local
   provider: none

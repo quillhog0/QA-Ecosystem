@@ -458,6 +458,8 @@ def _from_llm(data: dict[str, Any], fallback: DriftReport) -> DriftReport:
     verdict = str(data.get("verdict") or fallback.verdict).upper()
     if verdict not in {Verdict.CLEAR.value, Verdict.VETO.value}:
         verdict = fallback.verdict
+    if fallback.verdict == Verdict.VETO.value:
+        verdict = Verdict.VETO.value
     findings = []
     for item in data.get("findings") or []:
         if not isinstance(item, dict):
@@ -470,9 +472,15 @@ def _from_llm(data: dict[str, Any], fallback: DriftReport) -> DriftReport:
                 severity=str(item.get("severity") or "medium"),
             )
         )
+    combined_findings = list(fallback.findings)
+    existing_messages = {f.message for f in combined_findings}
+    for f in findings:
+        if f.message not in existing_messages:
+            combined_findings.append(f)
+            existing_messages.add(f.message)
     return DriftReport(
         verdict=verdict,
-        findings=findings or fallback.findings,
+        findings=combined_findings if fallback.findings else (findings or fallback.findings),
         docs_files=fallback.docs_files,
         code_files=fallback.code_files,
         test_files=fallback.test_files,

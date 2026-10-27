@@ -200,3 +200,25 @@ def test_lexi_no_false_drift_on_code_function_term(tmp_path: Path):
     )
     assert not any(f.kind == "domain_term" for f in report.findings)
     assert not any(f.path == "CloseAccount" for f in report.findings)
+
+
+def test_lexi_monotonic_veto_llm_cannot_override_to_clear(tmp_path: Path, monkeypatch):
+    root = mini_project(
+        tmp_path / "proj",
+        with_divide=False,
+        docs="# API\n\nPublic helper `missing_func`.\n",
+    )
+    import agents.lexi
+    monkeypatch.setattr(
+        agents.lexi,
+        "complete_with_status",
+        lambda **kwargs: ("verdict: CLEAR\nfindings: []\nnotes: everything looks great", "ok"),
+    )
+    report = inspect(
+        docs_root=root / "docs",
+        project_root=root,
+        config={"llm": {"provider": "mock"}, "dry_run": False},
+    )
+    assert report.verdict == Verdict.VETO.value
+    assert any(f.path == "missing_func" for f in report.findings)
+

@@ -212,6 +212,7 @@ FORBIDDEN_IMPORT_ROOTS = ("subprocess", "socket", "httpx", "requests", "urllib")
 FORBIDDEN_ATTR_CALLS = {
     ("shutil", "rmtree"),
     ("os", "system"),
+    ("os", "popen"),
     ("os", "remove"),
     ("os", "unlink"),
     ("os", "removedirs"),
@@ -225,6 +226,7 @@ RUNTIME_CONFTEST = '''\
 
 from __future__ import annotations
 
+import os
 import socket
 
 import pytest
@@ -232,6 +234,9 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def _sable_block_socket_connect(monkeypatch):
+    if os.environ.get("NO_NETWORK") != "1":
+        return
+
     def blocked(*_args, **_kwargs):
         raise RuntimeError("Sable: socket.connect is blocked in the isolated copy")
 
@@ -264,11 +269,12 @@ def _test_python_files(isolated_root: Path) -> list[Path]:
             if any(part in {".venv", "__pycache__", ".git"} for part in Path(rel).parts):
                 continue
             name = path.name.lower()
-            if name.startswith("test_") or name.endswith("_test.py") or "tests" in {
-                p.lower() for p in Path(rel).parts
-            }:
-                if name == "conftest.py":
-                    continue
+            if (
+                name.startswith("test_")
+                or name.endswith("_test.py")
+                or "tests" in {p.lower() for p in Path(rel).parts}
+                or name == "conftest.py"
+            ):
                 files.append(path)
     return files
 
@@ -293,8 +299,13 @@ def _arg_looks_tmp(call: ast.Call) -> bool:
     text = _const_str(call.args[0])
     if text is None:
         return False
-    lowered = text.lower()
-    return "tmp" in lowered or "temp" in lowered
+    try:
+        parts = [p.lower() for p in Path(text).parts]
+    except Exception:
+        return False
+    if ".." in parts:
+        return False
+    return any(p in {"tmp", "temp"} for p in parts)
 
 
 def _normalize_rel(path: str) -> str:
@@ -377,14 +388,29 @@ def scan_tests_for_risks(
                 root = mod.split(".")[0]
                 if mod.startswith(FORBIDDEN_IMPORT_ROOTS) or root in FORBIDDEN_IMPORT_ROOTS:
                     _record(mod or root, f"{rel}: from {mod} import ...")
+                if root == "shutil":
+                    for alias in node.names:
+                        if alias.name == "rmtree":
+                            _record("shutil.rmtree", f"{rel}: from shutil import rmtree")
+                elif root == "os":
+                    for alias in node.names:
+                        if alias.name in {"system", "popen", "remove", "unlink"}:
+                            _record(f"os.{alias.name}", f"{rel}: from os import {alias.name}")
             elif isinstance(node, ast.Call):
                 parts = _call_qualname(node.func)
-                if len(parts) >= 2:
+                if parts and parts[-1] in {"eval", "exec", "__import__"} and (len(parts) == 1 or parts[0] in {"builtins", "__builtin__"}):
+                    _record(parts[-1], f"{rel}: call {'.'.join(parts)}")
+                elif len(parts) >= 2:
                     pair = (parts[0], parts[-1])
                     if pair in FORBIDDEN_ATTR_CALLS or (parts[0], parts[1]) in FORBIDDEN_ATTR_CALLS:
                         if parts[-1] in {"remove", "unlink"} and _arg_looks_tmp(node):
                             continue
                         _record(".".join(parts), f"{rel}: call {'.'.join(parts)}")
+                elif len(parts) == 1 and parts[0] in {"rmtree", "system", "popen"}:
+                    _record(parts[0], f"{rel}: call {parts[0]}")
+                elif len(parts) == 1 and parts[0] in {"remove", "unlink"}:
+                    if not _arg_looks_tmp(node):
+                        _record(parts[0], f"{rel}: call {parts[0]}")
                 if parts and parts[0] in {"subprocess", "socket", "httpx", "requests"}:
                     _record(".".join(parts), f"{rel}: call {'.'.join(parts)}")
                 if parts and parts[-1] in NETWORK_NAME_FRAGMENTS and parts[0] in {
