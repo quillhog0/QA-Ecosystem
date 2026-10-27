@@ -1,0 +1,107 @@
+"""LLM adapter. Optional judgment for Lexi, Aria, Riley. Never required for Sable/Nova."""
+
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+from typing import Any
+
+PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
+
+
+class LLMError(RuntimeError):
+    pass
+
+
+def load_prompt(name: str) -> str:
+    path = PROMPTS_DIR / name
+    return path.read_text(encoding="utf-8")
+
+
+def llm_enabled(config: dict[str, Any]) -> bool:
+    llm = config.get("llm") or {}
+    provider = str(llm.get("provider") or "none").lower()
+    if provider in {"", "none", "off", "heuristic"}:
+        return False
+    if config.get("dry_run", True) and not llm.get("call_in_dry_run", False):
+        return False
+    if provider == "openrouter":
+        return bool(os.environ.get("OPENROUTER_API_KEY"))
+    if provider == "local":
+        return bool(llm.get("base_url"))
+    return False
+
+
+def complete(
+    *,
+    system_prompt: str,
+    user_payload: dict[str, Any],
+    config: dict[str, Any],
+) -> str | None:
+    """Return model text or None to trigger the heuristic path."""
+    if not llm_enabled(config):
+        return None
+    llm = config.get("llm") or {}
+    provider = str(llm.get("provider") or "none").lower()
+    model = str(llm.get("model") or config.get("model") or "openai/gpt-4o-mini")
+    timeout = float(llm.get("timeout_seconds") or 45)
+    body = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": json.dumps(user_payload, ensure_ascii=False, indent=2),
+            },
+        ],
+        "temperature": 0,
+    }
+    try:
+        import httpx
+    except ImportError as exc:
+        raise LLMError("httpx is required for LLM calls") from exc
+
+    if provider == "openrouter":
+        url = "https://openrouter.ai/api/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {os.environ.get('OPENROUTER_API_KEY', '')}",
+            "Content-Type": "application/json",
+        }
+    elif provider == "local":
+        base = str(llm.get("base_url")).rstrip("/")
+        url = f"{base}/chat/completions"
+        headers = {"Content-Type": "application/json"}
+        if os.environ.get("LOCAL_LLM_API_KEY"):
+            headers["Authorization"] = f"Bearer {os.environ['LOCAL_LLM_API_KEY']}"
+    else:
+        return None
+
+    if not config.get("allow_network") and provider == "openrouter":
+        return None
+
+    with httpx.Client(timeout=timeout) as client:
+        response = client.post(url, headers=headers, json=body)
+        response.raise_for_status()
+        data = response.json()
+    try:
+        return data["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise LLMError(f"unexpected LLM response shape: {data!r}") from exc
+
+
+def parse_yaml_block(text: str) -> dict[str, Any]:
+    import yaml
+
+    if not text:
+        return {}
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        lines = stripped.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        stripped = "\n".join(lines)
+    loaded = yaml.safe_load(stripped)
+    return loaded if isinstance(loaded, dict) else {}

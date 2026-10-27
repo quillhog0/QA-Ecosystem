@@ -1,0 +1,34 @@
+# Handoff packet schema (documentation). Runtime uses core.packets.HandoffPacket.
+run_id: string
+stage: init | drift_check | design | adversarial_plan | preflight | execute | post_audit | close
+from_role: vesper | lexi | aria | riley | sable | nova
+to_role: vesper | lexi | aria | riley | sable | nova
+project_root: string
+docs_root: string
+isolated_root: string
+dry_run: boolean
+allow_network: boolean
+timestamp: iso8601
+payload:
+  type: mapping
+history:
+  - stage: string
+    from: string
+    to: string
+    timestamp: iso8601
+
+role_result:
+  role: string
+  stage: string
+  verdict: PENDING | CLEAR | VETO | BLOCK | ESCALATE
+  summary: string
+  iteration: integer
+  details: mapping
+
+veto_hierarchy:
+  - sable
+  - riley
+  - lexi
+
+max_iterations_per_stage: 2
+escalation_token: "ESCALATE: DOMAIN_EXPERT"

@@ -1,0 +1,4 @@
+verdict: CLEAR
+escalation: ""
+exit_code: 0
+assert_live_hash: true

@@ -1,0 +1,6 @@
+verdict: CLEAR
+escalation: ""
+exit_code: 0
+skipped_secrets_contains:
+  - .env
+assert_secret_absent: .env

@@ -1,0 +1,12 @@
+.venv/
+venv/
+.env
+!benchmark/fixtures/secret_leak/.env
+__pycache__/
+*.pyc
+.pytest_cache/
+reports/
+.coverage
+dist/
+build/
+*.egg-info/
