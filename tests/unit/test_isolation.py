@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from core.isolation import (
+    IsolationHandle,
     create_isolation,
     is_secret_path,
     isolation_destination,
@@ -18,6 +19,15 @@ from tests.support import is_readonly_file, mini_project, tree_sha256
     "path,secret",
     [
         (Path(".env"), True),
+        (Path(".env.staging"), True),
+        (Path(".env.production"), True),
+        (Path(".env.test"), True),
+        (Path(".netrc"), True),
+        (Path(".npmrc"), True),
+        (Path(".pypirc"), True),
+        (Path("kubeconfig"), True),
+        (Path(".env.example"), False),
+        (Path(".env.sample"), False),
         (Path("subdir/.env"), True),
         (Path("cert.pem"), True),
         (Path("id_rsa"), True),
@@ -112,3 +122,64 @@ def test_git_worktree_leak(tmp_path: Path):
     ).stdout
     assert after_list == before_list
     assert str(dest.resolve()) not in after_list
+
+
+def test_isolation_secrets_and_symlinks(tmp_path: Path):
+    live = mini_project(tmp_path / "live")
+    (live / ".env.staging").write_text("SECRET=1", encoding="utf-8")
+    (live / ".netrc").write_text("password 123", encoding="utf-8")
+    (live / ".env.example").write_text("EXAMPLE=1", encoding="utf-8")
+
+    outside_file = tmp_path / "outside.txt"
+    outside_file.write_text("outside data", encoding="utf-8")
+    outside_mode_before = outside_file.stat().st_mode
+
+    symlink_file = live / "link_outside.py"
+    symlink_file.symlink_to(outside_file)
+
+    dest = tmp_path / "iso"
+    handle = create_isolation(live, dest, method="copy")
+
+    assert not (dest / ".env.staging").exists()
+    assert not (dest / ".netrc").exists()
+    assert (dest / ".env.example").is_file()
+    assert not (dest / "link_outside.py").exists()
+    assert outside_file.stat().st_mode == outside_mode_before
+
+
+def test_locked_tree_prevents_file_creation_and_deletion(tmp_path: Path):
+    live = mini_project(tmp_path / "live")
+    dest = tmp_path / "iso"
+    create_isolation(live, dest, method="copy", read_only=True)
+
+    calc = dest / "calculator.py"
+    assert calc.is_file()
+
+    with pytest.raises(OSError):
+        calc.unlink()
+
+    with pytest.raises(OSError):
+        (dest / "new_file.py").write_text("bad", encoding="utf-8")
+
+
+def test_release_isolation_deletes_copy_and_rejects_outside_path(tmp_path: Path):
+    live = mini_project(tmp_path / "live")
+    iso_dest = isolation_destination(live_root=live, run_id="test_cleanup_run")
+    handle = create_isolation(live, iso_dest, method="copy")
+    assert iso_dest.is_dir()
+
+    release_isolation(handle, keep=False)
+    assert not iso_dest.exists()
+
+    outside_dest = tmp_path / "outside_dir"
+    outside_dest.mkdir()
+    outside_handle = IsolationHandle(
+        live_root=live,
+        isolated_root=outside_dest,
+        method="copy",
+        read_only=True,
+        skipped_secrets=[],
+    )
+    with pytest.raises(ValueError, match="outside isolations root"):
+        release_isolation(outside_handle, keep=False)
+

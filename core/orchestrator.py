@@ -12,6 +12,7 @@ from core.isolation import (
     create_isolation,
     isolation_destination,
     release_isolation,
+    _make_sources_readonly,
 )
 from core.packets import (
     FinalReport,
@@ -57,6 +58,7 @@ class Vesper:
             project,
             isolated_dest,
             method=str(self.config.get("isolation_method") or "auto"),
+            read_only=False,
         )
         archive_note(isolation, run_dir)
         work_dir = run_dir / "nova_work"
@@ -102,7 +104,7 @@ class Vesper:
                 report.finished_at = utc_now()
                 write_reports(report, base)
         finally:
-            release_isolation(isolation)
+            release_isolation(isolation, keep=bool(self.config.get("keep_isolated_copy", False)))
         return report
 
     def _loop(
@@ -256,6 +258,8 @@ class Vesper:
             return
 
         sable.install_runtime_guards(isolated)
+        _make_sources_readonly(isolated)
+        isolation.read_only = True
 
         # 5. Nova execute
         packet = packet.next(
@@ -316,13 +320,10 @@ class Vesper:
                 details=post_policy.to_dict(),
             ),
         )
-        if post_policy.verdict == Verdict.BLOCK.value:
-            report.policy = {
-                "preflight": policy.to_dict(),
-                "post": post_policy.to_dict(),
-            }
-            report.verdict = Verdict.VETO.value
-            return
+        report.policy = {
+            "preflight": policy.to_dict(),
+            "post": post_policy.to_dict(),
+        }
 
         # 6. Riley + Lexi post-audit
         packet = packet.next(
@@ -360,13 +361,25 @@ class Vesper:
                 llm=post_drift.llm_status,
             ),
         )
+        root_cause = result_review.root_cause
+        if root_cause == "Nova collected zero tests, so results cannot witness the plan":
+            specific_cause = riley.parse_failure_root_cause(
+                str(execution.stdout or ""),
+                str(execution.stderr or ""),
+            )
+            if specific_cause:
+                root_cause = specific_cause
+
         report.post_audit = {
             "riley": result_review.to_dict(),
             "lexi": post_drift.to_dict(),
-            "root_cause": result_review.root_cause,
+            "root_cause": root_cause,
         }
 
-        # Veto hierarchy: Sable > Riley > Lexi (Sable already applied)
+        # Veto hierarchy: Sable > Riley > Lexi (Sable applied first)
+        if post_policy.verdict == Verdict.BLOCK.value:
+            report.verdict = Verdict.VETO.value
+            return
         if nova_failed or result_review.verdict == Verdict.VETO.value:
             report.verdict = Verdict.VETO.value
             return

@@ -95,13 +95,24 @@ def build_pytest_command(
     return cmd
 
 
+def _find_summary_line(output: str) -> str:
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    if not lines:
+        return ""
+    for line in reversed(lines):
+        if line.startswith("=") and line.endswith("=") and re.search(r"\bin\s+[\d\.]+(?:s|ms)?\s*=+$", line):
+            return line
+    return lines[-1]
+
+
 def _parse_counts(output: str) -> tuple[int, int, int, int, int]:
     collected = 0
     match = COLLECTED_RE.search(output)
     if match:
         collected = int(match.group(1))
     passed = failed = skipped = errors = 0
-    for m in SUMMARY_RE.finditer(output):
+    summary_line = _find_summary_line(output)
+    for m in SUMMARY_RE.finditer(summary_line):
         if m.group("passed"):
             passed = int(m.group("passed"))
         if m.group("failed"):
@@ -110,8 +121,6 @@ def _parse_counts(output: str) -> tuple[int, int, int, int, int]:
             skipped = int(m.group("skipped"))
         if m.group("errors"):
             errors = int(m.group("errors"))
-    if collected == 0:
-        collected = passed + failed + skipped + errors
     return collected, passed, failed, skipped, errors
 
 
@@ -138,7 +147,7 @@ def run_pytest(
     Path(env["HOME"]).mkdir(parents=True, exist_ok=True)
     extra_path = str(isolated_root)
     existing = env.get("PYTHONPATH", "")
-    env["PYTHONPATH"] = extra_path if not existing else extra_path + ":" + existing
+    env["PYTHONPATH"] = extra_path if not existing else extra_path + os.pathsep + existing
     env["QA_AGENT_NOVA"] = "1"
 
     started = time.monotonic()

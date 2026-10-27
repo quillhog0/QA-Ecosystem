@@ -1,11 +1,31 @@
-from __future__ import annotations
-
+import os
 import subprocess
 import sys
 import tomllib
 from pathlib import Path
 
 from core.runner import sanitized_env
+
+
+def _check_unsafe_requirement(line: str) -> str | None:
+    stripped = line.split("#", 1)[0].strip()
+    if not stripped:
+        return None
+    if any(stripped.startswith(proto) or f"://{proto}" in stripped for proto in ("git+", "http://", "https://", "hg+", "svn+")):
+        return stripped
+    if "://" in stripped:
+        return stripped
+    if stripped == "-e" or stripped.startswith("-e ") or stripped.startswith("-e="):
+        return stripped
+    if stripped.startswith("-r") or stripped.startswith("-c"):
+        rest = stripped[2:].strip(" =")
+        if ".." in rest or rest.startswith("/") or rest.startswith("\\") or (len(rest) > 1 and rest[1] == ":"):
+            return stripped
+    if ".." in stripped:
+        return stripped
+    if stripped.startswith("/") or stripped.startswith("./") or stripped.startswith(".\\") or stripped.startswith("~/"):
+        return stripped
+    return None
 
 
 def _read_pyproject_deps(path: Path) -> list[str]:
@@ -39,6 +59,11 @@ def prepare_venv(isolated_root: Path, work_dir: Path, *, timeout: int) -> tuple[
     if found_requirements:
         for f in found_requirements:
             try:
+                content = f.read_text(encoding="utf-8", errors="replace")
+                for line in content.splitlines():
+                    unsafe = _check_unsafe_requirement(line)
+                    if unsafe:
+                        return None, f"pip install failed: unsafe requirement: {unsafe}"
                 deps_to_install.append(f"-r{f.resolve()}")
             except Exception:
                 pass
@@ -59,7 +84,7 @@ def prepare_venv(isolated_root: Path, work_dir: Path, *, timeout: int) -> tuple[
     except subprocess.CalledProcessError as e:
         return None, f"venv creation failed: {e.stderr.strip()}"
 
-    python_executable = venv_path / "bin" / "python"
+    python_executable = venv_path / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
 
     # Install pytest and dependencies
     pip_command = [

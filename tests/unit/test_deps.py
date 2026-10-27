@@ -45,6 +45,16 @@ def test_parse_failure_root_cause_missing_dependency():
     assert root_cause == "missing dependency: solders (not installable or not declared in requirements)"
 
 
+def test_prepare_venv_rejects_unsafe_requirement(tmp_path: Path):
+    root = mini_project(tmp_path / "proj", with_tests=False, docs="")
+    (root / "requirements.txt").write_text("-e ../x\npytest\n", encoding="utf-8")
+    work_dir = tmp_path / "work"
+    python_executable, status = prepare_venv(root, work_dir, timeout=30)
+    assert python_executable is None
+    assert "unsafe requirement: -e ../x" in status
+    assert not (work_dir / "venv").exists()
+
+
 @pytest.mark.skipif(os.environ.get("QA_NETWORK_TESTS") != "1", reason="network test")
 def test_prepare_venv_installs_deps_and_pytest(tmp_path: Path):
     root = mini_project(tmp_path / "proj", with_tests=False, docs="")

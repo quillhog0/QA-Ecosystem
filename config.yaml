@@ -2,6 +2,7 @@
 dry_run: true
 allow_network: false
 max_iterations: 2
+keep_isolated_copy: false
 model: openai/gpt-4o-mini
 reports_dir: reports
 

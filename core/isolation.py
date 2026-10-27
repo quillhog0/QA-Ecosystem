@@ -31,21 +31,6 @@ SKIP_DIR_NAMES = {
     "reports",
 }
 
-SECRET_NAME_MARKERS = (
-    ".env",
-    ".env.local",
-    ".env.production",
-    "credentials.json",
-    "secrets.json",
-    "id_rsa",
-    "id_ed25519",
-    ".pem",
-    ".key",
-    ".p12",
-    ".pfx",
-)
-
-
 @dataclass
 class IsolationHandle:
     live_root: Path
@@ -68,7 +53,9 @@ class IsolationHandle:
 
 def is_secret_path(path: Path) -> bool:
     name = path.name.lower()
-    if name in {".env", ".env.local", ".env.production", ".env.development"}:
+    if name == ".env" or (name.startswith(".env.") and name not in {".env.example", ".env.sample"}):
+        return True
+    if name in {".netrc", ".npmrc", ".pypirc", "kubeconfig"}:
         return True
     if name.endswith((".pem", ".key", ".p12", ".pfx")):
         return True
@@ -99,6 +86,34 @@ def _is_git_toplevel(root: Path) -> bool:
         return False
 
 
+def _clean_symlinks_and_secrets(dest: Path, skipped: list[str]) -> None:
+    dest_resolved = dest.resolve()
+    for path in list(dest.rglob("*")):
+        if path.is_symlink():
+            should_remove = False
+            try:
+                target = path.resolve()
+                if not target.is_relative_to(dest_resolved):
+                    should_remove = True
+                elif is_secret_path(target):
+                    should_remove = True
+            except OSError:
+                should_remove = True
+            if is_secret_path(path):
+                should_remove = True
+            if should_remove:
+                rel = str(path.relative_to(dest))
+                if rel not in skipped:
+                    skipped.append(rel)
+                path.unlink()
+        elif path.is_file() and is_secret_path(path):
+            rel = str(path.relative_to(dest))
+            if rel not in skipped:
+                skipped.append(rel)
+            path.chmod(stat.S_IWUSR | stat.S_IRUSR)
+            path.unlink()
+
+
 def _copy_tree(src: Path, dst: Path) -> list[str]:
     skipped: list[str] = []
 
@@ -115,7 +130,8 @@ def _copy_tree(src: Path, dst: Path) -> list[str]:
                 skipped.append(str(child.relative_to(src)))
         return ignored
 
-    shutil.copytree(src, dst, ignore=ignore, dirs_exist_ok=False, symlinks=False)
+    shutil.copytree(src, dst, ignore=ignore, dirs_exist_ok=False, symlinks=True)
+    _clean_symlinks_and_secrets(dst, skipped)
     return skipped
 
 
@@ -123,12 +139,16 @@ def _make_sources_readonly(root: Path) -> None:
     for path in root.rglob("*"):
         if not path.exists() or path.is_symlink():
             continue
-        mode = path.stat().st_mode
-        if path.is_dir():
-            os.chmod(path, mode | stat.S_IRUSR | stat.S_IXUSR)
-            continue
-        # Keep sources readable; strip write bits.
-        os.chmod(path, mode & ~stat.S_IWUSR & ~stat.S_IWGRP & ~stat.S_IWOTH)
+        if path.is_file():
+            mode = path.stat().st_mode
+            os.chmod(path, mode & ~stat.S_IWUSR & ~stat.S_IWGRP & ~stat.S_IWOTH)
+
+    dirs = [d for d in root.rglob("*") if d.is_dir() and not d.is_symlink()]
+    dirs.sort(key=lambda p: len(p.parts), reverse=True)
+    dirs.append(root)
+    for d in dirs:
+        mode = d.stat().st_mode
+        os.chmod(d, (mode | stat.S_IRUSR | stat.S_IXUSR) & ~stat.S_IWUSR & ~stat.S_IWGRP & ~stat.S_IWOTH)
 
 
 def isolation_destination(
@@ -147,6 +167,7 @@ def create_isolation(
     dest: Path,
     *,
     method: str | None = None,
+    read_only: bool = True,
 ) -> IsolationHandle:
     """Create an isolated copy. Prefer detached git worktree; else copytree.
 
@@ -184,13 +205,7 @@ def create_isolation(
             if proc.returncode == 0 and dest.exists():
                 method = "git-worktree"
                 git_worktree = True
-                # Remove secret files from the worktree copy (do not touch live tree).
-                for path in list(dest.rglob("*")):
-                    if path.is_file() and is_secret_path(path):
-                        rel = str(path.relative_to(dest))
-                        skipped.append(rel)
-                        path.chmod(stat.S_IWUSR | stat.S_IRUSR)
-                        path.unlink()
+                _clean_symlinks_and_secrets(dest, skipped)
             else:
                 dest_partial = dest if dest.exists() else None
                 if dest_partial:
@@ -202,38 +217,94 @@ def create_isolation(
     if method == "copy" and not dest.exists():
         skipped = _copy_tree(live_root, dest)
 
-    _make_sources_readonly(dest)
+    if read_only:
+        _make_sources_readonly(dest)
+
     return IsolationHandle(
         live_root=live_root,
         isolated_root=dest,
         method=method,
-        read_only=True,
+        read_only=read_only,
         skipped_secrets=skipped,
         git_worktree=git_worktree,
     )
 
 
-def release_isolation(handle: IsolationHandle | None) -> None:
-    """Detach a git worktree created for this run. Never touches the live files."""
-    if handle is None or not handle.git_worktree:
-        return
-    live = str(handle.live_root)
-    dest = str(handle.isolated_root)
+def _validate_isolation_path(path: Path) -> Path:
+    isolations_root = Path(tempfile.gettempdir()).resolve() / "qa-agent-ecosystem-isolations"
+    resolved = path.resolve()
     try:
-        subprocess.run(
-            ["git", "-C", live, "worktree", "remove", "--force", dest],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        subprocess.run(
-            ["git", "-C", live, "worktree", "prune"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    except OSError:
+        if not resolved.is_relative_to(isolations_root) or resolved == isolations_root:
+            raise ValueError(f"Refusing to delete path outside isolations root: {resolved}")
+    except AttributeError:
+        if isolations_root not in resolved.parents or resolved == isolations_root:
+            raise ValueError(f"Refusing to delete path outside isolations root: {resolved}")
+    return resolved
+
+
+def _force_rmtree(path: Path) -> None:
+    path = _validate_isolation_path(path)
+    if not path.exists():
         return
+
+    def _on_error(func, p, exc_info):
+        try:
+            target = Path(p)
+            if target.exists():
+                os.chmod(target, stat.S_IWUSR | stat.S_IRUSR | stat.S_IXUSR)
+            if target.parent.exists():
+                os.chmod(target.parent, stat.S_IWUSR | stat.S_IRUSR | stat.S_IXUSR)
+            func(p)
+        except Exception:
+            pass
+
+    try:
+        shutil.rmtree(path, onexc=lambda fn, p, exc: _on_error(fn, p, exc))
+    except TypeError:
+        shutil.rmtree(path, onerror=_on_error)
+
+
+def release_isolation(
+    handle: IsolationHandle | None,
+    *,
+    keep: bool = False,
+) -> None:
+    """Detach a git worktree or remove isolated copy for this run."""
+    if handle is None:
+        return
+    if keep:
+        return
+
+    isolations_root = Path(tempfile.gettempdir()).resolve() / "qa-agent-ecosystem-isolations"
+    dest = handle.isolated_root.resolve()
+
+    if handle.git_worktree:
+        live = str(handle.live_root)
+        try:
+            subprocess.run(
+                ["git", "-C", live, "worktree", "remove", "--force", str(dest)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            subprocess.run(
+                ["git", "-C", live, "worktree", "prune"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError:
+            pass
+    else:
+        _validate_isolation_path(dest)
+        _force_rmtree(dest)
+
+    parent = dest.parent
+    try:
+        if parent.exists() and parent.is_relative_to(isolations_root) and parent != isolations_root:
+            parent.rmdir()
+    except OSError:
+        pass
 
 
 def archive_note(handle: IsolationHandle, log_dir: Path) -> Path:
