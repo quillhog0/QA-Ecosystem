@@ -26,6 +26,9 @@ sable:
       reason: CLI self-test
 
 lexi:
+  doc_globs:
+    - "**/*.md"
+    - "**/*.rst"
   ignore_identifiers:
     - OPENROUTER_API_KEY
     - LOCAL_LLM_API_KEY

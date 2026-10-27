@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import builtins
 import re
+import ast
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +12,7 @@ import yaml
 
 from agents.adapters import complete, load_prompt, parse_yaml_block
 from agents.inventory import (
+    DOC_GLOBS,
     doc_tokens,
     list_docs,
     list_python,
@@ -84,11 +86,40 @@ def _yaml_fence_keys(text: str) -> set[str]:
     return keys
 
 
+def _imported_names(project_root: Path) -> set[str]:
+    names: set[str] = set()
+    for path in project_root.rglob("*.py"):
+        if any(
+            part in path.parts
+            for part in [".venv", "venv", ".git", "node_modules", "__pycache__"]
+        ):
+            continue
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    names.add(alias.name.split(".")[0])
+                    if alias.asname:
+                        names.add(alias.asname)
+            elif isinstance(node, ast.ImportFrom):
+                if node.module:
+                    names.add(node.module.split(".")[0])
+                for alias in node.names:
+                    names.add(alias.name)
+                    if alias.asname:
+                        names.add(alias.asname)
+    return names
+
+
 def _ignore_identifiers(
     *,
     config: dict[str, Any],
     docs_root: Path,
     project_root: Path,
+    doc_globs: tuple[str, ...],
 ) -> set[str]:
     ignore: set[str] = set(COMMON_WORDS)
     ignore |= _flatten_keys(config)
@@ -102,7 +133,7 @@ def _ignore_identifiers(
             loaded = {}
         if isinstance(loaded, dict):
             ignore |= _flatten_keys(loaded)
-    for path in list_docs(docs_root):
+    for path in list_docs(docs_root, globs=doc_globs):
         try:
             ignore |= _yaml_fence_keys(path.read_text(encoding="utf-8", errors="replace"))
         except OSError:
@@ -110,9 +141,9 @@ def _ignore_identifiers(
     return ignore
 
 
-def _backtick_functions(docs_root: Path) -> list[str]:
+def _backtick_functions(docs_root: Path, doc_globs: tuple[str, ...]) -> list[str]:
     names: list[str] = []
-    for path in list_docs(docs_root):
+    for path in list_docs(docs_root, globs=doc_globs):
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
@@ -142,10 +173,13 @@ def _heuristic_drift(
     code_files, test_files = split_code_and_tests(py_files, project_root)
     tokens, _excerpt = doc_tokens(docs_root)
     findings: list[DriftFinding] = []
+    doc_globs = tuple((config.get("lexi") or {}).get("doc_globs") or DOC_GLOBS)
     ignore = _ignore_identifiers(
-        config=config, docs_root=docs_root, project_root=project_root
+        config=config, docs_root=docs_root, project_root=project_root, doc_globs=doc_globs
     )
     ignore_lower = {item.lower() for item in ignore}
+
+    imported_names = _imported_names(project_root)
 
     code_index: dict[str, str] = {}
     for path in code_files:
@@ -163,7 +197,7 @@ def _heuristic_drift(
             continue
 
     seen: set[str] = set()
-    for ident in _backtick_functions(docs_root):
+    for ident in _backtick_functions(docs_root, doc_globs):
         if ident in seen:
             continue
         seen.add(ident)
@@ -180,6 +214,8 @@ def _heuristic_drift(
             "see",
             "head",
         }:
+            continue
+        if ident in imported_names:
             continue
         if ident in code_index:
             continue
@@ -246,7 +282,7 @@ def _heuristic_drift(
     return DriftReport(
         verdict=verdict,
         findings=findings,
-        docs_files=relative_strings(list_docs(docs_root), docs_root)
+        docs_files=relative_strings(list_docs(docs_root, globs=doc_globs), docs_root)
         if docs_root.exists()
         else [],
         code_files=relative_strings(code_files, project_root),

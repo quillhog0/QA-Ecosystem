@@ -60,3 +60,57 @@ def test_lexi_ignores_config_keys_and_allowlist(tmp_path: Path):
     assert report.verdict != Verdict.VETO.value or not any(
         f.path in {"dry_run", "allow_network", "OPENROUTER_API_KEY"} for f in report.findings
     )
+
+
+def test_lexi_ignores_imported_project_libraries(tmp_path: Path):
+    root = mini_project(
+        tmp_path / "proj",
+        code={
+            "my_module.py": """from solders.pubkey import Pubkey
+import requests""",
+        },
+        docs="# API\n\nThis document mentions `solders`, `Pubkey`, and `requests`.\n",
+    )
+    report = inspect(
+        docs_root=root / "docs",
+        project_root=root,
+        config={"llm": {"provider": "none"}, "dry_run": True},
+    )
+    assert report.verdict != Verdict.VETO.value
+    assert not any(f.path in {"solders", "Pubkey", "requests"} for f in report.findings)
+
+
+def test_lexi_finds_missing_identifier(tmp_path: Path):
+    root = mini_project(
+        tmp_path / "proj",
+        docs="# Missing\n\nThis document mentions `FooBarMissing`.\n",
+    )
+    report = inspect(
+        docs_root=root / "docs",
+        project_root=root,
+        config={"llm": {"provider": "none"}, "dry_run": True},
+    )
+    assert report.verdict == Verdict.VETO.value
+    assert any(f.path == "FooBarMissing" for f in report.findings)
+
+
+def test_lexi_uses_doc_globs(tmp_path: Path):
+    root = mini_project(
+        tmp_path / "proj",
+        docs={
+            "guide.rst": "# Guide\n\nThis document mentions `FooBarMissing`.\n",
+            "README.md": "# README\n\nThis document mentions `ExistingIdentifier`.\n",
+        },
+    )
+    report = inspect(
+        docs_root=root / "docs",
+        project_root=root,
+        config={
+            "llm": {"provider": "none"},
+            "dry_run": True,
+            "lexi": {"doc_globs": ["**/*.rst"]},
+        },
+    )
+    assert report.verdict == Verdict.VETO.value
+    assert any(f.path == "FooBarMissing" for f in report.findings)
+    assert not any(f.path == "ExistingIdentifier" for f in report.findings)

@@ -36,10 +36,10 @@ def _iter_files(root: Path, globs: tuple[str, ...]) -> list[Path]:
     return sorted(set(files))
 
 
-def list_docs(docs_root: Path) -> list[Path]:
+def list_docs(docs_root: Path, globs: tuple[str, ...] | None = None) -> list[Path]:
     if docs_root.is_file():
         return [docs_root]
-    return _iter_files(docs_root, DOC_GLOBS)
+    return _iter_files(docs_root, globs or DOC_GLOBS)
 
 
 def list_python(root: Path) -> list[Path]:

@@ -53,10 +53,19 @@ def write_calculator(root: Path, *, with_divide: bool = True) -> None:
     (root / "calculator.py").write_text("\n".join(body), encoding="utf-8")
 
 
-def write_docs(root: Path, text: str) -> None:
+def write_docs(root: Path, text: str | dict[str, str]) -> None:
     docs = root / "docs"
     docs.mkdir(parents=True, exist_ok=True)
-    (docs / "overview.md").write_text(text, encoding="utf-8")
+    if isinstance(text, str):
+        (docs / "overview.md").write_text(text, encoding="utf-8")
+    else:
+        for name, content in text.items():
+            (docs / name).write_text(content, encoding="utf-8")
+
+
+def write_code(root: Path, code: dict[str, str]) -> None:
+    for name, content in code.items():
+        (root / name).write_text(content, encoding="utf-8")
 
 
 def write_tests(
@@ -117,12 +126,15 @@ def mini_project(
     with_tests: bool = True,
     failing: bool = False,
     dangerous: bool = False,
-    docs: str | None = None,
+    docs: str | dict[str, str] | None = None,
+    code: dict[str, str] | None = None,
     secret: bool = False,
 ) -> Path:
     root.mkdir(parents=True, exist_ok=True)
     write_calculator(root, with_divide=with_divide)
     write_tests(root, failing=failing, dangerous=dangerous, include=with_tests)
+    if code:
+        write_code(root, code)
     default_docs = (
         "# Sample calculator\n\n"
         "Python helpers `add` and `divide`.\n\n"
