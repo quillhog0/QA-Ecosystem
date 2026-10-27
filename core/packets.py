@@ -79,6 +79,7 @@ class DriftReport:
     code_files: list[str] = field(default_factory=list)
     test_files: list[str] = field(default_factory=list)
     notes: str = ""
+    claims: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -88,6 +89,7 @@ class DriftReport:
             "code_files": self.code_files,
             "test_files": self.test_files,
             "notes": self.notes,
+            "claims": self.claims,
         }
 
 

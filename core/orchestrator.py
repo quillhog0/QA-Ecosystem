@@ -158,13 +158,14 @@ class Vesper:
                 stage=Stage.DESIGN.value,
                 from_role=Role.VESPER.value,
                 to_role=Role.ARIA.value,
-                payload={"gaps": gaps},
+                payload={"gaps": gaps, "claims": drift.claims},
             )
             plan = aria.design(
                 docs_root=docs,
                 project_root=isolated,
                 config=self.config,
                 gaps=gaps,
+                claims=drift.claims,
             )
             append_result(
                 self.role_results,

@@ -15,11 +15,23 @@ def _heuristic_plan(
     docs_root: Path,
     project_root: Path,
     gaps: list[str],
+    claims: list[str],
 ) -> TestPlan:
     py_files = list_python(project_root)
     code_files, test_files = split_code_and_tests(py_files, project_root)
     tokens, excerpt = doc_tokens(docs_root)
     scenarios: list[Scenario] = []
+
+    for i, claim in enumerate(claims, start=1):
+        scenarios.append(
+            Scenario(
+                id=f"C{i}",
+                title=claim,
+                steps=["Verify this claim is true"],
+                acceptance=["Claim is true"],
+                negative=False,
+            )
+        )
 
     publics: list[str] = []
     for path in code_files:
@@ -145,10 +157,12 @@ def design(
     project_root: Path,
     config: dict[str, Any],
     gaps: list[str] | None = None,
+    claims: list[str] | None = None,
 ) -> TestPlan:
     gaps = gaps or []
-    plan = _heuristic_plan(docs_root=docs_root, project_root=project_root, gaps=gaps)
-    payload = {"heuristic_plan": plan.to_dict(), "red_team_gaps": gaps}
+    claims = claims or []
+    plan = _heuristic_plan(docs_root=docs_root, project_root=project_root, gaps=gaps, claims=claims)
+    payload = {"heuristic_plan": plan.to_dict(), "red_team_gaps": gaps, "claims": claims}
     try:
         raw = complete(
             system_prompt=load_prompt("aria.md"),

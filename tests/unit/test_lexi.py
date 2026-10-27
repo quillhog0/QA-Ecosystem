@@ -114,3 +114,46 @@ def test_lexi_uses_doc_globs(tmp_path: Path):
     assert report.verdict == Verdict.VETO.value
     assert any(f.path == "FooBarMissing" for f in report.findings)
     assert not any(f.path == "ExistingIdentifier" for f in report.findings)
+
+
+def test_lexi_finds_domain_term(tmp_path: Path):
+    root = mini_project(
+        tmp_path / "proj",
+        code={
+            "my_code.py": "# FooDomainTerm is the settlement window\ndef my_func(): pass",
+        },
+        docs="# Terms\n\nThis document mentions `FooDomainTerm`.\n",
+    )
+    report = inspect(
+        docs_root=root / "docs",
+        project_root=root,
+        config={"llm": {"provider": "none"}, "dry_run": True},
+    )
+    assert report.verdict != Verdict.VETO.value
+    assert any(f.path == "FooDomainTerm" and f.kind == "domain_term" and f.severity == "low" for f in report.findings)
+
+
+def test_lexi_extracts_claims(tmp_path: Path):
+    root = mini_project(
+        tmp_path / "proj",
+        docs=(
+            "The API must never return null. Hello world. "
+            "This is a sentence with always. "
+            "```python\nif x always y:\n    pass\n```"
+            "Zaručeně to funguje. "
+            "Nikdy to nedělej."
+        ),
+    )
+    report = inspect(
+        docs_root=root / "docs",
+        project_root=root,
+        config={"llm": {"provider": "none"}, "dry_run": True},
+    )
+    expected_claims = [
+        "The API must never return null.",
+        "This is a sentence with always.",
+        "Zaručeně to funguje.",
+        "Nikdy to nedělej.",
+    ]
+    assert sorted(report.claims) == sorted(expected_claims)
+    assert len(report.claims) == 4

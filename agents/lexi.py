@@ -6,6 +6,8 @@ import builtins
 import re
 import ast
 from pathlib import Path
+import tokenize
+import io
 from typing import Any
 
 import yaml
@@ -96,7 +98,7 @@ def _imported_names(project_root: Path) -> set[str]:
             continue
         try:
             tree = ast.parse(path.read_text(encoding="utf-8"))
-        except SyntaxError:
+        except (SyntaxError, UnicodeDecodeError, OSError, ValueError):
             continue
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
@@ -112,6 +114,32 @@ def _imported_names(project_root: Path) -> set[str]:
                     if alias.asname:
                         names.add(alias.asname)
     return names
+
+
+def _collect_code_text_content(project_root: Path) -> str:
+    content = []
+    for path in project_root.rglob("*.py"):
+        if any(
+            part in path.parts
+            for part in [".venv", "venv", ".git", "node_modules", "__pycache__"]
+        ):
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+            # Collect comments
+            for tok in tokenize.generate_tokens(io.StringIO(text).readline):
+                if tok.type == tokenize.COMMENT:
+                    content.append(tok.string)
+            # Collect docstrings
+            tree = ast.parse(text)
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.FunctionDef, ast.ClassDef, ast.Module, ast.AsyncFunctionDef)):
+                    doc = ast.get_docstring(node)
+                    if doc:
+                        content.append(doc)
+        except (SyntaxError, UnicodeDecodeError, OSError, ValueError):
+            continue
+    return "\n".join(content)
 
 
 def _ignore_identifiers(
@@ -162,6 +190,37 @@ def _backtick_functions(docs_root: Path, doc_globs: tuple[str, ...]) -> list[str
     return names
 
 
+SENTENCE_RE = re.compile(r"[^.!?]*[.!?]")
+CLAIM_KEYWORDS = {
+    "always", "never", "must", "guaranteed", "only",
+    "vždy", "nikdy", "musí", "pouze", "zaručeně",
+}
+
+def _extract_claims(docs_root: Path, doc_globs: tuple[str, ...]) -> list[str]:
+    claims: list[str] = []
+    seen_claims: set[str] = set()
+    for path in list_docs(docs_root, globs=doc_globs):
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        # Skip code blocks
+        stripped_text = FENCE_RE.sub("", text)
+        for sentence_match in SENTENCE_RE.finditer(stripped_text):
+            sentence = sentence_match.group(0).strip()
+            if not sentence:
+                continue
+            for keyword in CLAIM_KEYWORDS:
+                if re.search(r"\b" + re.escape(keyword) + r"\b", sentence, re.IGNORECASE):
+                    if sentence not in seen_claims:
+                        claims.append(sentence)
+                        seen_claims.add(sentence)
+                    break
+        if len(claims) >= 50:
+            break
+    return claims[:50]
+
+
 def _heuristic_drift(
     *,
     docs_root: Path,
@@ -180,6 +239,7 @@ def _heuristic_drift(
     ignore_lower = {item.lower() for item in ignore}
 
     imported_names = _imported_names(project_root)
+    code_text_content = _collect_code_text_content(project_root)
 
     code_index: dict[str, str] = {}
     for path in code_files:
@@ -218,6 +278,16 @@ def _heuristic_drift(
         if ident in imported_names:
             continue
         if ident in code_index:
+            continue
+        if ident in code_text_content:
+            findings.append(
+                DriftFinding(
+                    kind="domain_term",
+                    path=ident,
+                    message=f"docs mention `{ident}` but it appears only in comments/docstrings, not as code",
+                    severity="low",
+                )
+            )
             continue
         findings.append(
             DriftFinding(
@@ -277,6 +347,7 @@ def _heuristic_drift(
     high = [f for f in findings if f.severity == "high"]
     verdict = Verdict.VETO.value if high else Verdict.CLEAR.value
     notes = "drift detected" if findings else "docs, code, and tests align at identifier level"
+    claims = _extract_claims(docs_root, doc_globs)
     if findings and not high:
         notes = "minor gaps only; not a veto"
     return DriftReport(
@@ -288,6 +359,7 @@ def _heuristic_drift(
         code_files=relative_strings(code_files, project_root),
         test_files=relative_strings(test_files, project_root),
         notes=notes,
+        claims=claims,
     )
 
 
@@ -314,6 +386,7 @@ def _from_llm(data: dict[str, Any], fallback: DriftReport) -> DriftReport:
         code_files=fallback.code_files,
         test_files=fallback.test_files,
         notes=str(data.get("notes") or fallback.notes),
+        claims=fallback.claims,
     )
 
 
