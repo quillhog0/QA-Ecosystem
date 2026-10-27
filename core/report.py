@@ -38,12 +38,13 @@ def render_markdown(report: FinalReport) -> str:
         if str(s.get("id") or "").startswith("C")
     ]
     if claim_scenarios:
-        lines += ["## Claim coverage", "", "| tvrzení | covered_by |", "|---|---|"]
+        lines += ["## Claim coverage", "", "| tvrzení | covered_by | score |", "|---|---|---|"]
         for s in claim_scenarios:
             title = str(s.get("title") or "").replace("|", "\\|")
             covered = s.get("covered_by") or []
             covered_str = ", ".join(covered) if covered else "ŽÁDNÝ"
-            lines.append(f"| {title} | {covered_str} |")
+            score = s.get("score") if s.get("score") is not None else 0
+            lines.append(f"| {title} | {covered_str} | {score} |")
         lines.append("")
     lines += ["## Policy (Sable)", "", "```yaml", _yaml(report.policy), "```", ""]
     exec_view = dict(report.execution)
