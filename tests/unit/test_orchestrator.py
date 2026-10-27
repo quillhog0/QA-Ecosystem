@@ -45,5 +45,27 @@ def test_orchestrator_escalates_after_two_riley_plan_vetoes(tmp_path: Path):
     assert len(riley_plan) == 2
     assert calls["n"] == 2
     assert max(r.iteration for r in riley_plan) == 2
-    # Sanity: the real reviewer is unused in this test.
     assert review_plan is not None
+
+
+def test_orchestrator_records_llm_fallback_on_exception(tmp_path: Path):
+    project = mini_project(tmp_path / "proj")
+    reports = tmp_path / "reports"
+    config = {
+        "dry_run": False,
+        "allow_network": True,
+        "reports_dir": str(reports),
+        "llm": {"provider": "local", "base_url": "http://127.0.0.1:11434/v1", "call_in_dry_run": True},
+        "isolation_method": "copy",
+    }
+    with patch("agents.adapters.complete", side_effect=RuntimeError("Simulated LLM network error")):
+        report = Vesper(config).run(project, project / "docs")
+
+    md_text = ""
+    for p in reports.rglob("*.md"):
+        if report.run_id in p.name:
+            md_text = p.read_text(encoding="utf-8")
+            break
+
+    assert "- llm: fallback" in md_text
+    assert any("fallback" in r.llm for r in report.role_results)

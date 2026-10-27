@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from agents.adapters import complete, load_prompt, parse_yaml_block
+from agents.adapters import complete, complete_with_status, format_llm_error, load_prompt, parse_yaml_block
 from agents.inventory import doc_tokens, list_python, public_names, split_code_and_tests
 from core.packets import Scenario, TestPlan
 
@@ -163,17 +163,25 @@ def design(
     claims = claims or []
     plan = _heuristic_plan(docs_root=docs_root, project_root=project_root, gaps=gaps, claims=claims)
     payload = {"heuristic_plan": plan.to_dict(), "red_team_gaps": gaps, "claims": claims}
+    raw = None
+    llm_status = "none"
     try:
-        raw = complete(
+        raw, llm_status = complete_with_status(
             system_prompt=load_prompt("aria.md"),
             user_payload=payload,
             config=config,
         )
-    except Exception:
-        return plan
+    except Exception as exc:
+        llm_status = format_llm_error(exc)
+        raw = None
+
+    plan.llm_status = llm_status
     if not raw:
         return plan
     parsed = parse_yaml_block(raw)
     if not parsed:
+        plan.llm_status = "fallback: invalid YAML"
         return plan
-    return _from_llm(parsed, plan)
+    result = _from_llm(parsed, plan)
+    result.llm_status = "ok"
+    return result

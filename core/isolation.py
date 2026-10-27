@@ -134,26 +134,11 @@ def _make_sources_readonly(root: Path) -> None:
 def isolation_destination(
     *,
     live_root: Path,
-    reports_dir: Path,
+    reports_dir: Path | None = None,
     run_id: str,
 ) -> Path:
-    """Return a copy path that cannot nest inside the live tree's reports/.
-
-    If reports_dir lives under the project being copied, the isolated tree is
-    created in a process temp directory instead.
-    """
-    live_root = live_root.resolve()
-    reports_dir = reports_dir.resolve()
-    nested = False
-    try:
-        reports_dir.relative_to(live_root)
-        nested = True
-    except ValueError:
-        nested = False
-    if nested:
-        base = Path(tempfile.gettempdir()) / "qa-agent-ecosystem-isolations" / run_id
-    else:
-        base = reports_dir / run_id
+    """Return an isolated copy path under /tmp/qa-agent-ecosystem-isolations/."""
+    base = Path(tempfile.gettempdir()) / "qa-agent-ecosystem-isolations" / run_id
     return base / "isolated_copy"
 
 

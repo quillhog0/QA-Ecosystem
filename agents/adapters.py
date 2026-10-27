@@ -90,6 +90,50 @@ def complete(
         raise LLMError(f"unexpected LLM response shape: {data!r}") from exc
 
 
+def format_llm_error(exc: Exception) -> str:
+    """Format an exception into a safe fallback message without secrets or headers."""
+    try:
+        import httpx
+        if isinstance(exc, httpx.HTTPStatusError):
+            code = getattr(getattr(exc, "response", None), "status_code", None)
+            if code:
+                return f"fallback: HTTP {code}"
+    except ImportError:
+        pass
+    err_type = type(exc).__name__
+    return f"fallback: {err_type}"
+
+
+def complete_with_status(
+    *,
+    system_prompt: str,
+    user_payload: dict[str, Any],
+    config: dict[str, Any],
+) -> tuple[str | None, str]:
+    """Return (model_text, status).
+
+    Status is 'none', 'ok', or 'fallback: <error>'.
+    Never records keys or headers.
+    """
+    if not llm_enabled(config):
+        return None, "none"
+    llm = config.get("llm") or {}
+    provider = str(llm.get("provider") or "none").lower()
+    if not config.get("allow_network") and provider == "openrouter":
+        return None, "none"
+    try:
+        raw = complete(
+            system_prompt=system_prompt,
+            user_payload=user_payload,
+            config=config,
+        )
+        if raw is None:
+            return None, "none"
+        return raw, "ok"
+    except Exception as exc:
+        return None, format_llm_error(exc)
+
+
 def parse_yaml_block(text: str) -> dict[str, Any]:
     import yaml
 

@@ -55,6 +55,7 @@ class RoleResult:
     details: dict[str, Any] = field(default_factory=dict)
     iteration: int = 1
     timestamp: str = field(default_factory=utc_now)
+    llm: str = "none"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -80,6 +81,7 @@ class DriftReport:
     test_files: list[str] = field(default_factory=list)
     notes: str = ""
     claims: list[str] = field(default_factory=list)
+    llm_status: str = "none"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -90,6 +92,7 @@ class DriftReport:
             "test_files": self.test_files,
             "notes": self.notes,
             "claims": self.claims,
+            "llm_status": self.llm_status,
         }
 
 
@@ -110,12 +113,14 @@ class TestPlan:
     scenarios: list[Scenario] = field(default_factory=list)
     coverage_notes: str = ""
     assumptions: list[str] = field(default_factory=list)
+    llm_status: str = "none"
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "scenarios": [s.to_dict() for s in self.scenarios],
             "coverage_notes": self.coverage_notes,
             "assumptions": self.assumptions,
+            "llm_status": self.llm_status,
         }
 
 
@@ -126,6 +131,7 @@ class RedTeamReview:
     required_changes: list[str] = field(default_factory=list)
     root_cause: str = ""
     notes: str = ""
+    llm_status: str = "none"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

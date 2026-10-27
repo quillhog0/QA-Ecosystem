@@ -137,6 +137,7 @@ class Vesper:
                     summary=drift.notes,
                     details=drift.to_dict(),
                     iteration=attempt,
+                    llm=drift.llm_status,
                 ),
             )
             report.drift = drift.to_dict()
@@ -176,6 +177,7 @@ class Vesper:
                     summary=f"{len(plan.scenarios)} scenarios",
                     details=plan.to_dict(),
                     iteration=attempt,
+                    llm=plan.llm_status,
                 ),
             )
             report.plan = plan.to_dict()
@@ -196,6 +198,7 @@ class Vesper:
                     summary=review.notes,
                     details=review.to_dict(),
                     iteration=attempt,
+                    llm=review.llm_status,
                 ),
             )
             if review.verdict != Verdict.VETO.value:
@@ -337,6 +340,7 @@ class Vesper:
                 verdict=result_review.verdict,
                 summary=result_review.notes,
                 details=result_review.to_dict(),
+                llm=result_review.llm_status,
             ),
         )
         post_drift = lexi.inspect(
@@ -353,6 +357,7 @@ class Vesper:
                 verdict=post_drift.verdict,
                 summary=post_drift.notes,
                 details=post_drift.to_dict(),
+                llm=post_drift.llm_status,
             ),
         )
         report.post_audit = {

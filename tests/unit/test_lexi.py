@@ -157,3 +157,16 @@ def test_lexi_extracts_claims(tmp_path: Path):
     ]
     assert sorted(report.claims) == sorted(expected_claims)
     assert len(report.claims) == 4
+
+
+def test_lexi_clean_claims_without_markdown_and_intro(tmp_path: Path):
+    root = mini_project(
+        tmp_path / "proj",
+        docs="Intro:\n\n* **Zero Burns:** Never burns tokens.",
+    )
+    report = inspect(
+        docs_root=root / "docs",
+        project_root=root,
+        config={"llm": {"provider": "none"}, "dry_run": True},
+    )
+    assert report.claims == ["Zero Burns: Never burns tokens."]

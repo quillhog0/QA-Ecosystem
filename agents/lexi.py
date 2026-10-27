@@ -12,7 +12,7 @@ from typing import Any
 
 import yaml
 
-from agents.adapters import complete, load_prompt, parse_yaml_block
+from agents.adapters import complete, complete_with_status, format_llm_error, load_prompt, parse_yaml_block
 from agents.inventory import (
     DOC_GLOBS,
     doc_tokens,
@@ -190,11 +190,68 @@ def _backtick_functions(docs_root: Path, doc_globs: tuple[str, ...]) -> list[str
     return names
 
 
-SENTENCE_RE = re.compile(r"[^.!?]*[.!?]")
+EMOJI_START_RE = re.compile(r"^[\U00010000-\U0010ffff\u2600-\u27bf\u2300-\u23ff\u2b50\u2b55\u200d\ufe0f\s]+")
+SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
 CLAIM_KEYWORDS = {
     "always", "never", "must", "guaranteed", "only",
     "vždy", "nikdy", "musí", "pouze", "zaručeně",
 }
+
+def _clean_and_extract_claims_from_text(text: str) -> list[str]:
+    stripped_text = FENCE_RE.sub("", text)
+    lines = stripped_text.splitlines()
+    blocks: list[str] = []
+    current: list[str] = []
+    for line in lines:
+        trimmed = line.strip()
+        if not trimmed:
+            if current:
+                blocks.append(" ".join(current))
+                current = []
+            continue
+        is_bullet = bool(re.match(r"^(\s*[-*+]\s+|\s*\d+\.\s+)", line))
+        is_heading = bool(re.match(r"^\s*#+", line))
+        if (is_bullet or is_heading) and current:
+            blocks.append(" ".join(current))
+            current = []
+        current.append(trimmed)
+    if current:
+        blocks.append(" ".join(current))
+
+    claims: list[str] = []
+    seen: set[str] = set()
+    for block in blocks:
+        block = re.sub(r"^\s*#+\s*", "", block)
+        block = re.sub(r"^(\s*[-*+]\s+|\s*\d+\.\s+)", "", block)
+        block = EMOJI_START_RE.sub("", block)
+        block = block.replace("**", "").replace("__", "")
+        block = re.sub(r"(?<!\w)[*_](.*?)[*_](?!\w)", r"\1", block)
+        block = block.replace("*", "").strip()
+        if not block:
+            continue
+        sentences = SENTENCE_SPLIT_RE.split(block)
+        for s in sentences:
+            s = s.strip()
+            if not s:
+                continue
+            has_kw = any(re.search(r"\b" + re.escape(kw) + r"\b", s, re.IGNORECASE) for kw in CLAIM_KEYWORDS)
+            if not has_kw:
+                continue
+            if len(s) > 200:
+                match = list(re.finditer(r"[.!?](?:\s|$)", s[:200]))
+                if match:
+                    s = s[:match[-1].end()].strip()
+                else:
+                    last_space = s[:200].rfind(" ")
+                    if last_space > 50:
+                        s = s[:last_space].strip() + "..."
+                    else:
+                        s = s[:200].strip()
+            if s and s not in seen:
+                claims.append(s)
+                seen.add(s)
+    return claims
+
 
 def _extract_claims(docs_root: Path, doc_globs: tuple[str, ...]) -> list[str]:
     claims: list[str] = []
@@ -204,18 +261,10 @@ def _extract_claims(docs_root: Path, doc_globs: tuple[str, ...]) -> list[str]:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        # Skip code blocks
-        stripped_text = FENCE_RE.sub("", text)
-        for sentence_match in SENTENCE_RE.finditer(stripped_text):
-            sentence = sentence_match.group(0).strip()
-            if not sentence:
-                continue
-            for keyword in CLAIM_KEYWORDS:
-                if re.search(r"\b" + re.escape(keyword) + r"\b", sentence, re.IGNORECASE):
-                    if sentence not in seen_claims:
-                        claims.append(sentence)
-                        seen_claims.add(sentence)
-                    break
+        for claim in _clean_and_extract_claims_from_text(text):
+            if claim not in seen_claims:
+                claims.append(claim)
+                seen_claims.add(claim)
         if len(claims) >= 50:
             break
     return claims[:50]
@@ -410,17 +459,25 @@ def inspect(
         "heuristic": report.to_dict(),
         "execution": execution or {},
     }
+    raw = None
+    llm_status = "none"
     try:
-        raw = complete(
+        raw, llm_status = complete_with_status(
             system_prompt=load_prompt("lexi.md"),
             user_payload=payload,
             config=config,
         )
-    except Exception:
-        return report
+    except Exception as exc:
+        llm_status = format_llm_error(exc)
+        raw = None
+
+    report.llm_status = llm_status
     if not raw:
         return report
     parsed = parse_yaml_block(raw)
     if not parsed:
+        report.llm_status = "fallback: invalid YAML"
         return report
-    return _from_llm(parsed, report)
+    result = _from_llm(parsed, report)
+    result.llm_status = "ok"
+    return result

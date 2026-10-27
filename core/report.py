@@ -28,6 +28,7 @@ def render_markdown(report: FinalReport) -> str:
     for item in report.role_results:
         lines.append(f"### {item.role} / {item.stage} (iter {item.iteration})")
         lines.append(f"- verdict: **{item.verdict}**")
+        lines.append(f"- llm: {item.llm}")
         lines.append(f"- {item.summary}")
         lines.append("")
     lines += ["## Drift (Lexi)", "", "```yaml", _yaml(report.drift), "```", ""]

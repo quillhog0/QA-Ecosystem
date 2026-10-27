@@ -63,6 +63,13 @@ def test_isolation_destination_avoids_nested_reports(tmp_path: Path):
     assert nested_in_reports is False
 
 
+def test_isolation_destination_with_custom_reports_dir(tmp_path: Path):
+    live = tmp_path / "proj"
+    custom_reports = tmp_path / "custom_reports_dir"
+    dest = isolation_destination(live_root=live, reports_dir=custom_reports, run_id="r_custom")
+    assert str(dest.resolve()).startswith("/tmp/qa-agent-ecosystem-isolations/")
+
+
 def test_git_worktree_leak(tmp_path: Path):
     live = mini_project(tmp_path / "repo")
     subprocess.run(["git", "init"], cwd=live, check=True, capture_output=True)

@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from agents.adapters import complete, load_prompt, parse_yaml_block
+from agents.adapters import complete, complete_with_status, format_llm_error, load_prompt, parse_yaml_block
 from core.packets import RedTeamReview, TestPlan, Verdict
 
 FAILED_LINE_RE = re.compile(
@@ -210,18 +210,24 @@ def _small_exec(execution: dict[str, Any]) -> dict[str, Any]:
 def _maybe_llm(
     review: RedTeamReview, payload: dict[str, Any], config: dict[str, Any]
 ) -> RedTeamReview:
+    raw = None
+    llm_status = "none"
     try:
-        raw = complete(
+        raw, llm_status = complete_with_status(
             system_prompt=load_prompt("riley.md"),
             user_payload={**payload, "heuristic": review.to_dict()},
             config=config,
         )
-    except Exception:
-        return review
+    except Exception as exc:
+        llm_status = format_llm_error(exc)
+        raw = None
+
+    review.llm_status = llm_status
     if not raw:
         return review
     parsed = parse_yaml_block(raw)
     if not parsed:
+        review.llm_status = "fallback: invalid YAML"
         return review
     verdict = str(parsed.get("verdict") or review.verdict).upper()
     if verdict not in {Verdict.CLEAR.value, Verdict.VETO.value}:
@@ -235,4 +241,5 @@ def _maybe_llm(
         required_changes=[str(c) for c in (parsed.get("required_changes") or review.required_changes)],
         root_cause=root if verdict == Verdict.VETO.value else "",
         notes=str(parsed.get("notes") or review.notes),
+        llm_status="ok",
     )
