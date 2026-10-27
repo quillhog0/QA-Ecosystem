@@ -1,4 +1,4 @@
-import q-nonexistent_pkg_xyz
+import qa_nonexistent_pkg_xyz
 
 def add(left: int, right: int) -> int:
     return left + right

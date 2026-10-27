@@ -1,4 +1,4 @@
 verdict: VETO
 escalation: ""
 exit_code: 1
-root_cause: "missing dependency: q-nonexistent_pkg_xyz (not installable or not declared in requirements)"
+root_cause: "missing dependency: qa_nonexistent_pkg_xyz"

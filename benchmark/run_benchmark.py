@@ -94,6 +94,12 @@ def run_fixture(fixture: Path, reports_dir: Path) -> dict:
         "skipped_secrets": skipped,
         "report": report,
         "install_status": install_status,
+        "root_cause": str(
+            (report.get("post_audit") or {}).get("root_cause")
+            or (report.get("post_audit") or {}).get("riley", {}).get("root_cause")
+            or report.get("root_cause")
+            or ""
+        ),
     }
 
 
@@ -111,6 +117,17 @@ def evaluate(result: dict, expected: dict) -> tuple[bool, str]:
     exp_install_status = expected.get("install_status")
     if exp_install_status and str(result.get("install_status") or "") != str(exp_install_status):
         problems.append(f"install_status {result.get('install_status')!r} != {exp_install_status!r}")
+    exp_root_cause = expected.get("root_cause")
+    if exp_root_cause:
+        actual_root_cause = str(
+            result.get("root_cause")
+            or ((result.get("report") or {}).get("post_audit") or {}).get("root_cause")
+            or ((result.get("report") or {}).get("post_audit") or {}).get("riley", {}).get("root_cause")
+            or (result.get("report") or {}).get("root_cause")
+            or ""
+        )
+        if str(exp_root_cause) not in actual_root_cause:
+            problems.append(f"root_cause {exp_root_cause!r} not in {actual_root_cause!r}")
     if expected.get("assert_live_hash") and not result["live_hash_unchanged"]:
         problems.append("live tree hash changed")
     needle = expected.get("assert_secret_absent")

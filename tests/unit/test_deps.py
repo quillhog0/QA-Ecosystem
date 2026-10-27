@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -44,11 +45,11 @@ def test_parse_failure_root_cause_missing_dependency():
     assert root_cause == "missing dependency: solders (not installable or not declared in requirements)"
 
 
+@pytest.mark.skipif(os.environ.get("QA_NETWORK_TESTS") != "1", reason="network test")
 def test_prepare_venv_installs_deps_and_pytest(tmp_path: Path):
     root = mini_project(tmp_path / "proj", with_tests=False, docs="")
     (root / "requirements.txt").write_text("requests", encoding="utf-8")
     work_dir = tmp_path / "work"
-    print(f"DEBUG: work_dir = {work_dir}")
     python_executable, status = prepare_venv(root, work_dir, timeout=300)
     assert python_executable is not None
     assert status == "ok"
@@ -69,9 +70,3 @@ def test_prepare_venv_installs_deps_and_pytest(tmp_path: Path):
         check=True,
     )
     assert "Name: requests" in result.stdout
-
-
-# Add to config.yaml sable.allow_in_tests
-# - path: tests/unit/test_deps.py
-#   call: subprocess.run
-#   reason: venv creation and pip install verification

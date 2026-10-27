@@ -125,12 +125,15 @@ def review_results(
             config,
         )
     if errors:
+        root = failure_cause or (
+            "pytest reported collection or runtime errors; results are not a clean verdict"
+        )
         return _maybe_llm(
             RedTeamReview(
                 verdict=Verdict.VETO.value,
                 gaps=gaps,
                 required_changes=[],
-                root_cause="pytest reported collection or runtime errors; results are not a clean verdict",
+                root_cause=root,
                 notes="errors must be explained before CLEAR",
             ),
             {"phase": "results", "plan": plan.to_dict(), "execution": _small_exec(execution)},
