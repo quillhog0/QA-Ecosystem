@@ -1,38 +1,63 @@
 # QA Agent Ecosystem
 
-Deterministic control plane with six roles. It takes documentation plus a Python project (or a tree that already contains tests), walks a fixed test cycle in an **isolated copy**, and writes a structured report. It does not patch code, does not run against production, does not read secrets, and does not promise coverage.
+Deterministic QA control plane with six roles. Give it documentation plus a Python project; it walks a fixed test cycle in an **isolated copy** and returns a structured report with a verdict: `CLEAR`, `VETO`, or `ESCALATE`.
+
+It does not patch code, does not run against production, does not read secrets, and does not promise coverage. It answers one question: *do the docs, the code, and the tests actually agree, and does the suite prove what the docs claim?*
+
+## Why
+
+Green tests are not the same as verified claims. A README can promise "never transfers tokens" while no test checks it. This system extracts the claims from the docs, maps each one to the tests that cover it, runs the suite in isolation, and reports the gaps.
 
 ## Roles
 
 | Role | Kind | Job |
 |------|------|-----|
 | **Vesper** | code | Orchestrator: isolation, packets, iteration caps, escalation |
-| **Lexi** | judgment | Docs vs code vs tests. `VETO` on drift |
-| **Aria** | judgment | Scenarios and acceptance criteria |
-| **Riley** | judgment | Adversarial review. Technical `VETO` with root cause |
+| **Lexi** | judgment | Docs vs code vs tests. Extracts claims from docs. `VETO` on drift |
+| **Aria** | judgment | Scenarios, acceptance criteria, claim-to-test coverage mapping |
+| **Riley** | judgment | Adversarial review. Technical `VETO` with root cause, flags uncovered claims |
 | **Sable** | policy-as-code | Pre-flight: no secrets, no live tree, pytest-only, no destructive commands. `BLOCK` on risk |
-| **Nova** | code | Run pytest in the copy. Collect counts and exit code. Never repairs |
+| **Nova** | code | Per-project venv, dependency install, pytest in the copy. Never repairs |
 
-Veto order: **Sable > Riley > Lexi**. Max **2** iterations per stage. If the loop cannot close: `ESCALATE: DOMAIN_EXPERT`.
+Roles exchange only structured packets (`core/packets.py`), never free chat. Veto order: **Sable > Riley > Lexi**. Max **2** iterations per stage. If the loop cannot close: `ESCALATE: DOMAIN_EXPERT`.
+
+Judgment roles run on deterministic heuristics by default. An LLM is optional, and every report states per role whether it was used: `llm: none`, `llm: ok`, or `llm: fallback: <reason>`.
 
 ## Loop
 
-1. Vesper → Lexi (drift)
-2. Lexi OK → Aria (plan)
+1. Vesper → Lexi (drift + claims)
+2. Lexi OK → Aria (plan + claim coverage)
 3. Aria → Riley (plan review)
 4. Riley OK → Sable (pre-flight)
-5. Sable OK → Nova (pytest in the copy)
+5. Sable OK → Nova (venv + pytest in the copy)
 6. Nova → Riley + Lexi (post-audit)
 7. Vesper closes or escalates
 
+## Example output
+
+Run against a small open-source Solana transaction library (5 tests, 7 documented invariants):
+
+```
+verdict=CLEAR
+nova / execute: collected=5 passed=5 failed=0 exit=0 install=ok
+```
+
+| claim (from README) | covered_by | score |
+|---|---|---|
+| MTU Safety: payload fits inside the 1232-byte UDP MTU | test_mtu_batch_size_cap | 9 |
+| Integer Financials: pure integer lamport arithmetic | test_integer_lamport_conversion | 6 |
+| Strict Invariant Guard: `dest == owner == signer` | test_dest_equals_owner_invariant | 15 |
+| The compiler never generates, accesses, or holds private keys | **none** | 1 |
+
+The suite is green, yet one security claim has no test. Riley records it as a gap: `claim not covered by tests`.
+
 ## Isolation
 
-- Prefer a detached `git worktree` of `HEAD`. Otherwise copy the tree.
-- The live working tree is never checked out or written.
+- Every run works on a copy under the system temp dir: `<tmp>/qa-agent-ecosystem-isolations/<run_id>/isolated_copy`, regardless of `--reports-dir`.
+- The live working tree is never checked out, written, or deleted.
 - `.env`, keys, and credential filenames are skipped.
-- Sources in the copy are made read-only. Pytest cache and logs go under `reports/<run_id>/`.
-- If `reports/` sits inside the project being copied, the isolated tree is created under a process temp directory so the copy cannot nest into itself.
-- Default is **dry-run**: no live actions, no secret access, logs archived. Live trees are never deleted.
+- Nova builds a venv in the run's work dir and installs the project's declared dependencies (`requirements.txt` / `pyproject.toml`). Only `pip install` may use the network; pytest runs with network off unless `--allow-network` is passed.
+- Default is **dry-run**: no live actions, no secret access, logs archived.
 
 ## Install
 
@@ -48,7 +73,7 @@ pip install -r requirements.txt
 python main.py --project /path/to/project --docs /path/to/docs
 ```
 
-Writes `reports/<run_id>.md` and `reports/<run_id>.yaml`.
+Writes `reports/<run_id>.md` and `reports/<run_id>.yaml` (or into `--reports-dir`).
 
 Process exit code: `0` = `CLEAR`, `1` = `VETO` or `ESCALATE`.
 
@@ -58,7 +83,7 @@ Process exit code: `0` = `CLEAR`, `1` = `VETO` or `ESCALATE`.
 python main.py --project examples/sample-project --docs examples/sample-project/docs
 ```
 
-## Testy a benchmark
+## Tests and benchmark
 
 ```bash
 pytest
@@ -66,9 +91,22 @@ python benchmark/run_benchmark.py
 python main.py --self-test
 ```
 
-- `pytest` runs `tests/unit/` and the fixture benchmark (`tests/test_benchmark.py`).
-- `python benchmark/run_benchmark.py` walks `benchmark/fixtures/`, compares each run to `expected.yaml`, prints a table, and writes `reports/benchmark-<ts>.md`. Exit `0` only when every fixture matches.
-- `python main.py --self-test` runs the QA cycle on this repository (`project=.`, docs = `README.md` + `schemas/`). The isolated copy is placed outside this tree’s `reports/`.
+- `pytest` runs `tests/unit/` and the fixture benchmark (`tests/test_benchmark.py`). The one network test runs only with `QA_NETWORK_TESTS=1`.
+- `python benchmark/run_benchmark.py` walks `benchmark/fixtures/`, compares verdict, exit code, `install_status`, and `root_cause` to each `expected.yaml`, and writes `reports/benchmark-<ts>.md`. Exit `0` only when every fixture matches.
+- `python main.py --self-test` runs the QA cycle on this repository (`project=.`, docs = `README.md` + `schemas/`).
+
+Benchmark fixtures:
+
+| fixture | expected |
+|---|---|
+| clean | CLEAR |
+| live_tree_guard | CLEAR, live tree untouched |
+| secret_leak | CLEAR, `.env` never copied |
+| dangerous_test | BLOCK/VETO by Sable |
+| doc_drift | VETO by Lexi |
+| failing_test | VETO by Riley |
+| missing_dep | VETO, root cause `missing dependency: <pkg>` |
+| no_tests | VETO |
 
 ## Config
 
@@ -78,10 +116,10 @@ See `config.yaml`.
 - `allow_network` (default false): Nova env gets dead proxies; Sable still forbids curl/wget
 - `max_iterations`: per-stage cap (default 2)
 - `llm.provider`: `none` (heuristics), `openrouter`, or `local`
+- `nova.install_deps`, `nova.pip_timeout`: dependency install in the isolated venv
+- `lexi.doc_globs`, `lexi.ignore_identifiers`: which docs to read, which terms to ignore
 
-Judgment roles (Lexi, Aria, Riley) use heuristics when no LLM is configured. Sable and Nova never depend on a model.
-
-OpenRouter is used only when `OPENROUTER_API_KEY` is set, `llm.provider` is `openrouter`, dry-run LLM is allowed, and `--allow-network` is on. The key is not written into reports.
+Sable and Nova never depend on a model. OpenRouter is used only when `OPENROUTER_API_KEY` is set, `llm.provider` is `openrouter`, dry-run LLM is allowed, and `--allow-network` is on. The key is never written into reports.
 
 ## What this is not
 
