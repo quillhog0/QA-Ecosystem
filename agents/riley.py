@@ -106,6 +106,9 @@ def review_results(
         gaps.append(f"pytest collection/execution errors={errors}")
     if not plan.scenarios:
         gaps.append("no plan to compare against results")
+    for s in plan.scenarios:
+        if s.id.startswith("C") and not s.covered_by:
+            gaps.append(f"claim not covered by tests: {s.id}")
 
     failure_cause = parse_failure_root_cause(
         str(execution.get("stdout") or ""),

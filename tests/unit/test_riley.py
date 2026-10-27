@@ -81,3 +81,39 @@ def test_riley_collection_error_missing_dependency():
     )
     assert review.verdict == Verdict.VETO.value
     assert "missing dependency: qa_nonexistent_pkg_xyz" in review.root_cause
+
+
+def test_riley_records_gap_for_uncovered_claim():
+    plan = TestPlan(
+        scenarios=[
+            Scenario(
+                id="C1",
+                title="Never burns tokens",
+                steps=["verify"],
+                acceptance=["pass"],
+                negative=False,
+                covered_by=[],
+            ),
+            Scenario(
+                id="S1",
+                title="negative path",
+                steps=["run tests"],
+                acceptance=["fail on error"],
+                negative=True,
+            ),
+        ]
+    )
+    execution = {
+        "collected": 1,
+        "passed": 1,
+        "failed": 0,
+        "errors": 0,
+        "exit_code": 0,
+        "stdout": "1 passed",
+        "stderr": "",
+    }
+    review = review_results(
+        plan, execution, config={"llm": {"provider": "none"}, "dry_run": True}
+    )
+    assert review.verdict == Verdict.CLEAR.value
+    assert "claim not covered by tests: C1" in review.gaps

@@ -2,12 +2,79 @@
 
 from __future__ import annotations
 
+import ast
 from pathlib import Path
+import re
 from typing import Any
 
 from agents.adapters import complete, complete_with_status, format_llm_error, load_prompt, parse_yaml_block
 from agents.inventory import doc_tokens, list_python, public_names, split_code_and_tests
 from core.packets import Scenario, TestPlan
+
+STOP_WORDS = {
+    "this", "that", "with", "from", "have", "been", "only", "also", "into",
+    "more", "some", "such", "than", "them", "then", "there", "these", "they",
+    "will", "would", "about", "above", "after", "again", "against", "cannot",
+    "does", "doing", "down", "during", "each", "further", "here", "itself",
+    "just", "most", "other", "over", "same", "should", "very", "what", "when",
+    "where", "which", "while", "true", "claim", "verify", "tento", "tato", "toto",
+    "jsou", "bude", "nebo", "jako", "pres", "podle"
+}
+
+
+def _collect_test_functions(test_files: list[Path], project_root: Path) -> list[tuple[str, str, str]]:
+    """Return list of (test_id, func_name, full_text_lower)."""
+    tests = []
+    for path in test_files:
+        try:
+            rel = str(path.relative_to(project_root)).replace("\\", "/")
+        except ValueError:
+            rel = path.name
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+            lines = text.splitlines()
+            tree = ast.parse(text)
+        except (OSError, SyntaxError):
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if node.name.startswith("test_") or "test" in node.name.lower():
+                    start = max(0, node.lineno - 1)
+                    end = node.end_lineno if hasattr(node, "end_lineno") and node.end_lineno else start + 40
+                    body_text = "\n".join(lines[start:end])
+                    full_text = (node.name + " " + body_text).lower()
+                    test_id = f"{rel}::{node.name}"
+                    tests.append((test_id, node.name, full_text))
+    return tests
+
+
+def _find_covering_tests(claim: str, tests: list[tuple[str, str, str]]) -> list[str]:
+    words = re.findall(r"[A-Za-z0-9_]+", claim)
+    keywords = [w.lower() for w in words if len(w) >= 4 and w.lower() not in STOP_WORDS]
+    if not keywords:
+        return []
+
+    covered = []
+    for test_id, func_name, full_text in tests:
+        name_lower = func_name.lower()
+        matched = False
+        for kw in keywords:
+            if kw in full_text:
+                matched = True
+                break
+            stem = kw.rstrip("s")
+            if len(stem) >= 4 and stem in full_text:
+                matched = True
+                break
+            for part in name_lower.split("_"):
+                if len(part) >= 4 and (part in kw or kw in part):
+                    matched = True
+                    break
+            if matched:
+                break
+        if matched:
+            covered.append(test_id)
+    return covered
 
 
 def _heuristic_plan(
@@ -21,8 +88,10 @@ def _heuristic_plan(
     code_files, test_files = split_code_and_tests(py_files, project_root)
     tokens, excerpt = doc_tokens(docs_root)
     scenarios: list[Scenario] = []
+    tests = _collect_test_functions(test_files, project_root)
 
     for i, claim in enumerate(claims, start=1):
+        covered = _find_covering_tests(claim, tests)
         scenarios.append(
             Scenario(
                 id=f"C{i}",
@@ -30,6 +99,7 @@ def _heuristic_plan(
                 steps=["Verify this claim is true"],
                 acceptance=["Claim is true"],
                 negative=False,
+                covered_by=covered,
             )
         )
 
@@ -140,10 +210,16 @@ def _from_llm(data: dict[str, Any], fallback: TestPlan) -> TestPlan:
                 steps=[str(s) for s in (item.get("steps") or [])],
                 acceptance=[str(s) for s in (item.get("acceptance") or [])],
                 negative=bool(item.get("negative")),
+                covered_by=[str(c) for c in (item.get("covered_by") or [])],
             )
         )
     if not scenarios:
         scenarios = fallback.scenarios
+    else:
+        fallback_map = {s.id: s.covered_by for s in fallback.scenarios if s.covered_by}
+        for s in scenarios:
+            if not s.covered_by and s.id in fallback_map:
+                s.covered_by = fallback_map[s.id]
     return TestPlan(
         scenarios=scenarios,
         coverage_notes=str(data.get("coverage_notes") or fallback.coverage_notes),

@@ -33,6 +33,18 @@ def render_markdown(report: FinalReport) -> str:
         lines.append("")
     lines += ["## Drift (Lexi)", "", "```yaml", _yaml(report.drift), "```", ""]
     lines += ["## Plan (Aria)", "", "```yaml", _yaml(report.plan), "```", ""]
+    claim_scenarios = [
+        s for s in (report.plan.get("scenarios") or [])
+        if str(s.get("id") or "").startswith("C")
+    ]
+    if claim_scenarios:
+        lines += ["## Claim coverage", "", "| tvrzení | covered_by |", "|---|---|"]
+        for s in claim_scenarios:
+            title = str(s.get("title") or "").replace("|", "\\|")
+            covered = s.get("covered_by") or []
+            covered_str = ", ".join(covered) if covered else "ŽÁDNÝ"
+            lines.append(f"| {title} | {covered_str} |")
+        lines.append("")
     lines += ["## Policy (Sable)", "", "```yaml", _yaml(report.policy), "```", ""]
     exec_view = dict(report.execution)
     if "stdout" in exec_view:

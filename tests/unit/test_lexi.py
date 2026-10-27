@@ -170,3 +170,33 @@ def test_lexi_clean_claims_without_markdown_and_intro(tmp_path: Path):
         config={"llm": {"provider": "none"}, "dry_run": True},
     )
     assert report.claims == ["Zero Burns: Never burns tokens."]
+
+
+def test_lexi_extracts_labeled_bullet_without_keywords(tmp_path: Path):
+    root = mini_project(
+        tmp_path / "proj",
+        docs="* **MTU Safety:** Payload is capped at 1232 bytes.",
+    )
+    report = inspect(
+        docs_root=root / "docs",
+        project_root=root,
+        config={"llm": {"provider": "none"}, "dry_run": True},
+    )
+    assert report.claims == ["MTU Safety: Payload is capped at 1232 bytes."]
+
+
+def test_lexi_no_false_drift_on_code_function_term(tmp_path: Path):
+    root = mini_project(
+        tmp_path / "proj",
+        code={
+            "core.py": "def create_close_account_instruction():\n    pass\n",
+        },
+        docs="# API\n\nMentions `CloseAccount`.\n",
+    )
+    report = inspect(
+        docs_root=root / "docs",
+        project_root=root,
+        config={"llm": {"provider": "none"}, "dry_run": True},
+    )
+    assert not any(f.kind == "domain_term" for f in report.findings)
+    assert not any(f.path == "CloseAccount" for f in report.findings)

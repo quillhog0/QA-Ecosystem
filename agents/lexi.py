@@ -197,6 +197,8 @@ CLAIM_KEYWORDS = {
     "vždy", "nikdy", "musí", "pouze", "zaručeně",
 }
 
+LABELED_BULLET_RE = re.compile(r"^\s*[-*+]?\s*\*\*[^*]+?(\*\*:|\:\*\*)\s*")
+
 def _clean_and_extract_claims_from_text(text: str) -> list[str]:
     stripped_text = FENCE_RE.sub("", text)
     lines = stripped_text.splitlines()
@@ -221,6 +223,7 @@ def _clean_and_extract_claims_from_text(text: str) -> list[str]:
     claims: list[str] = []
     seen: set[str] = set()
     for block in blocks:
+        is_labeled = bool(LABELED_BULLET_RE.search(block))
         block = re.sub(r"^\s*#+\s*", "", block)
         block = re.sub(r"^(\s*[-*+]\s+|\s*\d+\.\s+)", "", block)
         block = EMOJI_START_RE.sub("", block)
@@ -230,12 +233,12 @@ def _clean_and_extract_claims_from_text(text: str) -> list[str]:
         if not block:
             continue
         sentences = SENTENCE_SPLIT_RE.split(block)
-        for s in sentences:
+        for idx, s in enumerate(sentences):
             s = s.strip()
             if not s:
                 continue
             has_kw = any(re.search(r"\b" + re.escape(kw) + r"\b", s, re.IGNORECASE) for kw in CLAIM_KEYWORDS)
-            if not has_kw:
+            if not has_kw and not (is_labeled and idx == 0):
                 continue
             if len(s) > 200:
                 match = list(re.finditer(r"[.!?](?:\s|$)", s[:200]))
@@ -270,6 +273,42 @@ def _extract_claims(docs_root: Path, doc_globs: tuple[str, ...]) -> list[str]:
     return claims[:50]
 
 
+def _collect_code_ast_terms(code_files: list[Path]) -> tuple[set[str], set[str]]:
+    all_identifiers: set[str] = set()
+    function_names: set[str] = set()
+    for path in code_files:
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, SyntaxError):
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                function_names.add(node.name)
+                all_identifiers.add(node.name)
+            elif isinstance(node, ast.ClassDef):
+                all_identifiers.add(node.name)
+            elif isinstance(node, ast.Name):
+                all_identifiers.add(node.id)
+            elif isinstance(node, ast.Attribute):
+                all_identifiers.add(node.attr)
+    return all_identifiers, function_names
+
+
+def _is_code_term(ident: str, all_identifiers: set[str], function_names: set[str]) -> bool:
+    if ident in all_identifiers:
+        return True
+    snake = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", ident).lower()
+    upper = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", ident).upper()
+    variants = {ident, snake, upper, ident.lower(), ident.upper()}
+    if any(v in all_identifiers for v in variants):
+        return True
+    if snake and len(snake) >= 3:
+        for fn in function_names:
+            if snake in fn.lower():
+                return True
+    return False
+
+
 def _heuristic_drift(
     *,
     docs_root: Path,
@@ -289,6 +328,7 @@ def _heuristic_drift(
 
     imported_names = _imported_names(project_root)
     code_text_content = _collect_code_text_content(project_root)
+    all_code_identifiers, function_names = _collect_code_ast_terms(code_files)
 
     code_index: dict[str, str] = {}
     for path in code_files:
@@ -327,6 +367,8 @@ def _heuristic_drift(
         if ident in imported_names:
             continue
         if ident in code_index:
+            continue
+        if _is_code_term(ident, all_code_identifiers, function_names):
             continue
         if ident in code_text_content:
             findings.append(

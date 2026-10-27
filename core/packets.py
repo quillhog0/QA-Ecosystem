@@ -103,6 +103,7 @@ class Scenario:
     steps: list[str]
     acceptance: list[str]
     negative: bool = False
+    covered_by: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
