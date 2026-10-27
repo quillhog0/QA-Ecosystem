@@ -74,11 +74,12 @@ def build_pytest_command(
     cache_dir: Path,
     basetemp: Path,
     extra_args: list[str] | None = None,
+    python: Path | None = None,
 ) -> list[str]:
     cache_dir.mkdir(parents=True, exist_ok=True)
     basetemp.mkdir(parents=True, exist_ok=True)
     cmd = [
-        sys.executable,
+        str(python) if python else sys.executable,
         "-m",
         "pytest",
         str(isolated_root),
@@ -121,14 +122,16 @@ def run_pytest(
     allow_network: bool,
     timeout: int = 120,
     extra_args: list[str] | None = None,
+    python: Path | None = None,
 ) -> ExecutionResult:
     """Execute pytest against the isolated tree. Does not modify the live project."""
     import subprocess
 
     cache_dir = work_dir / "pytest_cache"
     basetemp = work_dir / "pytest_tmp"
+    pytest_log_path = work_dir / "pytest.log"
     command = build_pytest_command(
-        isolated_root, cache_dir=cache_dir, basetemp=basetemp, extra_args=extra_args
+        isolated_root, cache_dir=cache_dir, basetemp=basetemp, extra_args=extra_args, python=python
     )
     env = sanitized_env(allow_network=allow_network)
     env["HOME"] = str(work_dir / "home")
@@ -151,6 +154,7 @@ def run_pytest(
         )
         stdout = proc.stdout or ""
         stderr = proc.stderr or ""
+        pytest_log_path.write_text(stdout + stderr, encoding="utf-8")
         exit_code = proc.returncode
     except subprocess.TimeoutExpired as exc:
         stdout = (exc.stdout or "") if isinstance(exc.stdout, str) else ""

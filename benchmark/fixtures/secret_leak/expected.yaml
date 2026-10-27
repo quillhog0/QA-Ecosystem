@@ -1,6 +1,7 @@
 verdict: CLEAR
 escalation: ""
 exit_code: 0
+install_status: no dependency manifest
 skipped_secrets_contains:
   - .env
 assert_secret_absent: .env

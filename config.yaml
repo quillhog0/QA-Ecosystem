@@ -5,6 +5,10 @@ max_iterations: 2
 model: openai/gpt-4o-mini
 reports_dir: reports
 
+nova:
+  install_deps: true
+  pip_timeout: 300
+
 llm:
   # none | openrouter | local
   provider: none
@@ -24,6 +28,9 @@ sable:
     - path: tests/unit/test_self_test_cli.py
       call: subprocess.run
       reason: CLI self-test
+    - path: tests/unit/test_deps.py
+      call: subprocess.run
+      reason: venv creation and pip install verification
 
 lexi:
   doc_globs:

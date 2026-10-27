@@ -1,3 +1,4 @@
 verdict: CLEAR
 escalation: ""
 exit_code: 0
+install_status: no dependency manifest

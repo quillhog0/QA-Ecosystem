@@ -78,6 +78,10 @@ def run_fixture(fixture: Path, reports_dir: Path) -> dict:
         if "skipped_secrets" in details:
             skipped = list(details.get("skipped_secrets") or [])
             break
+    install_status = "skipped"
+    if "execution" in report and "install_status" in report["execution"]:
+        install_status = report["execution"]["install_status"]
+
     return {
         "name": fixture.name,
         "exit_code": proc.returncode,
@@ -89,6 +93,7 @@ def run_fixture(fixture: Path, reports_dir: Path) -> dict:
         "isolated_root": str(isolated),
         "skipped_secrets": skipped,
         "report": report,
+        "install_status": install_status,
     }
 
 
@@ -103,6 +108,9 @@ def evaluate(result: dict, expected: dict) -> tuple[bool, str]:
         problems.append(f"escalation {result.get('escalation')!r} != {exp_esc!r}")
     if int(result["exit_code"]) != int(expected.get("exit_code", 0)):
         problems.append(f"exit {result['exit_code']} != {expected.get('exit_code')}")
+    exp_install_status = expected.get("install_status")
+    if exp_install_status and str(result.get("install_status") or "") != str(exp_install_status):
+        problems.append(f"install_status {result.get('install_status')!r} != {exp_install_status!r}")
     if expected.get("assert_live_hash") and not result["live_hash_unchanged"]:
         problems.append("live tree hash changed")
     needle = expected.get("assert_secret_absent")

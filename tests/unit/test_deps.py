@@ -1,0 +1,77 @@
+from __future__ import annotations
+
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+from agents.riley import parse_failure_root_cause
+from core.deps import prepare_venv, _read_pyproject_deps
+from tests.support import mini_project
+
+
+def test_prepare_venv_no_manifest(tmp_path: Path):
+    root = mini_project(tmp_path / "proj", with_tests=False, docs="")
+    venv_path, status = prepare_venv(root, tmp_path / "work", timeout=1)
+    assert venv_path is None
+    assert status == "no dependency manifest"
+    assert not (tmp_path / "work" / "venv").exists()
+
+
+def test_read_pyproject_deps(tmp_path: Path):
+    pyproject_toml = tmp_path / "pyproject.toml"
+    pyproject_toml.write_text(
+        """[project]
+name = "my-package"
+version = "0.1.0"
+dependencies = ["foo", "bar"]
+
+[project.optional-dependencies]
+dev = ["baz"]
+test = ["qux"]
+""",
+        encoding="utf-8",
+    )
+    deps = _read_pyproject_deps(pyproject_toml)
+    assert sorted(deps) == sorted(["foo", "bar", "baz", "qux"])
+
+
+def test_parse_failure_root_cause_missing_dependency():
+    stdout = ""
+    stderr = "ModuleNotFoundError: No module named 'solders'\nTraceback (most recent call last):\n  File \"<stdin>\", line 1, in <module>\nImportError: No module named 'solders'"
+    root_cause = parse_failure_root_cause(stdout, stderr)
+    assert root_cause == "missing dependency: solders (not installable or not declared in requirements)"
+
+
+def test_prepare_venv_installs_deps_and_pytest(tmp_path: Path):
+    root = mini_project(tmp_path / "proj", with_tests=False, docs="")
+    (root / "requirements.txt").write_text("requests", encoding="utf-8")
+    work_dir = tmp_path / "work"
+    print(f"DEBUG: work_dir = {work_dir}")
+    python_executable, status = prepare_venv(root, work_dir, timeout=300)
+    assert python_executable is not None
+    assert status == "ok"
+    assert (tmp_path / "work" / "venv").exists()
+    # Verify pytest is installed
+    result = subprocess.run(
+        [str(python_executable), "-m", "pip", "show", "pytest"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "Name: pytest" in result.stdout
+    # Verify requests is installed
+    result = subprocess.run(
+        [str(python_executable), "-m", "pip", "show", "requests"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "Name: requests" in result.stdout
+
+
+# Add to config.yaml sable.allow_in_tests
+# - path: tests/unit/test_deps.py
+#   call: subprocess.run
+#   reason: venv creation and pip install verification

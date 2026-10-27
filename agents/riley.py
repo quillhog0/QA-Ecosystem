@@ -74,6 +74,12 @@ def parse_failure_root_cause(stdout: str, stderr: str = "") -> str:
             parts.append(f"{name} ({node})")
     if parts:
         return "pytest failures: " + "; ".join(parts)
+
+    if "ModuleNotFoundError: No module named" in text or "ImportError: No module named" in text:
+        match = re.search(r"No module named '([a-zA-Z0-9_.]+)'", text)
+        module_name = match.group(1) if match else "unknown"
+        return f"missing dependency: {module_name} (not installable or not declared in requirements)"
+
     return ""
 
 
@@ -88,6 +94,8 @@ def review_results(
     failed = int(execution.get("failed") or 0)
     exit_code = int(execution.get("exit_code") if execution.get("exit_code") is not None else -1)
     errors = int(execution.get("errors") or 0)
+    install_status = str(execution.get("install_status") or "skipped")
+
     if collected <= 0:
         gaps.append("collected tests == 0")
     if exit_code != 0:
@@ -124,6 +132,18 @@ def review_results(
                 required_changes=[],
                 root_cause="pytest reported collection or runtime errors; results are not a clean verdict",
                 notes="errors must be explained before CLEAR",
+            ),
+            {"phase": "results", "plan": plan.to_dict(), "execution": _small_exec(execution)},
+            config,
+        )
+    if install_status.startswith("pip install failed"):
+        return _maybe_llm(
+            RedTeamReview(
+                verdict=Verdict.VETO.value,
+                gaps=gaps,
+                required_changes=[],
+                root_cause=f"dependency installation failed: {install_status}",
+                notes="dependency installation failed",
             ),
             {"phase": "results", "plan": plan.to_dict(), "execution": _small_exec(execution)},
             config,

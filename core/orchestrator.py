@@ -266,6 +266,7 @@ class Vesper:
             work_dir=work_dir,
             allow_network=self.allow_network,
             timeout=self.timeout,
+            config=self.config,
         )
         nova_failed = execution.exit_code != 0 or execution.failed > 0
         nova_verdict = (
@@ -282,7 +283,7 @@ class Vesper:
                 summary=(
                     f"collected={execution.collected} passed={execution.passed} "
                     f"failed={execution.failed} exit={execution.exit_code} "
-                    f"duration={execution.duration_seconds}s"
+                    f"duration={execution.duration_seconds}s install={execution.install_status}"
                 ),
                 details={
                     "collected": execution.collected,
@@ -293,6 +294,7 @@ class Vesper:
                     "exit_code": execution.exit_code,
                     "duration_seconds": execution.duration_seconds,
                     "command": execution.command,
+                    "install_status": execution.install_status,
                 },
             ),
         )

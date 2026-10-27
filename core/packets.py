@@ -156,6 +156,7 @@ class ExecutionResult:
     stderr: str = ""
     command: list[str] = field(default_factory=list)
     isolated_root: str = ""
+    install_status: str = "skipped"
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
