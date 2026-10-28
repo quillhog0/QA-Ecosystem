@@ -256,6 +256,7 @@ class FinalReport:
     policy: dict[str, Any] = field(default_factory=dict)
     execution: dict[str, Any] = field(default_factory=dict)
     post_audit: dict[str, Any] = field(default_factory=dict)
+    mutation: dict[str, Any] = field(default_factory=dict)
     started_at: str = ""
     finished_at: str = ""
     tested_tree: str = ""

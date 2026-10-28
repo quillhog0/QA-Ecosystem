@@ -157,8 +157,38 @@ Benchmark fixtures:
 | no_tests | VETO |
 | malicious_conftest | BLOCK/VETO by Sable |
 | own_conftest | CLEAR |
+| strong_tests | CLEAR, 100% mutants killed by test suite |
 | tautology_test | VETO by Riley |
 | uncommitted_bug | VETO by Nova/Riley |
+| weak_tests | VETO, surviving mutants drop score below threshold |
+
+## Mutation testing
+
+An optional adversarial test quality audit evaluated by **Riley** after baseline test execution passes:
+
+- **Mutation operators:** AST-level mutations for comparisons (`< <= > >= == !=`), arithmetic (`+ -`), boolean constants (`True/False`), return values (`return expr -> return None`), and boolean operators (`and/or`).
+- **Isolation:** Each mutant runs in a clean working copy inside the Bubblewrap sandbox with Sable guards active.
+- **Scoring:** `score = killed / (killed + survived)`. If `mutation.min_score > 0` and the score falls below the threshold, Riley issues a `VETO`.
+- **Configuration:** Enabled only via system config or CLI flags `--mutation`, `--mutation-min-score [float]`, `--mutation-max-mutants [int]`. Tested projects can never modify or disable mutation settings.
+
+### Self-test results
+
+Running mutation testing on QA Ecosystem itself (`main.py --project . --docs README.md --mutation`, evaluating 30 deterministic mutants) yields:
+
+- **Score:** **43.3%** (13 killed, 17 survived, 0 timeout, 0 error)
+- **Surviving mutants (weak points):**
+  - `agents/adapters.py:80` (`and` → `or`) and `81` (`return None` → `return True`): unasserted fallback when model completion returns empty.
+  - `agents/adapters.py:120` (`or` → `and`): unasserted branch in adapter payload normalization.
+  - `agents/aria.py:230` (`False` → `True`): default flag in scenario token weighting.
+  - `agents/aria.py:296`, `318` (`or` → `and`): heuristic token overlap matching thresholds.
+  - `agents/riley.py:54` (`False` → `True`): weak test classification fallback.
+  - `agents/riley.py:289` (`return <expr>` → `return None`): unasserted helper return in review formatting.
+  - `core/isolation.py:330`, `336` (`True` → `False`): check flags on git worktree prune/cleanup subprocess calls.
+  - `core/orchestrator.py:41` (`True` → `False`): default flag handling in orchestrator init.
+  - `core/packets.py:140` (`return <expr>` → `return None`): helper representation in packets dataclass.
+  - `core/report.py:109` (`==` → `!=`): formatting boundary in report generator.
+  - `main.py:127` (`return <expr>` → `return None`): exit code helper function in CLI entrypoint.
+  - `policies/sable.py:140` (`+` → `-`), `176` (`!=` → `==`): string offset and AST node filter branches in AST security scanner.
 
 ## Config
 
@@ -168,6 +198,9 @@ See `config.yaml`.
 - `allow_network` (default false): Nova env gets dead proxies; Sable still forbids curl/wget
 - `max_iterations`: per-stage cap (default 2)
 - `sandbox.mode`: `auto` (default, uses bwrap when available), `required` (veto if bwrap missing), or `off`
+- `mutation.enabled`: `false` (default), enable mutation testing phase
+- `mutation.min_score`: `0.0` (default, report only); set > 0.0 to VETO if mutation score is below threshold
+- `mutation.max_mutants`: `30` (default), limit of mutants evaluated per run
 - `llm.provider`: `none` (heuristics), `openrouter`, or `local`
 - `nova.install_deps`, `nova.pip_timeout`: dependency install in the isolated venv
 - `lexi.doc_globs`, `lexi.ignore_identifiers`: which docs to read, which terms to ignore

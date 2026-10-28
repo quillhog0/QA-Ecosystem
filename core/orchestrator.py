@@ -404,14 +404,50 @@ class Vesper:
 
         # Veto hierarchy: Sable > Riley > Lexi (Sable applied first)
         if post_policy.verdict == Verdict.BLOCK.value:
+            report.mutation = {"status": "skipped", "reason": "baseline tests did not pass"}
             report.verdict = Verdict.VETO.value
             return
         if nova_failed or result_review.verdict == Verdict.VETO.value:
+            report.mutation = {"status": "skipped", "reason": "baseline tests did not pass"}
             report.verdict = Verdict.VETO.value
             return
         if post_drift.verdict == Verdict.VETO.value:
+            report.mutation = {"status": "skipped", "reason": "baseline tests did not pass"}
             report.verdict = Verdict.VETO.value
             return
+
+        mutation_cfg = dict(self.config.get("mutation") or {})
+        mutation_enabled = bool(mutation_cfg.get("enabled", False))
+
+        if not mutation_enabled:
+            report.mutation = {"status": "skipped", "reason": "disabled"}
+        else:
+            py_bin = None
+            venv_py = work_dir / ".venv" / "bin" / "python"
+            if venv_py.is_file():
+                py_bin = venv_py
+
+            mut_res = riley.audit_mutations(
+                isolated,
+                work_dir=work_dir,
+                config=self.config,
+                allow_network=self.allow_network,
+                python=py_bin,
+            )
+            report.mutation = mut_res
+            append_result(
+                self.role_results,
+                RoleResult(
+                    role=Role.RILEY.value,
+                    stage="mutation_audit",
+                    verdict=mut_res.get("verdict", Verdict.CLEAR.value),
+                    summary=mut_res.get("reason", "mutation testing complete"),
+                    details=mut_res,
+                ),
+            )
+            if mut_res.get("verdict") == Verdict.VETO.value:
+                report.verdict = Verdict.VETO.value
+                return
 
         append_result(
             self.role_results,

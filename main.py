@@ -72,6 +72,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Sandbox mode: auto (default), required, or off",
     )
+    parser.add_argument(
+        "--mutation",
+        action="store_true",
+        help="Enable mutation testing phase",
+    )
+    parser.add_argument(
+        "--mutation-min-score",
+        type=float,
+        default=None,
+        help="Minimum mutation score threshold (0.0 to 1.0) required to pass",
+    )
+    parser.add_argument(
+        "--mutation-max-mutants",
+        type=int,
+        default=None,
+        help="Maximum number of mutants to evaluate (default 30)",
+    )
     return parser.parse_args(argv)
 
 
@@ -124,6 +141,18 @@ def main(argv: list[str] | None = None) -> int:
         config.setdefault("sandbox", {})
         config["sandbox"] = dict(config.get("sandbox") or {})
         config["sandbox"]["mode"] = args.sandbox
+    if args.mutation:
+        config.setdefault("mutation", {})
+        config["mutation"] = dict(config.get("mutation") or {})
+        config["mutation"]["enabled"] = True
+    if args.mutation_min_score is not None:
+        config.setdefault("mutation", {})
+        config["mutation"] = dict(config.get("mutation") or {})
+        config["mutation"]["min_score"] = float(args.mutation_min_score)
+    if args.mutation_max_mutants is not None:
+        config.setdefault("mutation", {})
+        config["mutation"] = dict(config.get("mutation") or {})
+        config["mutation"]["max_mutants"] = int(args.mutation_max_mutants)
     if args.reports_dir:
         config["reports_dir"] = args.reports_dir
     else:
@@ -148,6 +177,8 @@ def main(argv: list[str] | None = None) -> int:
     if report.escalation:
         print(report.escalation)
     print(f"sandbox={report.sandbox}")
+    if report.mutation and report.mutation.get("status") == "completed":
+        print(f"mutation_score={report.mutation.get('score', 0.0):.2f}")
     print(f"report={reports_dir / (report.run_id + '.md')}")
     print(f"isolated_root={report.isolated_root}")
     return exit_code_for(report.verdict)

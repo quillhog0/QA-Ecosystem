@@ -57,6 +57,8 @@ def run_fixture(fixture: Path, reports_dir: Path) -> dict:
         "--reports-dir",
         str(reports_dir),
     ]
+    expected_data = load_expected(fixture)
+    cmd.extend(expected_data.get("args") or [])
     import shutil
     import subprocess
 

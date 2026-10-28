@@ -10,6 +10,10 @@
 - VETO enforcement when `sandbox.mode: required` is requested but Bubblewrap is unavailable.
 - Report status field `sandbox: bwrap` or `sandbox: unavailable` with clear warning.
 - Comprehensive unit tests and integration tests for sandbox constraints.
+- Custom AST-based mutation testing engine (`core/mutation.py`) with comparison, arithmetic, boolean constant, return value, and boolean operator mutators.
+- Optional Riley audit phase for mutation scoring (`mutation.enabled`, `mutation.min_score`, `mutation.max_mutants`) via system config or CLI flags `--mutation`, `--mutation-min-score`.
+- Mutation testing Markdown report section detailing mutation score and surviving mutants.
+- Added `strong_tests` and `weak_tests` benchmark fixtures.
 
 ## 0.1.0 (2026-10-28)
 

@@ -405,3 +405,24 @@ def _maybe_llm(
         notes=str(parsed.get("notes") or review.notes),
         llm_status="ok",
     )
+
+
+def audit_mutations(
+    isolated_root: Path,
+    *,
+    work_dir: Path,
+    config: dict[str, Any],
+    allow_network: bool = False,
+    python: Path | None = None,
+) -> dict[str, Any]:
+    """Execute mutation testing audit on the isolated copy."""
+    from core.mutation import run_mutation_testing
+
+    return run_mutation_testing(
+        isolated_root,
+        work_dir=work_dir,
+        config=config,
+        allow_network=allow_network,
+        python=python,
+    )
+

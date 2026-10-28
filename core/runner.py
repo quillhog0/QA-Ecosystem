@@ -121,6 +121,8 @@ def _parse_counts(output: str) -> tuple[int, int, int, int, int]:
             skipped = int(m.group("skipped"))
         if m.group("errors"):
             errors = int(m.group("errors"))
+    if not match and (passed > 0 or failed > 0):
+        collected = passed + failed + skipped + errors
     return collected, passed, failed, skipped, errors
 
 

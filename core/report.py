@@ -59,6 +59,33 @@ def render_markdown(report: FinalReport) -> str:
         exec_view["stderr"] = _short(str(exec_view.get("stderr") or ""), 2000)
     lines += ["## Execution (Nova)", "", "```yaml", _yaml(exec_view), "```", ""]
     lines += ["## Post-audit", "", "```yaml", _yaml(report.post_audit), "```", ""]
+    if report.mutation:
+        lines += ["## Mutation testing", ""]
+        status = report.mutation.get("status", "")
+        if status == "skipped":
+            lines.append(f"- **status:** skipped ({report.mutation.get('reason', 'disabled')})")
+        elif status == "completed":
+            score = float(report.mutation.get("score", 0.0))
+            killed = report.mutation.get("killed", 0)
+            survived = report.mutation.get("survived", 0)
+            timeout = report.mutation.get("timeout", 0)
+            error = report.mutation.get("error", 0)
+            min_score = report.mutation.get("min_score", 0.0)
+            lines.append("- **status:** completed")
+            lines.append(f"- **score:** {score:.1%} ({killed} killed, {survived} survived, {timeout} timeout, {error} error)")
+            lines.append(f"- **min_score:** {min_score}")
+            lines.append("")
+            survived_list = report.mutation.get("survived_mutants") or []
+            if survived_list:
+                lines += ["### Surviving mutants", ""]
+                for s in survived_list:
+                    loc = s.get("location", "")
+                    orig = str(s.get("original", "")).replace("`", "")
+                    mut = str(s.get("mutated", "")).replace("`", "")
+                    lines.append(f"- `{loc}`: `{orig}` → `{mut}`")
+            else:
+                lines.append("No mutants survived.")
+        lines.append("")
     lines += [
         "## Bounds",
         "",

@@ -1,0 +1,8 @@
+args:
+  - "--mutation"
+  - "--mutation-min-score"
+  - "0.8"
+verdict: CLEAR
+escalation: ""
+exit_code: 0
+install_status: no dependency manifest

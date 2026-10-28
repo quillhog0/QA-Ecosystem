@@ -1,0 +1,8 @@
+args:
+  - "--mutation"
+  - "--mutation-min-score"
+  - "0.85"
+verdict: VETO
+escalation: ""
+exit_code: 1
+install_status: no dependency manifest

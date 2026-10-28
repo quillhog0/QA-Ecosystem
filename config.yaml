@@ -9,6 +9,13 @@ reports_dir: reports
 sandbox:
   mode: auto
 
+mutation:
+  enabled: false
+  min_score: 0.0
+  max_mutants: 30
+  timeout_per_mutant: 30
+  seed: 42
+
 nova:
   install_deps: true
   pip_timeout: 300
@@ -41,6 +48,9 @@ sable:
     - path: core/isolation.py
       call: shutil.rmtree
       reason: cleanup isolated copy
+    - path: core/mutation.py
+      call: shutil.rmtree
+      reason: cleanup mutant workspace
     - path: main.py
       call: shutil.rmtree
       reason: cleanup self-test temp docs
