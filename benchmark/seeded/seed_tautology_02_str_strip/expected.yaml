@@ -1,0 +1,3 @@
+category: tautology_test
+verdict: VETO
+description: "normalize_header appends spaces instead of stripping; test has assert True."

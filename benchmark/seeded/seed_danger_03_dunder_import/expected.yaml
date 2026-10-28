@@ -1,0 +1,3 @@
+category: dangerous_test
+verdict: VETO
+description: "Test dynamically invokes __import__('math')."

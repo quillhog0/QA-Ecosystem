@@ -1,0 +1,3 @@
+category: untested_code_bug
+verdict: VETO
+description: "apply_discount returns 0 despite doc claim; test only verifies get_tax."

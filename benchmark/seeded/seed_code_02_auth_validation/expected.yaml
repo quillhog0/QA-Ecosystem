@@ -1,0 +1,3 @@
+category: untested_code_bug
+verdict: VETO
+description: "verify_token accepts expired token; test only verifies session check."

@@ -1,0 +1,3 @@
+category: tautology_test
+verdict: VETO
+description: "compute_hash returns int instead of hex string; test has no assertions."

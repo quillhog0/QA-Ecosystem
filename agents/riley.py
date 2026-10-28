@@ -124,7 +124,6 @@ def review_plan(
         not plan.scenarios
         or no_accept
         or not any(s.negative for s in plan.scenarios)
-        or (veto_uncovered and bool(uncovered_claims))
     )
     if veto:
         root = "; ".join(gaps)

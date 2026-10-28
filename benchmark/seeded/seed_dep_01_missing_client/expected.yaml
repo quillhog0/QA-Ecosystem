@@ -1,0 +1,3 @@
+category: missing_dep
+verdict: VETO
+description: "Imports missing dependency nonexistent_db_driver_pkg_alpha."

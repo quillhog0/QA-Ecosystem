@@ -1,0 +1,3 @@
+category: uncommitted_bug
+verdict: VETO
+description: "Committed addition, uncommitted subtraction bug a - b."

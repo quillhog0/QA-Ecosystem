@@ -1,0 +1,3 @@
+category: tautology_test
+verdict: VETO
+description: "safe_divide multiplies instead of dividing; test has tautology assert is not None."

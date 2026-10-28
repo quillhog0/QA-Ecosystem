@@ -1,0 +1,3 @@
+category: doc_drift
+verdict: VETO
+description: "Docs specify handle_user_logout but code renamed it to handle_logout_request."

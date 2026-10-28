@@ -1,0 +1,3 @@
+category: untested_code_bug
+verdict: VETO
+description: "execute_transfer allows negative balance; test only checks currency."

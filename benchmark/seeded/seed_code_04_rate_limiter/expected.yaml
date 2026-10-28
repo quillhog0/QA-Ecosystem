@@ -1,0 +1,3 @@
+category: untested_code_bug
+verdict: VETO
+description: "enforce_rate_limit never limits; test only checks window seconds."

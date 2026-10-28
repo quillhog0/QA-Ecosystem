@@ -1,0 +1,3 @@
+category: uncommitted_bug
+verdict: VETO
+description: "Committed exact indexing, uncommitted off-by-one bug idx + 1."

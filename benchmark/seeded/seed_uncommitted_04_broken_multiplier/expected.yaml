@@ -1,0 +1,3 @@
+category: uncommitted_bug
+verdict: VETO
+description: "Committed x * 2, uncommitted broken multiplier bug x + 1."

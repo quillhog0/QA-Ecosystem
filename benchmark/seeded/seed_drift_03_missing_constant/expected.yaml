@@ -1,0 +1,3 @@
+category: doc_drift
+verdict: VETO
+description: "Docs specify MAX_FRAME_SIZE_BYTES but code defines FRAME_LIMIT."

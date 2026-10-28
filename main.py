@@ -61,6 +61,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default="",
         help="Override reports directory",
     )
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="Enable strict verification (riley.veto_on_uncovered_claims=true)",
+    )
     return parser.parse_args(argv)
 
 
@@ -105,6 +110,10 @@ def main(argv: list[str] | None = None) -> int:
         config["dry_run"] = False
     if args.allow_network:
         config["allow_network"] = True
+    if args.strict:
+        config.setdefault("riley", {})
+        config["riley"] = dict(config.get("riley") or {})
+        config["riley"]["veto_on_uncovered_claims"] = True
     if args.reports_dir:
         config["reports_dir"] = args.reports_dir
     else:

@@ -1,0 +1,3 @@
+category: uncommitted_bug
+verdict: VETO
+description: "Committed bool check, uncommitted inverted boolean bug."

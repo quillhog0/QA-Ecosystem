@@ -1,0 +1,3 @@
+category: dangerous_test
+verdict: VETO
+description: "Nested conftest.py calls exec('x = 1')."

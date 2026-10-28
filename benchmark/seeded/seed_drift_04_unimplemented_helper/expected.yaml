@@ -1,0 +1,3 @@
+category: doc_drift
+verdict: VETO
+description: "Docs specify export_prometheus_metrics but code only has record_count."

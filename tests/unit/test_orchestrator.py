@@ -69,3 +69,35 @@ def test_orchestrator_records_llm_fallback_on_exception(tmp_path: Path):
 
     assert "- llm: fallback" in md_text
     assert any("fallback" in r.llm for r in report.role_results)
+
+
+def test_project_config_cannot_override_effective_config(tmp_path: Path):
+    project = mini_project(tmp_path / "proj")
+    (project / "config.yaml").write_text(
+        "allow_network: true\ndry_run: false\nkeep_isolated_copy: true\n",
+        encoding="utf-8",
+    )
+    reports = tmp_path / "reports"
+    system_config = {
+        "dry_run": True,
+        "allow_network": False,
+        "reports_dir": str(reports),
+        "llm": {"provider": "none"},
+        "isolation_method": "copy",
+        "keep_isolated_copy": False,
+    }
+    import agents.nova as nova
+    import policies.sable as sable
+
+    with patch("policies.sable.evaluate_preflight", wraps=sable.evaluate_preflight) as mock_sable, \
+         patch("agents.nova.execute", wraps=nova.execute) as mock_nova:
+        report = Vesper(system_config).run(project, project / "docs")
+
+    assert report.dry_run is True
+    assert mock_sable.called
+    assert mock_sable.call_args.kwargs["allow_network"] is False
+    assert mock_nova.called
+    assert mock_nova.call_args.kwargs["allow_network"] is False
+    assert mock_nova.call_args.kwargs["config"]["allow_network"] is False
+    assert mock_nova.call_args.kwargs["config"]["dry_run"] is True
+
