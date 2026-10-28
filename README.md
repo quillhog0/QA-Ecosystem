@@ -1,5 +1,7 @@
 # QA Agent Ecosystem
 
+Part of the quillhog toolkit — [github.com/quillhog0](https://github.com/quillhog0) · [quillhog.xyz](https://quillhog.xyz) · X [@Quillhog0](https://x.com/Quillhog0).
+
 Deterministic QA control plane with six roles. Give it documentation plus a Python project; it walks a fixed test cycle in an **isolated copy** and returns a structured report with a verdict: `CLEAR`, `VETO`, or `ESCALATE`.
 
 It does not patch code, does not run against production, does not read secrets, and does not promise coverage. It answers one question: *do the docs, the code, and the tests actually agree, and does the suite prove what the docs claim?*
@@ -35,14 +37,14 @@ Judgment roles run on deterministic heuristics by default. An LLM is optional, a
 
 ## Example output
 
-Run against `examples/sample-project` (bundled in this repo):
+Run against `examples/sample-project` (bundled in this repo). The claim-coverage table header `tvrzení` is printed verbatim by `core/report.py`; it means "claim".
 
 ```
 verdict=CLEAR
 nova / execute: collected=3 passed=3 failed=0 exit=0 install=no dependency manifest
 ```
 
-| tvrzení | covered_by | score |
+| tvrzení (claim) | covered_by | score |
 |---|---|---|
 | `divide` must reject a zero divisor with `ValueError`. | tests/test_calculator.py::test_divide_rejects_zero, tests/test_calculator.py::test_divide | 13 |
 
@@ -122,9 +124,23 @@ Sable and Nova never depend on a model. OpenRouter is used only when `OPENROUTER
 
 ## Known limits
 
-- **Izolace je kopie + chmod + AST sken, ne sandbox:** Procesní izolace je zajištěna vytvořením kopie ve work_dir, nastavením souborů pouze pro čtení (`chmod`), runtime guardem na blokování socketů a statickou AST analýzou rizikových volání a importů. Nejde o plnohodnotný OS kontejner nebo sandbox.
-- **S LLM jdou docs a kód k poskytovateli bez maskování:** Pokud je aktivní externí LLM provider, dokumentace a části kódu jsou předávány přímo API poskytovatele bez předchozího maskování nebo anonymizace.
-- **Mapování tvrzení na testy je heuristika:** Aria mapuje tvrzení z dokumentace na testy pomocí shody tokenů a analýzy těl testů; jde o heuristiku, nikoli formální verifikaci.
+- **Isolation is copy + chmod + guards, not a sandbox.** The project is copied into a work dir, files are made read-only (`chmod`, `core/isolation.py`), Sable injects a pytest plugin that blocks `socket.connect` (`policies/sable.py`), and Sable statically scans tests with AST for risky calls and imports. There is no OS container.
+- **With an LLM enabled, docs and code go to the provider unmasked.** Nothing is redacted or anonymised before the API call.
+- **Claim-to-test mapping is a heuristic.** Aria matches doc claims to tests by token overlap and test-body analysis. It is not formal verification.
+
+## Project layout
+
+```
+main.py              CLI entry point (--project/--docs, --self-test)
+config.yaml          safe defaults (dry_run, no network, llm.provider: none)
+core/                Vesper orchestrator, isolation, packets, pytest runner, deps, report
+agents/              Lexi, Aria, Riley, Nova + LLM adapters and prompts
+policies/sable.py    Sable pre-flight policy (secrets, live tree, dangerous calls)
+schemas/             report and handoff packet formats
+benchmark/           fixtures + run_benchmark.py
+examples/            sample project used in the docs
+tests/               unit tests and fixture benchmark test
+```
 
 ## What this is not
 
@@ -133,4 +149,4 @@ Sable and Nova never depend on a model. OpenRouter is used only when `OPENROUTER
 
 ## License
 
-MIT License (c) 2026 Karel Jakub. See LICENSE.
+MIT. See [LICENSE](LICENSE).
