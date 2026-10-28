@@ -35,21 +35,16 @@ Judgment roles run on deterministic heuristics by default. An LLM is optional, a
 
 ## Example output
 
-Run against a small open-source Solana transaction library (5 tests, 7 documented invariants):
+Run against `examples/sample-project` (bundled in this repo):
 
 ```
 verdict=CLEAR
-nova / execute: collected=5 passed=5 failed=0 exit=0 install=ok
+nova / execute: collected=3 passed=3 failed=0 exit=0 install=no dependency manifest
 ```
 
-| claim (from README) | covered_by | score |
+| tvrzení | covered_by | score |
 |---|---|---|
-| MTU Safety: payload fits inside the 1232-byte UDP MTU | test_mtu_batch_size_cap | 9 |
-| Integer Financials: pure integer lamport arithmetic | test_integer_lamport_conversion | 6 |
-| Strict Invariant Guard: `dest == owner == signer` | test_dest_equals_owner_invariant | 15 |
-| The compiler never generates, accesses, or holds private keys | **none** | 1 |
-
-The suite is green, yet one security claim has no test. Riley records it as a gap: `claim not covered by tests`.
+| `divide` must reject a zero divisor with `ValueError`. | tests/test_calculator.py::test_divide_rejects_zero, tests/test_calculator.py::test_divide | 13 |
 
 ## Isolation
 
@@ -107,6 +102,10 @@ Benchmark fixtures:
 | failing_test | VETO by Riley |
 | missing_dep | VETO, root cause `missing dependency: <pkg>` |
 | no_tests | VETO |
+| malicious_conftest | BLOCK/VETO by Sable |
+| own_conftest | CLEAR |
+| tautology_test | VETO by Riley |
+| uncommitted_bug | VETO by Nova/Riley |
 
 ## Config
 
@@ -121,7 +120,17 @@ See `config.yaml`.
 
 Sable and Nova never depend on a model. OpenRouter is used only when `OPENROUTER_API_KEY` is set, `llm.provider` is `openrouter`, dry-run LLM is allowed, and `--allow-network` is on. The key is never written into reports.
 
+## Known limits
+
+- **Izolace je kopie + chmod + AST sken, ne sandbox:** Procesní izolace je zajištěna vytvořením kopie ve work_dir, nastavením souborů pouze pro čtení (`chmod`), runtime guardem na blokování socketů a statickou AST analýzou rizikových volání a importů. Nejde o plnohodnotný OS kontejner nebo sandbox.
+- **S LLM jdou docs a kód k poskytovateli bez maskování:** Pokud je aktivní externí LLM provider, dokumentace a části kódu jsou předávány přímo API poskytovatele bez předchozího maskování nebo anonymizace.
+- **Mapování tvrzení na testy je heuristika:** Aria mapuje tvrzení z dokumentace na testy pomocí shody tokenů a analýzy těl testů; jde o heuristiku, nikoli formální verifikaci.
+
 ## What this is not
 
 - Not a fixer, not a coverage tool, not a production runner
 - Not a single-chat role-play: each role has its own prompt or policy and only structured packets move between them
+
+## License
+
+MIT License (c) 2026 Karel Jakub. See LICENSE.

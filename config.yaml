@@ -35,6 +35,12 @@ sable:
     - path: tests/unit/test_deps.py
       call: subprocess.run
       reason: venv creation and pip install verification
+    - path: core/isolation.py
+      call: shutil.rmtree
+      reason: cleanup isolated copy
+    - path: main.py
+      call: shutil.rmtree
+      reason: cleanup self-test temp docs
 
 lexi:
   doc_globs:

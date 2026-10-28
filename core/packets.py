@@ -105,6 +105,7 @@ class Scenario:
     negative: bool = False
     covered_by: list[str] = field(default_factory=list)
     score: int = 0
+    covered_by_weak: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -255,6 +256,7 @@ class FinalReport:
     post_audit: dict[str, Any] = field(default_factory=dict)
     started_at: str = ""
     finished_at: str = ""
+    tested_tree: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)

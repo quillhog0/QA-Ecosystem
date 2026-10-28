@@ -14,7 +14,7 @@ def test_orchestrator_escalates_after_two_riley_plan_vetoes(tmp_path: Path):
     reports = tmp_path / "reports"
     calls = {"n": 0}
 
-    def always_veto(plan: TestPlan, *, config: dict) -> RedTeamReview:
+    def always_veto(plan: TestPlan, *, config: dict, **_kwargs) -> RedTeamReview:
         calls["n"] += 1
         return RedTeamReview(
             verdict=Verdict.VETO.value,

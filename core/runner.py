@@ -142,12 +142,19 @@ def run_pytest(
     command = build_pytest_command(
         isolated_root, cache_dir=cache_dir, basetemp=basetemp, extra_args=extra_args, python=python
     )
+    if (work_dir / "_sable_guard.py").is_file() and "_sable_guard" not in command:
+        command.extend(["-p", "_sable_guard"])
     env = sanitized_env(allow_network=allow_network)
     env["HOME"] = str(work_dir / "home")
     Path(env["HOME"]).mkdir(parents=True, exist_ok=True)
     extra_path = str(isolated_root)
+    work_path = str(work_dir)
     existing = env.get("PYTHONPATH", "")
-    env["PYTHONPATH"] = extra_path if not existing else extra_path + os.pathsep + existing
+    env["PYTHONPATH"] = (
+        work_path + os.pathsep + extra_path
+        if not existing
+        else work_path + os.pathsep + extra_path + os.pathsep + existing
+    )
     env["QA_AGENT_NOVA"] = "1"
 
     started = time.monotonic()

@@ -177,3 +177,54 @@ def test_riley_vetoes_on_uncovered_claims_when_configured():
     assert review_veto.verdict == Verdict.VETO.value
     assert "uncovered claims" in review_veto.root_cause
 
+
+def test_riley_ast_detects_weak_tests_and_vetoes_uncovered_claim(tmp_path):
+    from agents.riley import detect_weak_tests
+    from pathlib import Path
+
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    test_file = proj / "test_weak.py"
+    test_file.write_text(
+        "def test_empty():\n"
+        "    x = 1\n"
+        "def test_tautology_none():\n"
+        "    assert x is not None\n"
+        "def test_tautology_true():\n"
+        "    assert True\n"
+        "def test_tautology_callable():\n"
+        "    assert callable(x)\n",
+        encoding="utf-8",
+    )
+
+    weak = detect_weak_tests(proj)
+    assert "test_empty" in weak and weak["test_empty"] == "no assertions"
+    assert "test_tautology_none" in weak and weak["test_tautology_none"] == "tautology assertion"
+    assert "test_tautology_true" in weak and weak["test_tautology_true"] == "tautology assertion"
+    assert "test_tautology_callable" in weak and weak["test_tautology_callable"] == "tautology assertion"
+
+    plan = TestPlan(
+        scenarios=[
+            Scenario(id="C1", title="claim", steps=["verify"], acceptance=["pass"], negative=False, covered_by=["test_weak.py::test_tautology_none"]),
+            Scenario(id="S1", title="negative", steps=["run"], acceptance=["fail"], negative=True),
+        ]
+    )
+    plan_rev = review_plan(plan, config={"llm": {"provider": "none"}, "dry_run": True}, project_root=proj)
+    # Claim coverage is discounted: covered_by cleared to []
+    assert plan.scenarios[0].covered_by == []
+    assert any("claim C1 is covered only by weak test" in g for g in plan_rev.gaps)
+
+    execution = {
+        "collected": 1,
+        "passed": 1,
+        "failed": 0,
+        "errors": 0,
+        "exit_code": 0,
+        "stdout": "1 passed",
+        "stderr": "",
+    }
+    res_rev = review_results(plan, execution, config={"llm": {"provider": "none"}, "dry_run": True}, project_root=proj)
+    assert res_rev.verdict == Verdict.VETO.value
+    assert "weak test detected" in res_rev.root_cause
+
+

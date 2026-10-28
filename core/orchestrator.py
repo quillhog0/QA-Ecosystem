@@ -81,7 +81,7 @@ class Vesper:
                 role=Role.VESPER.value,
                 stage=Stage.INIT.value,
                 verdict=Verdict.CLEAR.value,
-                summary=f"isolation via {isolation.method}; live tree untouched",
+                summary=f"isolation via {isolation.method}; live tree untouched; tested_tree: {isolation.tested_tree}",
                 details=isolation.to_dict(),
             ),
         )
@@ -94,6 +94,7 @@ class Vesper:
             isolated_root=str(isolation.isolated_root),
             dry_run=self.dry_run,
             started_at=started,
+            tested_tree=isolation.tested_tree,
         )
 
         try:
@@ -190,7 +191,7 @@ class Vesper:
                 to_role=Role.RILEY.value,
                 payload=plan.to_dict(),
             )
-            review = riley.review_plan(plan, config=self.config)
+            review = riley.review_plan(plan, config=self.config, project_root=isolated)
             append_result(
                 self.role_results,
                 RoleResult(
@@ -203,6 +204,7 @@ class Vesper:
                     llm=review.llm_status,
                 ),
             )
+            report.plan = plan.to_dict()
             if review.verdict != Verdict.VETO.value:
                 break
             gaps = review.gaps + review.required_changes
@@ -257,7 +259,7 @@ class Vesper:
             report.verdict = Verdict.VETO.value
             return
 
-        sable.install_runtime_guards(isolated)
+        sable.install_runtime_guards(work_dir)
         _make_sources_readonly(isolated)
         isolation.read_only = True
 
@@ -332,7 +334,7 @@ class Vesper:
             to_role=Role.RILEY.value,
             payload=execution.to_dict(),
         )
-        result_review = riley.review_results(plan, execution.to_dict(), config=self.config)
+        result_review = riley.review_results(plan, execution.to_dict(), config=self.config, project_root=isolated)
         append_result(
             self.role_results,
             RoleResult(

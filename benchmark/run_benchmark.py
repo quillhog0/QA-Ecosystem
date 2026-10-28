@@ -57,11 +57,35 @@ def run_fixture(fixture: Path, reports_dir: Path) -> dict:
         "--reports-dir",
         str(reports_dir),
     ]
+    import shutil
     import subprocess
 
-    before = tree_sha256(fixture)
-    proc = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True, check=False)
-    after = tree_sha256(fixture)
+    cleanup_git = False
+    if fixture.name == "uncommitted_bug":
+        git_dir = fixture / ".git"
+        calc = fixture / "calculator.py"
+        calc.write_text("def add(left: int, right: int) -> int:\n    return left + right\n", encoding="utf-8")
+        if not git_dir.exists():
+            subprocess.run(["git", "init"], cwd=fixture, check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(fixture), "config", "user.name", "test"], check=True)
+            subprocess.run(["git", "-C", str(fixture), "config", "user.email", "test@test"], check=True)
+            cleanup_git = True
+        subprocess.run(["git", "-C", str(fixture), "add", "-A"], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(fixture), "commit", "-m", "init", "--allow-empty"],
+            check=True,
+            capture_output=True,
+        )
+        calc.write_text("def add(left: int, right: int) -> int:\n    return left - right\n", encoding="utf-8")
+
+    try:
+        before = tree_sha256(fixture)
+        proc = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True, check=False)
+        after = tree_sha256(fixture)
+    finally:
+        if cleanup_git and (fixture / ".git").exists():
+            shutil.rmtree(fixture / ".git", ignore_errors=True)
+            (fixture / "calculator.py").write_text("def add(left: int, right: int) -> int:\n    return left - right\n", encoding="utf-8")
     parsed = parse_stdout(proc.stdout)
     report_path = Path(parsed.get("report") or "")
     report: dict = {}

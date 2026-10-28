@@ -291,19 +291,20 @@ def test_sable_arg_looks_tmp_checks_segments_not_substring(tmp_path: Path):
 
 def test_sable_runtime_guard_blocks_socket_only_when_no_network(tmp_path: Path):
     import ast
-    iso = tmp_path / "iso"
-    iso.mkdir()
-    conftest = install_runtime_guards(iso)
-    assert conftest.is_file()
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    guard = install_runtime_guards(work_dir)
+    assert guard.is_file()
+    assert guard.name == "_sable_guard.py"
 
-    content = conftest.read_text(encoding="utf-8")
-    assert 'os.environ.get("NO_NETWORK") != "1"' in content
-    assert "socket.connect" in content
+    content = guard.read_text(encoding="utf-8")
+    assert 'os.environ.get("NO_NETWORK") == "1"' in content
+    assert "socket.socket.connect = _blocked" in content
     assert "Sable: socket.connect is blocked in the isolated copy" in content
 
     tree = ast.parse(content)
     assert any(
-        isinstance(node, ast.FunctionDef) and node.name == "_sable_block_socket_connect"
+        isinstance(node, ast.FunctionDef) and node.name == "_blocked"
         for node in ast.walk(tree)
     )
 
@@ -328,4 +329,18 @@ def test_sable_blocks_direct_imports_and_eval_exec(tmp_path: Path, code: str, ex
     test_file.write_text(code, encoding="utf-8")
     hits, _ = scan_tests_for_risks(iso)
     assert any(expected_token in h for h in hits), f"Expected {expected_token} in hits: {hits}"
+
+
+def test_sable_scans_project_files_and_nested_conftest(tmp_path: Path):
+    iso = tmp_path / "iso"
+    iso.mkdir(exist_ok=True)
+    (iso / "src").mkdir(exist_ok=True)
+    (iso / "src" / "worker.py").write_text("import os\ndef run(): eval('2+2')\n", encoding="utf-8")
+    (iso / "tests" / "nested").mkdir(parents=True, exist_ok=True)
+    (iso / "tests" / "nested" / "conftest.py").write_text("import shutil\nshutil.rmtree('/tmp/evil')\n", encoding="utf-8")
+
+    hits, _ = scan_tests_for_risks(iso)
+    assert any("src/worker.py: call eval" in h for h in hits)
+    assert any("nested/conftest.py: call shutil.rmtree" in h for h in hits)
+
 

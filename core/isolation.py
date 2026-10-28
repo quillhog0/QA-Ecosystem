@@ -39,6 +39,7 @@ class IsolationHandle:
     read_only: bool
     skipped_secrets: list[str]
     git_worktree: bool = False
+    tested_tree: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -48,6 +49,7 @@ class IsolationHandle:
             "read_only": self.read_only,
             "skipped_secrets": self.skipped_secrets,
             "git_worktree": self.git_worktree,
+            "tested_tree": self.tested_tree,
         }
 
 
@@ -67,7 +69,6 @@ def is_secret_path(path: Path) -> bool:
 
 
 def _is_git_toplevel(root: Path) -> bool:
-    """True only when root is the repository root. Nested dirs are copied instead."""
     try:
         proc = subprocess.run(
             ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
@@ -84,6 +85,74 @@ def _is_git_toplevel(root: Path) -> bool:
         return top.resolve() == root.resolve()
     except OSError:
         return False
+
+
+def _get_tested_tree_info(root: Path) -> str:
+    if _is_git_toplevel(root):
+        try:
+            proc_hash = subprocess.run(
+                ["git", "-C", str(root), "rev-parse", "--short", "HEAD"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            head_hash = proc_hash.stdout.strip() or "unknown"
+            proc_status = subprocess.run(
+                ["git", "-C", str(root), "status", "--porcelain"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            uncommitted = [l for l in proc_status.stdout.splitlines() if l.strip()]
+            return f"working (HEAD {head_hash} + {len(uncommitted)} uncommitted files)"
+        except OSError:
+            pass
+    return "working (copy)"
+
+
+def _copy_git_working_tree(src: Path, dst: Path) -> list[str]:
+    skipped: list[str] = []
+    proc = subprocess.run(
+        ["git", "-C", str(src), "ls-files", "-co", "--exclude-standard", "-z"],
+        capture_output=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        return _copy_tree(src, dst)
+
+    dst.mkdir(parents=True, exist_ok=True)
+    for entry in proc.stdout.split(b"\0"):
+        if not entry:
+            continue
+        try:
+            rel_str = entry.decode("utf-8")
+        except UnicodeDecodeError:
+            rel_str = entry.decode("utf-8", errors="replace")
+        rel_path = Path(rel_str)
+        if any(part in SKIP_DIR_NAMES for part in rel_path.parts):
+            continue
+        src_file = src / rel_path
+        if not src_file.exists() and not src_file.is_symlink():
+            continue
+        if is_secret_path(src_file):
+            skipped.append(str(rel_path))
+            continue
+        dst_file = dst / rel_path
+        dst_file.parent.mkdir(parents=True, exist_ok=True)
+        if src_file.is_symlink():
+            try:
+                target = os.readlink(src_file)
+                os.symlink(target, dst_file)
+            except OSError:
+                pass
+        else:
+            try:
+                shutil.copy2(src_file, dst_file, follow_symlinks=False)
+            except OSError:
+                pass
+
+    _clean_symlinks_and_secrets(dst, skipped)
+    return skipped
 
 
 def _clean_symlinks_and_secrets(dest: Path, skipped: list[str]) -> None:
@@ -169,7 +238,7 @@ def create_isolation(
     method: str | None = None,
     read_only: bool = True,
 ) -> IsolationHandle:
-    """Create an isolated copy. Prefer detached git worktree; else copytree.
+    """Create an isolated copy of the working tree including uncommitted changes.
 
     The live working tree is never checked out or modified.
     Secret-looking files are not copied.
@@ -180,41 +249,15 @@ def create_isolation(
     if dest.exists():
         raise FileExistsError(f"isolation destination already exists: {dest}")
 
-    skipped: list[str] = []
     requested = (method or "auto").lower()
     method = "copy"
     git_worktree = False
+    tested_tree = _get_tested_tree_info(live_root)
 
     if requested != "copy" and _is_git_toplevel(live_root):
-        try:
-            proc = subprocess.run(
-                [
-                    "git",
-                    "-C",
-                    str(live_root),
-                    "worktree",
-                    "add",
-                    "--detach",
-                    str(dest),
-                    "HEAD",
-                ],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            if proc.returncode == 0 and dest.exists():
-                method = "git-worktree"
-                git_worktree = True
-                _clean_symlinks_and_secrets(dest, skipped)
-            else:
-                dest_partial = dest if dest.exists() else None
-                if dest_partial:
-                    shutil.rmtree(dest, ignore_errors=True)
-        except OSError:
-            git_worktree = False
-            method = "copy"
-
-    if method == "copy" and not dest.exists():
+        method = "git-working-tree"
+        skipped = _copy_git_working_tree(live_root, dest)
+    else:
         skipped = _copy_tree(live_root, dest)
 
     if read_only:
@@ -227,6 +270,7 @@ def create_isolation(
         read_only=read_only,
         skipped_secrets=skipped,
         git_worktree=git_worktree,
+        tested_tree=tested_tree,
     )
 
 

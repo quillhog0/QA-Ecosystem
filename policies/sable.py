@@ -259,24 +259,45 @@ def _pytest_scan_roots(isolated_root: Path) -> list[Path]:
     return [path for path in roots if path.exists()]
 
 
-def _test_python_files(isolated_root: Path) -> list[Path]:
+def _is_test_file(path: Path, isolated_root: Path) -> bool:
+    rel = path.relative_to(isolated_root) if path.is_relative_to(isolated_root) else path
+    parts = {p.lower() for p in Path(rel).parts}
+    name = path.name.lower()
+    return (
+        name.startswith("test_")
+        or name.endswith("_test.py")
+        or "tests" in parts
+        or name == "conftest.py"
+    )
+
+
+def _pytest_norecursedirs(isolated_root: Path) -> set[str]:
+    ini = isolated_root / "pytest.ini"
+    ignored = {".venv", "venv", ".git", "__pycache__", ".pytest_cache", "reports"}
+    if ini.is_file():
+        for line in ini.read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.strip().startswith("norecursedirs"):
+                _, _, rest = line.partition("=")
+                ignored |= set(rest.strip().split())
+                break
+    return ignored
+
+
+def _all_python_files(isolated_root: Path) -> list[Path]:
     files: list[Path] = []
     if not isolated_root.is_dir():
         return files
-    for root in _pytest_scan_roots(isolated_root):
-        for path in root.rglob("*.py"):
-            rel = path.relative_to(isolated_root) if path.is_relative_to(isolated_root) else path
-            if any(part in {".venv", "__pycache__", ".git"} for part in Path(rel).parts):
-                continue
-            name = path.name.lower()
-            if (
-                name.startswith("test_")
-                or name.endswith("_test.py")
-                or "tests" in {p.lower() for p in Path(rel).parts}
-                or name == "conftest.py"
-            ):
-                files.append(path)
+    ignored = _pytest_norecursedirs(isolated_root)
+    for path in isolated_root.rglob("*.py"):
+        rel = path.relative_to(isolated_root) if path.is_relative_to(isolated_root) else path
+        if any(part in ignored for part in Path(rel).parts):
+            continue
+        files.append(path)
     return files
+
+
+def _test_python_files(isolated_root: Path) -> list[Path]:
+    return [p for p in _all_python_files(isolated_root) if _is_test_file(p, isolated_root)]
 
 
 def _call_qualname(node: ast.AST) -> tuple[str, ...]:
@@ -352,13 +373,14 @@ def scan_tests_for_risks(
     hits: list[str] = []
     allowed: list[dict[str, str]] = []
     seen_allowed: set[tuple[str, str, str]] = set()
-    for path in _test_python_files(isolated_root):
+    for path in _all_python_files(isolated_root):
         try:
             tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
         except (OSError, SyntaxError) as exc:
             hits.append(f"{path.name}: cannot parse ({exc})")
             continue
         rel = str(path.relative_to(isolated_root)).replace("\\", "/")
+        is_test = _is_test_file(path, isolated_root)
 
         def _record(call: str, message: str) -> None:
             match = _match_allow(rel, call, allows)
@@ -379,14 +401,15 @@ def scan_tests_for_risks(
 
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
-                for alias in node.names:
-                    root = alias.name.split(".")[0]
-                    if alias.name.startswith(FORBIDDEN_IMPORT_ROOTS) or root in FORBIDDEN_IMPORT_ROOTS:
-                        _record(alias.name, f"{rel}: import {alias.name}")
+                if is_test:
+                    for alias in node.names:
+                        root = alias.name.split(".")[0]
+                        if alias.name.startswith(FORBIDDEN_IMPORT_ROOTS) or root in FORBIDDEN_IMPORT_ROOTS:
+                            _record(alias.name, f"{rel}: import {alias.name}")
             elif isinstance(node, ast.ImportFrom):
                 mod = node.module or ""
                 root = mod.split(".")[0]
-                if mod.startswith(FORBIDDEN_IMPORT_ROOTS) or root in FORBIDDEN_IMPORT_ROOTS:
+                if is_test and (mod.startswith(FORBIDDEN_IMPORT_ROOTS) or root in FORBIDDEN_IMPORT_ROOTS):
                     _record(mod or root, f"{rel}: from {mod} import ...")
                 if root == "shutil":
                     for alias in node.names:
@@ -411,30 +434,40 @@ def scan_tests_for_risks(
                 elif len(parts) == 1 and parts[0] in {"remove", "unlink"}:
                     if not _arg_looks_tmp(node):
                         _record(parts[0], f"{rel}: call {parts[0]}")
-                if parts and parts[0] in {"subprocess", "socket", "httpx", "requests"}:
-                    _record(".".join(parts), f"{rel}: call {'.'.join(parts)}")
-                if parts and parts[-1] in NETWORK_NAME_FRAGMENTS and parts[0] in {
-                    "urllib",
-                    "requests",
-                    "httpx",
-                    "socket",
-                }:
-                    _record(".".join(parts), f"{rel}: network call {'.'.join(parts)}")
+                if is_test:
+                    if parts and parts[0] in {"subprocess", "socket", "httpx", "requests"}:
+                        _record(".".join(parts), f"{rel}: call {'.'.join(parts)}")
+                    if parts and parts[-1] in NETWORK_NAME_FRAGMENTS and parts[0] in {
+                        "urllib",
+                        "requests",
+                        "httpx",
+                        "socket",
+                    }:
+                        _record(".".join(parts), f"{rel}: network call {'.'.join(parts)}")
     return hits, allowed
 
 
-def install_runtime_guards(isolated_root: Path) -> Path:
-    """Write a conftest that monkeypatches socket.connect. Dirs remain writable."""
-    dest = isolated_root / "conftest.py"
-    existing = ""
-    if dest.exists():
-        dest.chmod(dest.stat().st_mode | 0o200)
-        existing = dest.read_text(encoding="utf-8", errors="replace")
-        if "sable_block_socket_connect" in existing:
-            return dest
-        dest.write_text(existing.rstrip() + "\n\n" + RUNTIME_CONFTEST, encoding="utf-8")
-    else:
-        dest.write_text(RUNTIME_CONFTEST, encoding="utf-8")
+RUNTIME_GUARD_MODULE = '''\
+"""Injected by Sable. Blocks outbound sockets during isolated pytest."""
+
+from __future__ import annotations
+
+import os
+import socket
+
+if os.environ.get("NO_NETWORK") == "1":
+    def _blocked(*_args, **_kwargs):
+        raise RuntimeError("Sable: socket.connect is blocked in the isolated copy")
+
+    socket.socket.connect = _blocked
+    socket.socket.connect_ex = _blocked
+'''
+
+
+def install_runtime_guards(work_dir: Path) -> Path:
+    """Write a pytest plugin module into work_dir that monkeypatches socket on load."""
+    dest = work_dir / "_sable_guard.py"
+    dest.write_text(RUNTIME_GUARD_MODULE, encoding="utf-8")
     return dest
 
 
@@ -533,4 +566,5 @@ def default_command(isolated_root: Path, work_dir: Path) -> list[str]:
         isolated_root,
         cache_dir=work_dir / "pytest_cache",
         basetemp=work_dir / "pytest_tmp",
+        extra_args=["-p", "_sable_guard"],
     )

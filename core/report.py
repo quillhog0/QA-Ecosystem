@@ -22,6 +22,8 @@ def render_markdown(report: FinalReport) -> str:
         f"- **started:** {report.started_at}",
         f"- **finished:** {report.finished_at}",
     ]
+    if report.tested_tree:
+        lines.append(f"- **tested_tree:** {report.tested_tree}")
     if report.escalation:
         lines.append(f"- **escalation:** `{report.escalation}`")
     lines += ["", "## Role results", ""]

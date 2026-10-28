@@ -99,7 +99,7 @@ def test_git_worktree_leak(tmp_path: Path):
         check=True,
         capture_output=True,
     )
-    dest = tmp_path / "worktree-iso"
+    dest = isolation_destination(live_root=live, reports_dir=live / "reports", run_id="worktree_leak")
     before_list = subprocess.run(
         ["git", "-C", str(live), "worktree", "list", "--porcelain"],
         capture_output=True,
@@ -182,4 +182,28 @@ def test_release_isolation_deletes_copy_and_rejects_outside_path(tmp_path: Path)
     )
     with pytest.raises(ValueError, match="outside isolations root"):
         release_isolation(outside_handle, keep=False)
+
+
+def test_isolation_copies_uncommitted_working_tree(tmp_path: Path):
+    live = mini_project(tmp_path / "repo")
+    subprocess.run(["git", "init"], cwd=live, check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(live), "config", "user.name", "test"], check=True)
+    subprocess.run(["git", "-C", str(live), "config", "user.email", "test@test"], check=True)
+    subprocess.run(["git", "-C", str(live), "add", "-A"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(live), "commit", "-m", "init"], check=True, capture_output=True)
+
+    (live / "calculator.py").write_text("def add(a, b): return a - b\n", encoding="utf-8")
+    (live / "untracked.py").write_text("UNTRACKED = True\n", encoding="utf-8")
+
+    dest = isolation_destination(live_root=live, run_id="test_uncommitted")
+    handle = None
+    try:
+        handle = create_isolation(live, dest)
+        assert handle.method == "git-working-tree"
+        assert "working (HEAD" in handle.tested_tree
+        assert "2 uncommitted files)" in handle.tested_tree
+        assert (dest / "calculator.py").read_text(encoding="utf-8") == "def add(a, b): return a - b\n"
+        assert (dest / "untracked.py").is_file()
+    finally:
+        release_isolation(handle, keep=False)
 

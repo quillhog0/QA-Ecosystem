@@ -1,7 +1,5 @@
-"""Riley — red team. Technical VETO with required root cause."""
-
-from __future__ import annotations
-
+import ast
+from pathlib import Path
 import re
 from typing import Any
 
@@ -14,7 +12,78 @@ FAILED_LINE_RE = re.compile(
 )
 
 
-def review_plan(plan: TestPlan, *, config: dict[str, Any]) -> RedTeamReview:
+def is_tautology_assert(stmt: ast.Assert) -> bool:
+    test_node = stmt.test
+    if isinstance(test_node, ast.Constant):
+        if bool(test_node.value):
+            return True
+    if isinstance(test_node, ast.UnaryOp) and isinstance(test_node.op, ast.Not):
+        if isinstance(test_node.operand, ast.Constant) and not bool(test_node.operand.value):
+            return True
+    if isinstance(test_node, ast.Compare):
+        if len(test_node.ops) == 1 and isinstance(test_node.ops[0], ast.IsNot):
+            if len(test_node.comparators) == 1 and isinstance(test_node.comparators[0], ast.Constant) and test_node.comparators[0].value is None:
+                return True
+            if isinstance(test_node.left, ast.Constant) and test_node.left.value is None:
+                return True
+    if isinstance(test_node, ast.Call):
+        func = test_node.func
+        if isinstance(func, ast.Name) and func.id == "callable":
+            return True
+    return False
+
+
+def is_weak_test_node(fn_node: ast.FunctionDef | ast.AsyncFunctionDef) -> tuple[bool, str]:
+    with_raises = any(
+        isinstance(n, ast.With)
+        and any(
+            isinstance(item.context_expr, ast.Call)
+            and getattr(item.context_expr.func, "attr", getattr(item.context_expr.func, "id", None)) == "raises"
+            for item in n.items
+        )
+        for n in ast.walk(fn_node)
+    )
+    if with_raises:
+        return False, "ok"
+
+    asserts = [n for n in ast.walk(fn_node) if isinstance(n, ast.Assert)]
+    if not asserts:
+        return True, "no assertions"
+    if all(is_tautology_assert(a) for a in asserts):
+        return True, "tautology assertion"
+    return False, "ok"
+
+
+def detect_weak_tests(project_root: Path | None) -> dict[str, str]:
+    weak_tests: dict[str, str] = {}
+    if not project_root or not project_root.is_dir():
+        return weak_tests
+
+    for path in project_root.rglob("*.py"):
+        if any(part in {".venv", "__pycache__", ".git"} for part in path.parts):
+            continue
+        rel = str(path.relative_to(project_root)).replace("\\", "/")
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, SyntaxError):
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if node.name.startswith("test_") or "test" in node.name.lower():
+                    is_weak, reason = is_weak_test_node(node)
+                    if is_weak:
+                        test_id = f"{rel}::{node.name}"
+                        weak_tests[test_id] = reason
+                        weak_tests[node.name] = reason
+    return weak_tests
+
+
+def review_plan(
+    plan: TestPlan,
+    *,
+    config: dict[str, Any],
+    project_root: Path | None = None,
+) -> RedTeamReview:
     gaps: list[str] = []
     if not plan.scenarios:
         gaps.append("plan has zero scenarios")
@@ -28,6 +97,23 @@ def review_plan(plan: TestPlan, *, config: dict[str, Any]) -> RedTeamReview:
         gaps.append("no negative-path scenario")
     if any("network" in " ".join(s.steps).lower() for s in plan.scenarios):
         gaps.append("plan steps appear to require network")
+
+    weak_tests = detect_weak_tests(project_root)
+    claims_covered_by_weak: list[str] = []
+    for s in plan.scenarios:
+        if s.id.startswith("C") and s.covered_by:
+            strong = [t for t in s.covered_by if t not in weak_tests and t.split("::")[-1] not in weak_tests]
+            if not strong:
+                claims_covered_by_weak.append(s.id)
+                s.covered_by_weak = list(s.covered_by)
+                s.covered_by = []
+
+    for cid in claims_covered_by_weak:
+        gaps.append(f"claim {cid} is covered only by weak test (not counted as covered)")
+
+    for tid, reason in weak_tests.items():
+        if "::" in tid:
+            gaps.append(f"weak test: {tid} ({reason})")
 
     veto_uncovered = bool((config.get("riley") or {}).get("veto_on_uncovered_claims", False))
     uncovered_claims = [s.id for s in plan.scenarios if s.id.startswith("C") and not s.covered_by]
@@ -94,6 +180,7 @@ def review_results(
     execution: dict[str, Any],
     *,
     config: dict[str, Any],
+    project_root: Path | None = None,
 ) -> RedTeamReview:
     gaps: list[str] = []
     collected = int(execution.get("collected") or 0)
@@ -112,11 +199,47 @@ def review_results(
         gaps.append(f"pytest collection/execution errors={errors}")
     if not plan.scenarios:
         gaps.append("no plan to compare against results")
+
+    weak_tests = detect_weak_tests(project_root)
+    claims_covered_by_weak: list[str] = []
+    for s in plan.scenarios:
+        if s.id.startswith("C"):
+            weak_cov = getattr(s, "covered_by_weak", None)
+            if weak_cov:
+                claims_covered_by_weak.append(s.id)
+            elif s.covered_by:
+                strong = [t for t in s.covered_by if t not in weak_tests and t.split("::")[-1] not in weak_tests]
+                if not strong:
+                    claims_covered_by_weak.append(s.id)
+                    s.covered_by_weak = list(s.covered_by)
+                    s.covered_by = []
+
+    for cid in claims_covered_by_weak:
+        gaps.append(f"claim {cid} is covered only by weak test (not counted as covered)")
+
+    for tid, reason in weak_tests.items():
+        if "::" in tid:
+            gaps.append(f"weak test: {tid} ({reason})")
+
     veto_uncovered = bool((config.get("riley") or {}).get("veto_on_uncovered_claims", False))
     uncovered_claims = [s.id for s in plan.scenarios if s.id.startswith("C") and not s.covered_by]
     for s in plan.scenarios:
         if s.id.startswith("C") and not s.covered_by:
             gaps.append(f"claim not covered by tests: {s.id}")
+
+    if claims_covered_by_weak:
+        weak_list = ", ".join(k for k in weak_tests if "::" in k)
+        return _maybe_llm(
+            RedTeamReview(
+                verdict=Verdict.VETO.value,
+                gaps=gaps,
+                required_changes=[f"replace weak tests ({weak_list}) with meaningful assertions"],
+                root_cause=f"weak test detected: {weak_list} (claim {', '.join(claims_covered_by_weak)} is not properly tested)",
+                notes="tests without meaningful assertions cannot verify claims",
+            ),
+            {"phase": "results", "plan": plan.to_dict(), "execution": _small_exec(execution)},
+            config,
+        )
 
     if veto_uncovered and uncovered_claims:
         return _maybe_llm(
