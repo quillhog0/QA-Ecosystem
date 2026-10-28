@@ -58,7 +58,7 @@ Comparison against a "flat agent" baseline that only runs `pytest` and returns `
 
 **Summary:** default 20/24 (83 %), strict (riley.veto_on_uncovered_claims enabled via --strict) 24/24 (100 %), flat 8/24 (33 %)
 
-| projekt | druh chyby | default | strict | flat |
+| project | bug category | default | strict | flat |
 |---|---|---|---|---|
 | seed_code_01_pricing_discount | untested_code_bug | CLEAR | VETO | CLEAR |
 | seed_code_02_auth_validation | untested_code_bug | CLEAR | VETO | CLEAR |
@@ -94,6 +94,18 @@ Comparison against a "flat agent" baseline that only runs `pytest` and returns `
 - `.env`, keys, and credential filenames are skipped.
 - Nova builds a venv in the run's work dir and installs the project's declared dependencies (`requirements.txt` / `pyproject.toml`). Only `pip install` may use the network; pytest runs with network off unless `--allow-network` is passed.
 - Default is **dry-run**: no live actions, no secret access, logs archived.
+
+## Sandbox
+
+Execution of the isolated pytest test suite is wrapped in a kernel-level sandbox using **Bubblewrap (`bwrap`)**:
+
+- **Namespaces:** Unshares all namespaces (`--unshare-all`: network, mount, PID, IPC, UTS, and user).
+- **Network off:** Network access is completely disabled at the kernel level for tests by default; sockets cannot be connected.
+- **Filesystem boundaries:** System binaries and libraries (`/usr`, `/etc`, `/bin`, `/lib`, `/lib64`) are mounted read-only. `/tmp` is an isolated in-memory `tmpfs`. The only writable directories are the isolated project copy and the run's work directory.
+- **No `$HOME` access:** `/home` is remounted read-only; real host credentials, SSH keys, and user dotfiles are never exposed or writable.
+- **Process lifecycle:** Runs with `--die-with-parent` to ensure child processes terminate with the runner.
+- **Defense-in-depth:** The existing Sable runtime guard (`-p _sable_guard`, `NO_NETWORK=1`) remains active as a second layer.
+- **Configuration:** Set via `sandbox.mode = auto | required | off` (default `auto`) or CLI `--sandbox [auto|required|off]`. When set to `required`, a missing `bwrap` binary yields an immediate `VETO`. When `auto` on non-Linux or systems without `bwrap`, it falls back cleanly with a report entry `sandbox: unavailable`. Tested projects can never modify sandbox configuration.
 
 ## Install
 
@@ -155,6 +167,7 @@ See `config.yaml`.
 - `dry_run` (default true): skip outbound LLM calls unless `llm.call_in_dry_run` is true
 - `allow_network` (default false): Nova env gets dead proxies; Sable still forbids curl/wget
 - `max_iterations`: per-stage cap (default 2)
+- `sandbox.mode`: `auto` (default, uses bwrap when available), `required` (veto if bwrap missing), or `off`
 - `llm.provider`: `none` (heuristics), `openrouter`, or `local`
 - `nova.install_deps`, `nova.pip_timeout`: dependency install in the isolated venv
 - `lexi.doc_globs`, `lexi.ignore_identifiers`: which docs to read, which terms to ignore
@@ -163,7 +176,9 @@ Sable and Nova never depend on a model. OpenRouter is used only when `OPENROUTER
 
 ## Known limits
 
-- **Isolation is copy + chmod + guards, not a sandbox.** The project is copied into a work dir, files are made read-only (`chmod`, `core/isolation.py`), Sable injects a pytest plugin that blocks `socket.connect` (`policies/sable.py`), and Sable statically scans tests with AST for risky calls and imports. There is no OS container.
+- **Bubblewrap coverage & non-covered vectors:** On Linux with `bwrap` installed, test suites run in an unprivileged container sandbox (unshared network, mount, PID, IPC, UTS, and user namespaces, read-only system trees, denied `$HOME` access, and tmpfs `/tmp`).
+  - *What bwrap covers:* Kernel-enforced denial of socket creation and outbound network connections, prevention of writes outside the isolated project copy and run work directory, and isolation from host user files and credentials in `$HOME`.
+  - *What bwrap does not cover:* It does not protect against host Linux kernel vulnerabilities; it does not enforce cgroup-based CPU/memory quotas; and dependency installation (`pip install`) runs in a preliminary step before the sandbox (though manifests are statically screened for unsafe package sources). On platforms without `bwrap` or non-Linux systems, execution falls back to process-level isolation (`chmod`, `-p _sable_guard` monkeypatching, and static AST scanning).
 - **With an LLM enabled, docs and code go to the provider unmasked.** Nothing is redacted or anonymised before the API call.
 - **Claim-to-test mapping is a heuristic.** Aria matches doc claims to tests by token overlap and test-body analysis. It is not formal verification.
 

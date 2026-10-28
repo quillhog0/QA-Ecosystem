@@ -35,6 +35,7 @@ def execute(
         allow_network=allow_network,
         timeout=timeout,
         python=python_executable,
+        config=config,
     )
     result.install_status = install_status
     return result

@@ -2,7 +2,7 @@
 
 **Summary:** default 20/24 (83 %), strict (riley.veto_on_uncovered_claims enabled via --strict) 24/24 (100 %), flat 8/24 (33 %)
 
-| projekt | druh chyby | default | strict | flat |
+| project | bug category | default | strict | flat |
 |---|---|---|---|---|
 | seed_code_01_pricing_discount | untested_code_bug | CLEAR | VETO | CLEAR |
 | seed_code_02_auth_validation | untested_code_bug | CLEAR | VETO | CLEAR |

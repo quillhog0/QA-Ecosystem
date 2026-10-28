@@ -66,6 +66,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Enable strict verification (riley.veto_on_uncovered_claims=true)",
     )
+    parser.add_argument(
+        "--sandbox",
+        choices=["auto", "required", "off"],
+        default=None,
+        help="Sandbox mode: auto (default), required, or off",
+    )
     return parser.parse_args(argv)
 
 
@@ -114,6 +120,10 @@ def main(argv: list[str] | None = None) -> int:
         config.setdefault("riley", {})
         config["riley"] = dict(config.get("riley") or {})
         config["riley"]["veto_on_uncovered_claims"] = True
+    if args.sandbox:
+        config.setdefault("sandbox", {})
+        config["sandbox"] = dict(config.get("sandbox") or {})
+        config["sandbox"]["mode"] = args.sandbox
     if args.reports_dir:
         config["reports_dir"] = args.reports_dir
     else:
@@ -137,6 +147,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"verdict={report.verdict}")
     if report.escalation:
         print(report.escalation)
+    print(f"sandbox={report.sandbox}")
     print(f"report={reports_dir / (report.run_id + '.md')}")
     print(f"isolated_root={report.isolated_root}")
     return exit_code_for(report.verdict)

@@ -16,12 +16,15 @@ def render_markdown(report: FinalReport) -> str:
         "",
         f"- **verdict:** {report.verdict}",
         f"- **dry_run:** {report.dry_run}",
+        f"- **sandbox:** {report.sandbox}",
         f"- **project:** `{report.project_root}`",
         f"- **docs:** `{report.docs_root}`",
         f"- **isolated copy:** `{report.isolated_root}`",
         f"- **started:** {report.started_at}",
         f"- **finished:** {report.finished_at}",
     ]
+    if report.sandbox == "unavailable":
+        lines.append("- **warning:** sandbox: unavailable (bubblewrap not found or not on Linux)")
     if report.tested_tree:
         lines.append(f"- **tested_tree:** {report.tested_tree}")
     if report.escalation:

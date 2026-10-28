@@ -132,9 +132,20 @@ def run_pytest(
     timeout: int = 120,
     extra_args: list[str] | None = None,
     python: Path | None = None,
+    config: dict[str, Any] | None = None,
 ) -> ExecutionResult:
     """Execute pytest against the isolated tree. Does not modify the live project."""
     import subprocess
+    from core.sandbox import get_sandbox_status, wrap_command
+
+    sandbox_enabled, sandbox_status, failure_reason = get_sandbox_status(config)
+    if failure_reason:
+        return ExecutionResult(
+            exit_code=1,
+            stderr=failure_reason,
+            sandbox_status=sandbox_status,
+            isolated_root=str(isolated_root),
+        )
 
     cache_dir = work_dir / "pytest_cache"
     basetemp = work_dir / "pytest_tmp"
@@ -144,6 +155,17 @@ def run_pytest(
     )
     if (work_dir / "_sable_guard.py").is_file() and "_sable_guard" not in command:
         command.extend(["-p", "_sable_guard"])
+
+    exec_command = command
+    if sandbox_enabled:
+        exec_command = wrap_command(
+            command,
+            isolated_root=isolated_root,
+            work_dir=work_dir,
+            python=python,
+            allow_network=allow_network,
+        )
+
     env = sanitized_env(allow_network=allow_network)
     env["HOME"] = str(work_dir / "home")
     Path(env["HOME"]).mkdir(parents=True, exist_ok=True)
@@ -160,7 +182,7 @@ def run_pytest(
     started = time.monotonic()
     try:
         proc = subprocess.run(
-            command,
+            exec_command,
             cwd=str(isolated_root),
             env=env,
             capture_output=True,
@@ -188,6 +210,7 @@ def run_pytest(
         duration_seconds=round(duration, 3),
         stdout=stdout,
         stderr=stderr,
-        command=command,
+        command=exec_command,
         isolated_root=str(isolated_root),
+        sandbox_status=sandbox_status,
     )

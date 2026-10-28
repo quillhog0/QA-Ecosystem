@@ -185,7 +185,7 @@ def render_markdown(
         "",
         f"**Summary:** default {default_count}/{total} ({def_pct} %), strict (riley.veto_on_uncovered_claims enabled via --strict) {strict_count}/{total} ({strict_pct} %), flat {flat_count}/{total} ({flat_pct} %)",
         "",
-        "| projekt | druh chyby | default | strict | flat |",
+        "| project | bug category | default | strict | flat |",
         "|---|---|---|---|---|",
     ]
     for r in rows:

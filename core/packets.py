@@ -166,6 +166,7 @@ class ExecutionResult:
     command: list[str] = field(default_factory=list)
     isolated_root: str = ""
     install_status: str = "skipped"
+    sandbox_status: str = "unavailable"
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -248,6 +249,7 @@ class FinalReport:
     docs_root: str = ""
     isolated_root: str = ""
     dry_run: bool = True
+    sandbox: str = "unavailable"
     role_results: list[RoleResult] = field(default_factory=list)
     drift: dict[str, Any] = field(default_factory=dict)
     plan: dict[str, Any] = field(default_factory=dict)

@@ -86,6 +86,9 @@ class Vesper:
             ),
         )
 
+        from core.sandbox import get_sandbox_status
+
+        _, sandbox_status, failure_reason = get_sandbox_status(self.config)
         report = FinalReport(
             run_id=run_id,
             verdict=Verdict.PENDING.value,
@@ -93,9 +96,27 @@ class Vesper:
             docs_root=str(docs.resolve()),
             isolated_root=str(isolation.isolated_root),
             dry_run=self.dry_run,
+            sandbox=sandbox_status,
             started_at=started,
             tested_tree=isolation.tested_tree,
         )
+
+        if failure_reason:
+            append_result(
+                self.role_results,
+                RoleResult(
+                    role=Role.VESPER.value,
+                    stage=Stage.INIT.value,
+                    verdict=Verdict.VETO.value,
+                    summary=f"sandbox required but bwrap unavailable: {failure_reason}",
+                    details={"sandbox": sandbox_status, "error": failure_reason},
+                ),
+            )
+            report.verdict = Verdict.VETO.value
+            report.role_results = list(self.role_results)
+            report.finished_at = utc_now()
+            write_reports(report, base)
+            return report
 
         try:
             try:
@@ -292,7 +313,8 @@ class Vesper:
                 summary=(
                     f"collected={execution.collected} passed={execution.passed} "
                     f"failed={execution.failed} exit={execution.exit_code} "
-                    f"duration={execution.duration_seconds}s install={execution.install_status}"
+                    f"duration={execution.duration_seconds}s install={execution.install_status} "
+                    f"sandbox={execution.sandbox_status}"
                 ),
                 details={
                     "collected": execution.collected,
@@ -304,10 +326,12 @@ class Vesper:
                     "duration_seconds": execution.duration_seconds,
                     "command": execution.command,
                     "install_status": execution.install_status,
+                    "sandbox_status": execution.sandbox_status,
                 },
             ),
         )
         report.execution = execution.to_dict()
+        report.sandbox = execution.sandbox_status
 
         post_policy = sable.evaluate_post_execution(
             collected=execution.collected, command=execution.command

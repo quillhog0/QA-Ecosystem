@@ -6,6 +6,9 @@ keep_isolated_copy: false
 model: openai/gpt-4o-mini
 reports_dir: reports
 
+sandbox:
+  mode: auto
+
 nova:
   install_deps: true
   pip_timeout: 300
