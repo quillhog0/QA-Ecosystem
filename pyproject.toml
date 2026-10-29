@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qa-eco"
+dynamic = ["version"]
+description = "Deterministic, sandboxed QA auditor for Python projects"
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "quillhog" }]
+requires-python = ">=3.11"
+dependencies = [
+    "pytest==9.1.1",
+    "pyyaml==6.0.3",
+    "httpx==0.28.1",
+]
+
+[project.urls]
+Homepage = "https://github.com/quillhog0/QA-Ecosystem"
+
+[project.scripts]
+qa-eco = "main:main"
+
+[tool.setuptools]
+py-modules = ["main"]
+packages = ["core", "agents", "policies"]
+
+[tool.setuptools.dynamic]
+version = { attr = "core.__version__" }

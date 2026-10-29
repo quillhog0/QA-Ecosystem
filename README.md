@@ -114,12 +114,16 @@ Execution of the isolated pytest test suite is wrapped in a kernel-level sandbox
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -e .
 ```
+
+This installs the `qa-eco` command (run it from the cloned repo with `pip install -e .`; a non-editable install is not supported yet).
 
 ## Run
 
 ```bash
+qa-eco --project /path/to/project --docs /path/to/docs
+# or, without installing:
 python main.py --project /path/to/project --docs /path/to/docs
 ```
 
@@ -177,8 +181,8 @@ An optional adversarial test quality audit evaluated by **Riley** after baseline
 
 Running mutation testing on QA Ecosystem itself (`python main.py --self-test --mutation`, evaluating 30 deterministic mutants) yields:
 
-- **Score:** **93.3%** (28/30 killed, 2 survived, 0 timeout, 0 error; up from 12/30 = 40.0%)
-- **Surviving mutants (equivalent mutants):**
+- **Score:** **90.0%** (27/30 killed, 3 survived; up from 12/30 = 40.0%). The mutant sample is deterministic but shifts as the code changes; earlier runs on a smaller codebase scored 28/30.
+- **Known equivalent survivors** (the third survivor is not yet analysed):
   - `core/runner.py:61` (`or` → `and`): equivalent because `key in ALLOWED_ENV_KEYS` already restricts `upper` to the 9 allowlisted variable names, none of which match `SECRET_ENV_FRAGMENTS` or `"KEY"`, so both boolean operands are always `False`.
   - `policies/sable.py:74` (`>=` → `>`): equivalent because `looks_like_python_pytest` requires `tokens[2] == "pytest"`, which already makes `"pytest" in lowered` true on line 79 regardless of whether `len(tokens)` is `>= 3` or `> 3`.
 
