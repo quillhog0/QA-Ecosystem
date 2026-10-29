@@ -143,7 +143,7 @@ def detect_weak_tests(project_root: Path | None) -> dict[str, str]:
             continue
         rel = str(path.relative_to(project_root)).replace("\\", "/")
         try:
-            tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+            tree = ast.parse(path.read_text(encoding="utf-8-sig", errors="replace"))
         except (OSError, SyntaxError):
             continue
         for node in ast.walk(tree):

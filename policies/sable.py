@@ -384,7 +384,7 @@ def scan_tests_for_risks(
     seen_allowed: set[tuple[str, str, str]] = set()
     for path in _all_python_files(isolated_root):
         try:
-            tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+            tree = ast.parse(path.read_text(encoding="utf-8-sig", errors="replace"))
         except (OSError, SyntaxError) as exc:
             hits.append(f"{path.name}: cannot parse ({exc})")
             continue

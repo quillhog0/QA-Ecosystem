@@ -71,7 +71,7 @@ def split_code_and_tests(files: list[Path], root: Path) -> tuple[list[Path], lis
 
 def public_names(py_file: Path) -> list[str]:
     try:
-        tree = ast.parse(py_file.read_text(encoding="utf-8", errors="replace"))
+        tree = ast.parse(py_file.read_text(encoding="utf-8-sig", errors="replace"))
     except (OSError, SyntaxError):
         return []
     names: list[str] = []

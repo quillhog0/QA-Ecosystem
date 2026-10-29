@@ -137,6 +137,8 @@ def main(argv: list[str] | None = None) -> int:
         config.setdefault("riley", {})
         config["riley"] = dict(config.get("riley") or {})
         config["riley"]["veto_on_uncovered_claims"] = True
+        config["lexi"] = dict(config.get("lexi") or {})
+        config["lexi"]["veto_on_missing_code"] = True
     if args.sandbox:
         config.setdefault("sandbox", {})
         config["sandbox"] = dict(config.get("sandbox") or {})

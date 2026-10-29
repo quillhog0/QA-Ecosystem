@@ -97,7 +97,7 @@ def _imported_names(project_root: Path) -> set[str]:
         ):
             continue
         try:
-            tree = ast.parse(path.read_text(encoding="utf-8"))
+            tree = ast.parse(path.read_text(encoding="utf-8-sig"))
         except (SyntaxError, UnicodeDecodeError, OSError, ValueError):
             continue
         for node in ast.walk(tree):
@@ -187,7 +187,50 @@ def _backtick_functions(docs_root: Path, doc_globs: tuple[str, ...]) -> list[str
             if not match:
                 continue
             names.append(match.group(1))
+            if piece.endswith(")"):
+                _CALL_FORM.add(match.group(1))
     return names
+
+
+_OTHER_SOURCE_EXT = {
+    ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".html", ".css", ".sh",
+    ".yaml", ".yml", ".json", ".toml", ".ini", ".cfg", ".sql",
+}
+_CONFIG_EXT = {".yaml", ".yml", ".json", ".toml", ".ini", ".cfg"}
+_CONFIG_KEY_RE = re.compile(r"""^\s*["']?([A-Za-z_][\w.-]*)["']?\s*[:=]""", re.MULTILINE)
+_SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__", "docs", "dist", "build"}
+
+
+def _other_sources_text(project_root: Path, limit_bytes: int = 5_000_000) -> str:
+    """Text of non-doc project files (other languages, config, tests)."""
+    chunks: list[str] = []
+    total = 0
+    for path in sorted(project_root.rglob("*")):
+        if any(part in _SKIP_DIRS for part in path.relative_to(project_root).parts[:-1]):
+            continue
+        if path.suffix.lower() not in _OTHER_SOURCE_EXT or not path.is_file():
+            continue
+        try:
+            size = path.stat().st_size
+            if size > 1_000_000 or total + size > limit_bytes:
+                continue
+            text = path.read_text(encoding="utf-8", errors="replace")
+            if path.suffix.lower() in _CONFIG_EXT:
+                # config files count only for their keys, not free-text values
+                text = "\n".join(_CONFIG_KEY_RE.findall(text))
+            chunks.append(text)
+            total += size
+        except OSError:
+            continue
+    return "\n".join(chunks)
+
+
+def _code_shaped(ident: str) -> bool:
+    """snake_case, UPPER_SNAKE or camelCase names look like code, plain words do not."""
+    return "_" in ident.strip("_") or bool(re.search(r"[a-z][A-Z]", ident))
+
+
+_CALL_FORM: set[str] = set()
 
 
 EMOJI_START_RE = re.compile(r"^[\U00010000-\U0010ffff\u2600-\u27bf\u2300-\u23ff\u2b50\u2b55\u200d\ufe0f\s]+")
@@ -278,7 +321,7 @@ def _collect_code_ast_terms(code_files: list[Path]) -> tuple[set[str], set[str]]
     function_names: set[str] = set()
     for path in code_files:
         try:
-            tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+            tree = ast.parse(path.read_text(encoding="utf-8-sig", errors="replace"))
         except (OSError, SyntaxError):
             continue
         for node in ast.walk(tree):
@@ -345,6 +388,14 @@ def _heuristic_drift(
         except OSError:
             continue
 
+    # Backticked doc terms often name accounts, config keys or CLI values, so a
+    # missing name is a warning by default and a veto only in strict mode.
+    strict_missing = bool((config.get("lexi") or {}).get("veto_on_missing_code", False))
+    _CALL_FORM.clear()
+    other_text: str | None = None
+    # A missing name used in a promise ("`x` must ...") or written as a call
+    # is real drift; other backticked words are only a warning.
+    claim_text = " ".join(_extract_claims(docs_root, doc_globs))
     seen: set[str] = set()
     for ident in _backtick_functions(docs_root, doc_globs):
         if ident in seen:
@@ -380,12 +431,16 @@ def _heuristic_drift(
                 )
             )
             continue
+        if other_text is None:
+            other_text = _other_sources_text(project_root)
+        if re.search(rf"(?<![A-Za-z0-9_]){re.escape(ident)}(?![A-Za-z0-9_])", other_text):
+            continue
         findings.append(
             DriftFinding(
                 kind="missing_code",
                 path=ident,
                 message=f"docs mention `{ident}` but no matching module or public name exists in code",
-                severity="high",
+                severity="high" if (strict_missing or ident in _CALL_FORM or ident in claim_text or _code_shaped(ident)) else "medium",
             )
         )
 

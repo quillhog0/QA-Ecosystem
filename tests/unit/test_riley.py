@@ -337,3 +337,13 @@ def test_sable_allows_test_cleanup_only_when_sandboxed(tmp_path):
     hits, allowed = scan_tests_for_risks(tmp_path, sandboxed=True)
     assert not hits
     assert allowed and allowed[0]["call"].endswith("remove")
+
+
+def test_sable_parses_files_with_bom(tmp_path):
+    from policies.sable import scan_tests_for_risks
+
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "test_ok.py").write_bytes(b"\xef\xbb\xbfdef test_x():\n    assert 1 + 1 == 2\n")
+    hits, _ = scan_tests_for_risks(tmp_path)
+    assert not hits

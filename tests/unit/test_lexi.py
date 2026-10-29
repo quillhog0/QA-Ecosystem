@@ -88,7 +88,7 @@ def test_lexi_finds_missing_identifier(tmp_path: Path):
     report = inspect(
         docs_root=root / "docs",
         project_root=root,
-        config={"llm": {"provider": "none"}, "dry_run": True},
+        config={"llm": {"provider": "none"}, "dry_run": True, "lexi": {"veto_on_missing_code": True}},
     )
     assert report.verdict == Verdict.VETO.value
     assert any(f.path == "FooBarMissing" for f in report.findings)
@@ -108,7 +108,7 @@ def test_lexi_uses_doc_globs(tmp_path: Path):
         config={
             "llm": {"provider": "none"},
             "dry_run": True,
-            "lexi": {"doc_globs": ["**/*.rst"]},
+            "lexi": {"doc_globs": ["**/*.rst"], "veto_on_missing_code": True},
         },
     )
     assert report.verdict == Verdict.VETO.value
@@ -217,8 +217,22 @@ def test_lexi_monotonic_veto_llm_cannot_override_to_clear(tmp_path: Path, monkey
     report = inspect(
         docs_root=root / "docs",
         project_root=root,
-        config={"llm": {"provider": "mock"}, "dry_run": False},
+        config={"llm": {"provider": "mock"}, "dry_run": False, "lexi": {"veto_on_missing_code": True}},
     )
     assert report.verdict == Verdict.VETO.value
     assert any(f.path == "missing_func" for f in report.findings)
 
+
+
+def test_lexi_bare_missing_term_is_warning_by_default(tmp_path: Path):
+    root = mini_project(
+        tmp_path / "proj",
+        docs="# About\n\nMaintained by `someaccount`. Public helper `add`.\n",
+    )
+    report = inspect(
+        docs_root=root / "docs",
+        project_root=root,
+        config={"llm": {"provider": "none"}, "dry_run": True},
+    )
+    assert report.verdict == Verdict.CLEAR.value
+    assert any(f.kind == "missing_code" and f.severity == "medium" for f in report.findings)
