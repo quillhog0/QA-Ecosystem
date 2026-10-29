@@ -69,6 +69,8 @@ def test_build_bwrap_command_without_network(tmp_path: Path):
     ]
     assert (resolved_work, resolved_work) in ro_pairs
     assert (resolved_work, resolved_work) not in rw_pairs
+    assert ("/usr/bin", "/usr/bin") not in ro_pairs
+    assert ("/bin", "/bin") not in [p for p in ro_pairs if Path("/bin").is_symlink()]
     assert (resolved_iso, resolved_iso) in rw_pairs
     assert (str(work.resolve() / "pytest_cache"), str(work.resolve() / "pytest_cache")) in rw_pairs
     assert (str(work.resolve() / "pytest_tmp"), str(work.resolve() / "pytest_tmp")) in rw_pairs

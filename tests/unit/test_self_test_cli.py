@@ -44,3 +44,29 @@ def test_self_test_places_copy_outside_reports_and_finishes(tmp_path: Path):
         nested = False
     assert nested is False
     assert "verdict=" in proc.stdout
+
+
+def test_main_self_test_cleanup_ignores_already_removed_docs(tmp_path: Path):
+    from unittest.mock import patch
+    import main as main_mod
+    from core.packets import FinalReport, Verdict
+
+    fake_docs = tmp_path / "temp_docs_dir"
+    fake_docs.mkdir()
+    fake_report = FinalReport(
+        run_id="r-self",
+        verdict=Verdict.CLEAR.value,
+        sandbox="bwrap",
+        isolated_root=str(tmp_path / "iso"),
+    )
+
+    def _run_and_remove_docs(_project: Path, _docs: Path) -> FinalReport:
+        fake_docs.rmdir()
+        return fake_report
+
+    with patch("main.assemble_self_test_docs", return_value=fake_docs), \
+         patch("main.Vesper") as mock_vesper:
+        mock_vesper.return_value.run.side_effect = _run_and_remove_docs
+        rc = main_mod.main(["--self-test", "--reports-dir", str(tmp_path / "reports")])
+    assert rc == 0
+

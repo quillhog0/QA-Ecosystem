@@ -207,3 +207,31 @@ def test_isolation_copies_uncommitted_working_tree(tmp_path: Path):
     finally:
         release_isolation(handle, keep=False)
 
+
+def test_release_isolation_git_worktree_captures_output(tmp_path: Path):
+    from unittest.mock import patch
+
+    live = tmp_path / "live"
+    live.mkdir()
+    iso_dest = isolation_destination(live_root=live, run_id="test_wt_release")
+    handle = IsolationHandle(
+        live_root=live,
+        isolated_root=iso_dest,
+        method="git-worktree",
+        read_only=True,
+        skipped_secrets=[],
+        git_worktree=True,
+    )
+    with patch("core.isolation.subprocess.run") as mock_run:
+        release_isolation(handle, keep=False)
+
+    assert mock_run.call_count == 2
+    remove_call, prune_call = mock_run.call_args_list
+    assert "remove" in remove_call.args[0]
+    assert remove_call.kwargs.get("capture_output") is True
+    assert remove_call.kwargs.get("text") is True
+    assert "prune" in prune_call.args[0]
+    assert prune_call.kwargs.get("capture_output") is True
+    assert prune_call.kwargs.get("text") is True
+
+

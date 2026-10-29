@@ -92,7 +92,7 @@ def build_pytest_command(
         "-o",
         f"cache_dir={cache_dir}",
         "--basetemp",
-        str(basetemp),
+        str(basetemp / "run"),
     ]
     if extra_args:
         cmd.extend(extra_args)

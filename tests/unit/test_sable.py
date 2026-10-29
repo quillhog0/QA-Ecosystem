@@ -240,6 +240,16 @@ def test_sable_blocks_rootdir_and_cwd_outside_isolated_root(tmp_path: Path):
         cwd=iso,
     )
     assert decision.verdict == Verdict.BLOCK.value
+    cmd_eq = [sys.executable, "-m", "pytest", str(iso), f"--rootdir={elsewhere}"]
+    decision_eq = evaluate_preflight(
+        command=cmd_eq,
+        isolated_root=iso,
+        live_root=live,
+        allow_network=False,
+        env={},
+        cwd=iso,
+    )
+    assert decision_eq.verdict == Verdict.BLOCK.value
     cwd_decision = evaluate_preflight(
         command=_pytest_cmd(iso),
         isolated_root=iso,

@@ -52,3 +52,18 @@ def test_handoff_yaml_roundtrip():
     assert restored.run_id == "run-yaml"
     assert restored.from_role == "aria"
     assert restored.to_role == "riley"
+
+
+def test_write_reports_returns_written_paths(tmp_path):
+    from core.packets import FinalReport, Verdict
+    from core.report import exit_code_for, write_reports
+
+    report = FinalReport(run_id="run-paths", verdict=Verdict.CLEAR.value)
+    paths = write_reports(report, tmp_path / "out")
+    assert paths is not None
+    md_path, yml_path = paths
+    assert md_path.is_file()
+    assert yml_path.is_file()
+    assert exit_code_for(Verdict.CLEAR.value) == 0
+    assert exit_code_for(Verdict.VETO.value) == 1
+

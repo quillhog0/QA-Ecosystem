@@ -103,7 +103,7 @@ Execution of the isolated pytest test suite is wrapped in a kernel-level sandbox
 - **Network off:** Network access is completely disabled at the kernel level for tests by default; sockets cannot be connected.
 - **Filesystem boundaries:** System binaries and libraries (`/usr`, `/etc`, `/bin`, `/lib`, `/lib64`) and `work_dir` (including `_sable_guard.py`) are mounted read-only. `/tmp` is an isolated in-memory `tmpfs`. The only writable mounts inside the sandbox are the isolated project copy (`isolated_root`), `work_dir/pytest_cache`, `work_dir/pytest_tmp`, and `/home/sandbox`. Extra read-only mounts (`extra_ro_binds`) reject any path equal to or an ancestor of the host `$HOME` or `/`.
 - **Isolated `$HOME`:** `work_dir/home` is created and bound to `/home/sandbox` before `/home` is remounted read-only (`--remount-ro /home`), so `HOME` (`/home/sandbox`) exists and is writable only there while real host credentials, SSH keys, and user dotfiles in `$HOME` are never exposed.
-- **Strict environment allowlist:** `sanitized_env` passes only a strict allowlist (`PATH`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TMPDIR`, `TEMP`, `TMP`, `SYSTEMROOT`, `COMSPEC`) and explicitly never forwards `PYTEST_ADDOPTS`, `PYTHONSTARTUP`, `PYTHONPATH`, or `PYTHON*`/`PYTEST*` wildcards from the host.
+- **Strict environment allowlist:** `sanitized_env` passes only a strict allowlist (`PATH, LANG, LC_ALL, LC_CTYPE, TMPDIR, TEMP, TMP, SYSTEMROOT, COMSPEC`) and explicitly never forwards `PYTEST_ADDOPTS, PYTHONSTARTUP, PYTHONPATH` or `PYTHON*`/`PYTEST*` wildcards from the host.
 - **Path validation:** `run_pytest` resolves `isolated_root` and `work_dir` once at the start and raises `ValueError` if either contains `os.pathsep`.
 - **Process lifecycle:** Runs with `--die-with-parent` to ensure child processes terminate with the runner.
 - **Defense-in-depth:** The existing Sable runtime guard (`-p _sable_guard`, `NO_NETWORK=1`) remains active as a second layer on a read-only mount.
@@ -175,22 +175,12 @@ An optional adversarial test quality audit evaluated by **Riley** after baseline
 
 ### Self-test results
 
-Running mutation testing on QA Ecosystem itself (`main.py --project . --docs README.md --mutation`, evaluating 30 deterministic mutants) yields:
+Running mutation testing on QA Ecosystem itself (`python main.py --self-test --mutation`, evaluating 30 deterministic mutants) yields:
 
-- **Score:** **43.3%** (13 killed, 17 survived, 0 timeout, 0 error)
-- **Surviving mutants (weak points):**
-  - `agents/adapters.py:80` (`and` → `or`) and `81` (`return None` → `return True`): unasserted fallback when model completion returns empty.
-  - `agents/adapters.py:120` (`or` → `and`): unasserted branch in adapter payload normalization.
-  - `agents/aria.py:230` (`False` → `True`): default flag in scenario token weighting.
-  - `agents/aria.py:296`, `318` (`or` → `and`): heuristic token overlap matching thresholds.
-  - `agents/riley.py:54` (`False` → `True`): weak test classification fallback.
-  - `agents/riley.py:289` (`return <expr>` → `return None`): unasserted helper return in review formatting.
-  - `core/isolation.py:330`, `336` (`True` → `False`): check flags on git worktree prune/cleanup subprocess calls.
-  - `core/orchestrator.py:41` (`True` → `False`): default flag handling in orchestrator init.
-  - `core/packets.py:140` (`return <expr>` → `return None`): helper representation in packets dataclass.
-  - `core/report.py:109` (`==` → `!=`): formatting boundary in report generator.
-  - `main.py:127` (`return <expr>` → `return None`): exit code helper function in CLI entrypoint.
-  - `policies/sable.py:140` (`+` → `-`), `176` (`!=` → `==`): string offset and AST node filter branches in AST security scanner.
+- **Score:** **93.3%** (28/30 killed, 2 survived, 0 timeout, 0 error; up from 12/30 = 40.0%)
+- **Surviving mutants (equivalent mutants):**
+  - `core/runner.py:61` (`or` → `and`): equivalent because `key in ALLOWED_ENV_KEYS` already restricts `upper` to the 9 allowlisted variable names, none of which match `SECRET_ENV_FRAGMENTS` or `"KEY"`, so both boolean operands are always `False`.
+  - `policies/sable.py:74` (`>=` → `>`): equivalent because `looks_like_python_pytest` requires `tokens[2] == "pytest"`, which already makes `"pytest" in lowered` true on line 79 regardless of whether `len(tokens)` is `>= 3` or `> 3`.
 
 ## Config
 

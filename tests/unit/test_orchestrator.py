@@ -101,3 +101,79 @@ def test_project_config_cannot_override_effective_config(tmp_path: Path):
     assert mock_nova.call_args.kwargs["config"]["allow_network"] is False
     assert mock_nova.call_args.kwargs["config"]["dry_run"] is True
 
+
+def test_vesper_default_dry_run_is_true_and_loop_returns_none_on_veto(tmp_path: Path):
+    from core.isolation import IsolationHandle
+    from core.packets import ExecutionResult, FinalReport, HandoffPacket
+
+    assert Vesper({}).dry_run is True
+
+    project = mini_project(tmp_path / "proj")
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    vesper = Vesper({"reports_dir": str(tmp_path / "reports"), "isolation_method": "copy"})
+    handle = IsolationHandle(
+        live_root=project,
+        isolated_root=project,
+        method="copy",
+        read_only=False,
+        skipped_secrets=[],
+    )
+    packet = HandoffPacket(
+        run_id="r1",
+        stage="init",
+        from_role="vesper",
+        to_role="lexi",
+        project_root=str(project.parent),
+        docs_root=str(project / "docs"),
+        isolated_root=str(project),
+    )
+    report = FinalReport(run_id="r1", verdict=Verdict.PENDING.value)
+    failed_exec = ExecutionResult(collected=1, passed=0, failed=1, exit_code=1, sandbox_status="off")
+    with patch("agents.nova.execute", return_value=failed_exec):
+        loop_ret = vesper._loop(packet, handle, work_dir, report)
+    assert loop_ret is None
+    assert report.verdict == Verdict.VETO.value
+
+
+def test_adapters_complete_and_status_network_and_provider_guards(monkeypatch):
+    from unittest.mock import MagicMock
+    from agents import adapters
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test_key_val")
+    openrouter_no_net_cfg = {
+        "dry_run": False,
+        "allow_network": False,
+        "llm": {"provider": "openrouter", "call_in_dry_run": True},
+    }
+    assert adapters.complete(
+        system_prompt="sys", user_payload={"a": 1}, config=openrouter_no_net_cfg
+    ) is None
+
+    with patch("agents.adapters.complete", side_effect=AssertionError("complete must not be called")):
+        raw, status = adapters.complete_with_status(
+            system_prompt="sys", user_payload={"a": 1}, config=openrouter_no_net_cfg
+        )
+    assert raw is None
+    assert status == "none"
+
+    local_no_net_cfg = {
+        "dry_run": False,
+        "allow_network": False,
+        "llm": {
+            "provider": "local",
+            "base_url": "http://127.0.0.1:11434/v1",
+            "call_in_dry_run": True,
+        },
+    }
+    mock_resp = MagicMock()
+    mock_resp.json.return_value = {"choices": [{"message": {"content": "verdict: CLEAR"}}]}
+    mock_client = MagicMock()
+    mock_client.__enter__.return_value.post.return_value = mock_resp
+    with patch("httpx.Client", return_value=mock_client):
+        res = adapters.complete(
+            system_prompt="sys", user_payload={"a": 1}, config=local_no_net_cfg
+        )
+    assert res == "verdict: CLEAR"
+
+

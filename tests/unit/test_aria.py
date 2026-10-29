@@ -28,6 +28,49 @@ def test_aria_creates_no_claim_scenarios_without_claims(tmp_path: Path):
         config={"llm": {"provider": "none"}, "dry_run": True},
     )
     assert not any(s.id.startswith("C") for s in plan.scenarios)
+    s2 = next(s for s in plan.scenarios if s.id == "S2")
+    assert s2.negative is False
+
+
+def test_aria_from_llm_preserves_scenarios_and_assumptions():
+    from agents.aria import _from_llm
+    from core.packets import Scenario, TestPlan
+
+    fallback = TestPlan(
+        scenarios=[
+            Scenario(
+                id="C1",
+                title="Fallback claim",
+                steps=["s"],
+                acceptance=["a"],
+                negative=False,
+                covered_by=["tests/test_x.py::test_a"],
+                score=6,
+            )
+        ],
+        coverage_notes="fallback notes",
+        assumptions=["fallback assumption"],
+    )
+    llm_data = {
+        "scenarios": [
+            {
+                "id": "C1",
+                "title": "LLM claim",
+                "steps": ["step 1"],
+                "acceptance": ["acc 1"],
+                "negative": True,
+            }
+        ],
+        "coverage_notes": "llm notes",
+        "assumptions": ["llm custom assumption"],
+    }
+    merged = _from_llm(llm_data, fallback)
+    assert len(merged.scenarios) == 1
+    assert merged.scenarios[0].title == "LLM claim"
+    assert merged.scenarios[0].negative is True
+    assert merged.scenarios[0].covered_by == ["tests/test_x.py::test_a"]
+    assert merged.scenarios[0].score == 6
+    assert merged.assumptions == ["llm custom assumption"]
 
 
 def test_aria_maps_claim_to_covering_test(tmp_path: Path):

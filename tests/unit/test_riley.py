@@ -193,7 +193,9 @@ def test_riley_ast_detects_weak_tests_and_vetoes_uncovered_claim(tmp_path):
         "def test_tautology_true():\n"
         "    assert True\n"
         "def test_tautology_callable():\n"
-        "    assert callable(x)\n",
+        "    assert callable(x)\n"
+        "def test_strong_assertion():\n"
+        "    assert 1 + 1 == 2\n",
         encoding="utf-8",
     )
 
@@ -202,6 +204,7 @@ def test_riley_ast_detects_weak_tests_and_vetoes_uncovered_claim(tmp_path):
     assert "test_tautology_none" in weak and weak["test_tautology_none"] == "tautology assertion"
     assert "test_tautology_true" in weak and weak["test_tautology_true"] == "tautology assertion"
     assert "test_tautology_callable" in weak and weak["test_tautology_callable"] == "tautology assertion"
+    assert "test_strong_assertion" not in weak
 
     plan = TestPlan(
         scenarios=[
@@ -226,5 +229,29 @@ def test_riley_ast_detects_weak_tests_and_vetoes_uncovered_claim(tmp_path):
     res_rev = review_results(plan, execution, config={"llm": {"provider": "none"}, "dry_run": True}, project_root=proj)
     assert res_rev.verdict == Verdict.VETO.value
     assert "weak test detected" in res_rev.root_cause
+
+
+def test_riley_vetoes_when_pip_install_failed():
+    plan = TestPlan(
+        scenarios=[
+            Scenario(id="S1", title="happy", steps=["run"], acceptance=["ok"], negative=False),
+            Scenario(id="S2", title="negative", steps=["run"], acceptance=["fail"], negative=True),
+        ]
+    )
+    execution = {
+        "collected": 1,
+        "passed": 1,
+        "failed": 0,
+        "errors": 0,
+        "exit_code": 0,
+        "install_status": "pip install failed: unsafe requirement: git+https://example.com/repo.git",
+        "stdout": "1 passed",
+        "stderr": "",
+    }
+    rev = review_results(plan, execution, config={"llm": {"provider": "none"}, "dry_run": True})
+    assert rev is not None
+    assert rev.verdict == Verdict.VETO.value
+    assert "dependency installation failed" in rev.root_cause
+
 
 
