@@ -101,11 +101,13 @@ Execution of the isolated pytest test suite is wrapped in a kernel-level sandbox
 
 - **Namespaces:** Unshares all namespaces (`--unshare-all`: network, mount, PID, IPC, UTS, and user).
 - **Network off:** Network access is completely disabled at the kernel level for tests by default; sockets cannot be connected.
-- **Filesystem boundaries:** System binaries and libraries (`/usr`, `/etc`, `/bin`, `/lib`, `/lib64`) are mounted read-only. `/tmp` is an isolated in-memory `tmpfs`. The only writable directories are the isolated project copy and the run's work directory.
-- **No `$HOME` access:** `/home` is remounted read-only; real host credentials, SSH keys, and user dotfiles are never exposed or writable.
+- **Filesystem boundaries:** System binaries and libraries (`/usr`, `/etc`, `/bin`, `/lib`, `/lib64`) and `work_dir` (including `_sable_guard.py`) are mounted read-only. `/tmp` is an isolated in-memory `tmpfs`. The only writable mounts inside the sandbox are the isolated project copy (`isolated_root`), `work_dir/pytest_cache`, `work_dir/pytest_tmp`, and `/home/sandbox`. Extra read-only mounts (`extra_ro_binds`) reject any path equal to or an ancestor of the host `$HOME` or `/`.
+- **Isolated `$HOME`:** `work_dir/home` is created and bound to `/home/sandbox` before `/home` is remounted read-only (`--remount-ro /home`), so `HOME` (`/home/sandbox`) exists and is writable only there while real host credentials, SSH keys, and user dotfiles in `$HOME` are never exposed.
+- **Strict environment allowlist:** `sanitized_env` passes only a strict allowlist (`PATH`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TMPDIR`, `TEMP`, `TMP`, `SYSTEMROOT`, `COMSPEC`) and explicitly never forwards `PYTEST_ADDOPTS`, `PYTHONSTARTUP`, `PYTHONPATH`, or `PYTHON*`/`PYTEST*` wildcards from the host.
+- **Path validation:** `run_pytest` resolves `isolated_root` and `work_dir` once at the start and raises `ValueError` if either contains `os.pathsep`.
 - **Process lifecycle:** Runs with `--die-with-parent` to ensure child processes terminate with the runner.
-- **Defense-in-depth:** The existing Sable runtime guard (`-p _sable_guard`, `NO_NETWORK=1`) remains active as a second layer.
-- **Configuration:** Set via `sandbox.mode = auto | required | off` (default `auto`) or CLI `--sandbox [auto|required|off]`. When set to `required`, a missing `bwrap` binary yields an immediate `VETO`. When `auto` on non-Linux or systems without `bwrap`, it falls back cleanly with a report entry `sandbox: unavailable`. Tested projects can never modify sandbox configuration.
+- **Defense-in-depth:** The existing Sable runtime guard (`-p _sable_guard`, `NO_NETWORK=1`) remains active as a second layer on a read-only mount.
+- **Configuration:** Set via `sandbox.mode = auto | required | off` (default `auto`) or CLI `--sandbox [auto|required|off]`. Unknown or misspelled modes raise `ValueError` (fail closed). When set to `required`, a missing `bwrap` binary yields an immediate `VETO`. When `auto` falls back on non-Linux or systems without `bwrap`, the report states `sandbox: unavailable (ran unsandboxed)` clearly. Tested projects can never modify sandbox configuration.
 
 ## Install
 
@@ -209,9 +211,9 @@ Sable and Nova never depend on a model. OpenRouter is used only when `OPENROUTER
 
 ## Known limits
 
-- **Bubblewrap coverage & non-covered vectors:** On Linux with `bwrap` installed, test suites run in an unprivileged container sandbox (unshared network, mount, PID, IPC, UTS, and user namespaces, read-only system trees, denied `$HOME` access, and tmpfs `/tmp`).
-  - *What bwrap covers:* Kernel-enforced denial of socket creation and outbound network connections, prevention of writes outside the isolated project copy and run work directory, and isolation from host user files and credentials in `$HOME`.
-  - *What bwrap does not cover:* It does not protect against host Linux kernel vulnerabilities; it does not enforce cgroup-based CPU/memory quotas; and dependency installation (`pip install`) runs in a preliminary step before the sandbox (though manifests are statically screened for unsafe package sources). On platforms without `bwrap` or non-Linux systems, execution falls back to process-level isolation (`chmod`, `-p _sable_guard` monkeypatching, and static AST scanning).
+- **Bubblewrap coverage & non-covered vectors:** On Linux with `bwrap` installed, test suites run in an unprivileged container sandbox (unshared network, mount, PID, IPC, UTS, and user namespaces, read-only system trees and `work_dir`, writable mounts restricted to `isolated_root`, `pytest_cache`, `pytest_tmp`, and `/home/sandbox`, and tmpfs `/tmp`).
+  - *What bwrap covers:* Kernel-enforced denial of socket creation and outbound network connections, prevention of writes to `work_dir/_sable_guard.py` or outside the isolated project copy and designated scratch directories (`pytest_cache`, `pytest_tmp`, `/home/sandbox`), rejection of read-only mounts equal to or above `$HOME` or `/`, and isolation from host user files and credentials in `$HOME`.
+  - *What bwrap does not cover:* It does not protect against host Linux kernel vulnerabilities; it does not enforce cgroup-based CPU/memory quotas; `/etc` is mounted read-only so world-readable host files under `/etc` remain readable; and dependency installation (`pip install`) runs in a preliminary step before the sandbox (though manifests are statically screened for unsafe package sources). On platforms without `bwrap` or non-Linux systems in `auto` mode, execution falls back to process-level isolation (`chmod`, `-p _sable_guard` monkeypatching, and static AST scanning) and reports `sandbox: unavailable (ran unsandboxed)`.
 - **With an LLM enabled, docs and code go to the provider unmasked.** Nothing is redacted or anonymised before the API call.
 - **Claim-to-test mapping is a heuristic.** Aria matches doc claims to tests by token overlap and test-body analysis. It is not formal verification.
 

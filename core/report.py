@@ -24,7 +24,7 @@ def render_markdown(report: FinalReport) -> str:
         f"- **finished:** {report.finished_at}",
     ]
     if report.sandbox == "unavailable":
-        lines.append("- **warning:** sandbox: unavailable (bubblewrap not found or not on Linux)")
+        lines.append("- **warning:** sandbox: unavailable (ran unsandboxed)")
     if report.tested_tree:
         lines.append(f"- **tested_tree:** {report.tested_tree}")
     if report.escalation:

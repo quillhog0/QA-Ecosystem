@@ -51,16 +51,48 @@ def test_build_bwrap_command_without_network(tmp_path: Path):
     assert "--remount-ro" in wrapped
     assert "/home" in wrapped
 
-    # Read-write bindings for iso and work
+    # Read-only binding for work_dir, read-write only for iso, pytest_cache, pytest_tmp, and /home/sandbox
+    resolved_iso = str(iso.resolve())
+    resolved_work = str(work.resolve())
     assert "--bind" in wrapped
-    assert str(iso.resolve()) in wrapped
-    assert str(work.resolve()) in wrapped
+    assert resolved_iso in wrapped
+
+    ro_pairs = [
+        (wrapped[i + 1], wrapped[i + 2])
+        for i, tok in enumerate(wrapped[:-2])
+        if tok == "--ro-bind"
+    ]
+    rw_pairs = [
+        (wrapped[i + 1], wrapped[i + 2])
+        for i, tok in enumerate(wrapped[:-2])
+        if tok == "--bind"
+    ]
+    assert (resolved_work, resolved_work) in ro_pairs
+    assert (resolved_work, resolved_work) not in rw_pairs
+    assert (resolved_iso, resolved_iso) in rw_pairs
+    assert (str(work.resolve() / "pytest_cache"), str(work.resolve() / "pytest_cache")) in rw_pairs
+    assert (str(work.resolve() / "pytest_tmp"), str(work.resolve() / "pytest_tmp")) in rw_pairs
+    assert (str(work.resolve() / "home"), "/home/sandbox") in rw_pairs
+    assert (work.resolve() / "home").is_dir()
+
+    # Bind /home/sandbox happens before --remount-ro /home
+    bind_home_idx = next(
+        i
+        for i in range(len(wrapped) - 2)
+        if wrapped[i] == "--bind" and wrapped[i + 2] == "/home/sandbox"
+    )
+    remount_ro_home_idx = next(
+        i
+        for i in range(len(wrapped) - 1)
+        if wrapped[i] == "--remount-ro" and wrapped[i + 1] == "/home"
+    )
+    assert bind_home_idx < remount_ro_home_idx
 
     # Home set to sandbox home and chdir to iso
     assert "--setenv" in wrapped
     assert "/home/sandbox" in wrapped
     assert "--chdir" in wrapped
-    assert str(iso.resolve()) in wrapped
+    assert resolved_iso in wrapped
 
     # Trailing command
     assert wrapped[-4:] == ["python", "-m", "pytest", "-q"]
@@ -89,9 +121,24 @@ def test_build_bwrap_command_with_network(tmp_path: Path):
 def test_sandbox_mode_resolution():
     assert resolve_sandbox_mode(None) == "auto"
     assert resolve_sandbox_mode({}) == "auto"
+    assert resolve_sandbox_mode({"sandbox": None}) == "auto"
+    assert resolve_sandbox_mode({"sandbox": {}}) == "auto"
+    assert resolve_sandbox_mode({"sandbox": {"mode": ""}}) == "auto"
+    assert resolve_sandbox_mode({"sandbox": ""}) == "auto"
+    assert resolve_sandbox_mode({"sandbox": "required"}) == "required"
     assert resolve_sandbox_mode({"sandbox": {"mode": "required"}}) == "required"
     assert resolve_sandbox_mode({"sandbox": {"mode": "off"}}) == "off"
-    assert resolve_sandbox_mode({"sandbox": {"mode": "UNKNOWN"}}) == "auto"
+
+    with pytest.raises(ValueError, match="Unknown sandbox mode"):
+        resolve_sandbox_mode({"sandbox": {"mode": "UNKNOWN"}})
+    with pytest.raises(ValueError, match="Unknown sandbox mode"):
+        resolve_sandbox_mode({"sandbox": {"mode": "requried"}})
+    with pytest.raises(ValueError, match="Unknown sandbox mode"):
+        resolve_sandbox_mode({"sandbox": "invalid"})
+    with pytest.raises(ValueError, match="Invalid sandbox mode"):
+        resolve_sandbox_mode({"sandbox": {"mode": 123}})
+    with pytest.raises(ValueError, match="Invalid sandbox configuration"):
+        resolve_sandbox_mode({"sandbox": 123})
 
     # Status tests
     assert get_sandbox_status({"sandbox": {"mode": "off"}}) == (False, "off", None)
@@ -107,6 +154,53 @@ def test_sandbox_mode_resolution():
     with patch("core.sandbox.is_bwrap_available", return_value=True):
         assert get_sandbox_status({"sandbox": {"mode": "auto"}}) == (True, "bwrap", None)
         assert get_sandbox_status({"sandbox": {"mode": "required"}}) == (True, "bwrap", None)
+
+
+def test_sandbox_auto_fallback_reports_ran_unsandboxed(tmp_path: Path):
+    project = mini_project(tmp_path / "proj")
+    reports = tmp_path / "reports"
+    config = {
+        "reports_dir": str(reports),
+        "isolation_method": "copy",
+    }
+    with patch("core.sandbox.is_bwrap_available", return_value=False):
+        report = Vesper(config).run(project, project / "docs")
+
+    assert report.sandbox == "unavailable"
+    md_text = (reports / f"{report.run_id}.md").read_text(encoding="utf-8")
+    assert "sandbox: unavailable (ran unsandboxed)" in md_text
+    assert any("sandbox: unavailable (ran unsandboxed)" in r.summary for r in report.role_results)
+
+
+def test_extra_ro_binds_rejects_home_and_root_and_ancestors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    iso = tmp_path / "iso"
+    work = tmp_path / "work"
+    iso.mkdir()
+    work.mkdir()
+    host_home = Path.home().resolve()
+
+    # Python directly inside host $HOME
+    with pytest.raises(ValueError, match="Refusing to bind unsafe read-only path"):
+        wrap_command(["pytest"], isolated_root=iso, work_dir=work, python=host_home / "python3")
+
+    # Python directly inside /
+    with pytest.raises(ValueError, match="Refusing to bind unsafe read-only path"):
+        wrap_command(["pytest"], isolated_root=iso, work_dir=work, python=Path("/python3"))
+
+    # Python directly inside ancestor of $HOME (e.g. /home/python3)
+    if host_home.parent != Path("/"):
+        with pytest.raises(ValueError, match="Refusing to bind unsafe read-only path"):
+            wrap_command(["pytest"], isolated_root=iso, work_dir=work, python=host_home.parent / "python3")
+
+    # sys.prefix equal to host $HOME or /
+    monkeypatch.setattr("sys.prefix", str(host_home))
+    monkeypatch.setattr("sys.base_prefix", "/usr")
+    with pytest.raises(ValueError, match="Refusing to bind unsafe read-only path"):
+        wrap_command(["pytest"], isolated_root=iso, work_dir=work, python=Path("/usr/bin/python3"))
+
+    monkeypatch.setattr("sys.prefix", "/")
+    with pytest.raises(ValueError, match="Refusing to bind unsafe read-only path"):
+        wrap_command(["pytest"], isolated_root=iso, work_dir=work, python=Path("/usr/bin/python3"))
 
 
 def test_sandbox_mode_required_vetoes_when_bwrap_missing(tmp_path: Path):
@@ -144,19 +238,38 @@ def test_project_config_cannot_disable_sandbox(tmp_path: Path):
 
 
 @pytest.mark.skipif(not is_bwrap_available(), reason="bwrap is not available on this system")
-def test_bwrap_integration_blocks_home_network_and_outside_reads(tmp_path: Path):
+def test_bwrap_integration_blocks_home_network_and_outside_reads(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("PYTEST_ADDOPTS", "--unknown-evil-flag-from-host")
     project = mini_project(tmp_path / "sec_proj")
     tests_dir = project / "tests"
 
     test_content = '''import os
 import socket
 from pathlib import Path
+import _sable_guard
 import pytest
 
-def test_write_to_home_fails():
-    home = Path(os.environ.get("HOME", "/home/sandbox"))
+def test_sandbox_home_writable_only_at_home_sandbox():
+    home = Path(os.environ.get("HOME", ""))
+    assert str(home) == "/home/sandbox"
+    assert home.is_dir()
+    probe = home / "writable_probe.txt"
+    probe.write_text("ok", encoding="utf-8")
+    assert probe.read_text(encoding="utf-8") == "ok"
     with pytest.raises(OSError):
-        (home / "should_never_exist.txt").write_text("pwn")
+        (home.parent / "should_never_exist.txt").write_text("pwn", encoding="utf-8")
+
+def test_sable_guard_and_work_dir_are_read_only():
+    guard_file = Path(_sable_guard.__file__).resolve()
+    with pytest.raises(OSError):
+        guard_file.write_text("# overwritten", encoding="utf-8")
+    with pytest.raises(OSError):
+        (guard_file.parent / "unauthorized.txt").write_text("pwn", encoding="utf-8")
+    with pytest.raises(OSError):
+        (guard_file.parent / "home" / "via_work_dir.txt").write_text("pwn", encoding="utf-8")
+
+def test_host_pytest_addopts_is_not_visible():
+    assert "PYTEST_ADDOPTS" not in os.environ
 
 def test_open_socket_fails():
     with pytest.raises((OSError, RuntimeError)):
@@ -196,13 +309,11 @@ def test_bwrap_integration_catches_unhandled_home_write(tmp_path: Path):
     docs_dir.mkdir(parents=True, exist_ok=True)
     (docs_dir / "overview.md").write_text("# Evil test\n", encoding="utf-8")
 
-    # Test attempts to write to $HOME without expecting failure
-    test_content = '''import os
-from pathlib import Path
+    # Test attempts to write to /home outside /home/sandbox without expecting failure
+    test_content = '''from pathlib import Path
 
 def test_unauthorized_home_write():
-    home = Path(os.environ.get("HOME", "/home/sandbox"))
-    (home / "evil.txt").write_text("evil")
+    Path("/home/evil.txt").write_text("evil", encoding="utf-8")
 '''
     (tests_dir / "test_evil.py").write_text(test_content, encoding="utf-8")
     (tests_dir / "__init__.py").write_text("", encoding="utf-8")

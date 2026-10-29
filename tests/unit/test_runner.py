@@ -62,3 +62,67 @@ def test_parse_counts_collection_error_leaves_collected_zero():
     assert collected == 0
     assert errors == 1
 
+
+def test_sanitized_env_strict_allowlist_and_blocks_pytest_python_vars(monkeypatch):
+    monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.setenv("LANG", "C.UTF-8")
+    monkeypatch.setenv("PYTEST_ADDOPTS", "-s --tb=long")
+    monkeypatch.setenv("PYTHONSTARTUP", "/tmp/evil.py")
+    monkeypatch.setenv("PYTHONPATH", "/tmp/evil_path")
+    monkeypatch.setenv("PYTEST_DB_URI", "postgresql://user:pass@localhost/db")
+    monkeypatch.setenv("PYTHON_CUSTOM_FLAG", "1")
+    monkeypatch.setenv("USER", "realuser")
+    monkeypatch.setenv("LOGNAME", "realuser")
+    monkeypatch.setenv("HOME", "/home/realuser")
+    monkeypatch.setenv("VIRTUAL_ENV", "/home/realuser/.venv")
+
+    env = sanitized_env(allow_network=False)
+    assert env["PATH"] == "/usr/bin"
+    assert env["LANG"] == "C.UTF-8"
+    assert "PYTEST_ADDOPTS" not in env
+    assert "PYTHONSTARTUP" not in env
+    assert "PYTHONPATH" not in env
+    assert "PYTEST_DB_URI" not in env
+    assert "PYTHON_CUSTOM_FLAG" not in env
+    assert "USER" not in env
+    assert "LOGNAME" not in env
+    assert "HOME" not in env
+    assert "VIRTUAL_ENV" not in env
+
+
+def test_run_pytest_rejects_pathsep_and_resolves_paths(tmp_path, monkeypatch):
+    import os
+    import pytest
+    from core.runner import run_pytest
+
+    iso = tmp_path / "iso"
+    work = tmp_path / "work"
+    iso.mkdir()
+    work.mkdir()
+    (iso / "test_ok.py").write_text(
+        "import os\ndef test_env():\n    assert 'PYTEST_ADDOPTS' not in os.environ\n",
+        encoding="utf-8",
+    )
+
+    bad_iso = tmp_path / f"bad{os.pathsep}iso"
+    with pytest.raises(ValueError, match="path separator"):
+        run_pytest(bad_iso, work_dir=work, allow_network=False, config={"sandbox": {"mode": "off"}})
+
+    bad_work = tmp_path / f"bad{os.pathsep}work"
+    with pytest.raises(ValueError, match="path separator"):
+        run_pytest(iso, work_dir=bad_work, allow_network=False, config={"sandbox": {"mode": "off"}})
+
+    # Symlink resolution and host PYTEST_ADDOPTS isolation
+    iso_link = tmp_path / "iso_link"
+    work_link = tmp_path / "work_link"
+    iso_link.symlink_to(iso)
+    work_link.symlink_to(work)
+    monkeypatch.setenv("PYTEST_ADDOPTS", "--nonexistent-pytest-option")
+    monkeypatch.setenv("PYTHONPATH", "/host/should/not/pass")
+
+    res = run_pytest(iso_link, work_dir=work_link, allow_network=False, config={"sandbox": {"mode": "off"}})
+    assert res.exit_code == 0
+    assert res.passed == 1
+    assert res.isolated_root == str(iso.resolve())
+
+

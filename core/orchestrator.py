@@ -314,7 +314,11 @@ class Vesper:
                     f"collected={execution.collected} passed={execution.passed} "
                     f"failed={execution.failed} exit={execution.exit_code} "
                     f"duration={execution.duration_seconds}s install={execution.install_status} "
-                    f"sandbox={execution.sandbox_status}"
+                    + (
+                        "sandbox: unavailable (ran unsandboxed)"
+                        if execution.sandbox_status == "unavailable"
+                        else f"sandbox={execution.sandbox_status}"
+                    )
                 ),
                 details={
                     "collected": execution.collected,

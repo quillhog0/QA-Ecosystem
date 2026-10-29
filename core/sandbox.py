@@ -35,14 +35,29 @@ def resolve_sandbox_mode(config: dict[str, Any] | None) -> str:
     if not config:
         return "auto"
     sb = config.get("sandbox")
+    if sb is None:
+        return "auto"
     if isinstance(sb, dict):
-        mode = str(sb.get("mode") or "auto").strip().lower()
+        raw = sb.get("mode")
+        if raw is None or (isinstance(raw, str) and not raw.strip()):
+            return "auto"
+        if not isinstance(raw, str):
+            raise ValueError(
+                f"Invalid sandbox mode: {raw!r}; expected 'auto', 'required', or 'off'"
+            )
+        mode = raw.strip().lower()
     elif isinstance(sb, str):
+        if not sb.strip():
+            return "auto"
         mode = sb.strip().lower()
     else:
-        mode = "auto"
+        raise ValueError(
+            f"Invalid sandbox configuration: {sb!r}; expected mapping or mode string"
+        )
     if mode not in {"auto", "required", "off"}:
-        return "auto"
+        raise ValueError(
+            f"Unknown sandbox mode: {mode!r}; expected 'auto', 'required', or 'off'"
+        )
     return mode
 
 
@@ -71,6 +86,17 @@ def get_sandbox_status(config: dict[str, Any] | None) -> tuple[bool, str, str | 
     return False, "unavailable", None
 
 
+def _validate_ro_bind_path(path: Path, host_home: Path) -> Path:
+    """Reject any path that equals or is an ancestor of the host $HOME or of /."""
+    resolved = path.resolve()
+    if resolved == Path("/") or host_home.is_relative_to(resolved):
+        raise ValueError(
+            f"Refusing to bind unsafe read-only path '{resolved}': "
+            f"equals or is an ancestor of host HOME ('{host_home}') or '/'"
+        )
+    return resolved
+
+
 def wrap_command(
     cmd: list[str],
     *,
@@ -84,6 +110,13 @@ def wrap_command(
     bwrap_bin = bwrap_path or get_bwrap_path() or "bwrap"
     iso = isolated_root.resolve()
     work = work_dir.resolve()
+    cache_dir = work / "pytest_cache"
+    pytest_tmp_dir = work / "pytest_tmp"
+    home_dir = work / "home"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    pytest_tmp_dir.mkdir(parents=True, exist_ok=True)
+    home_dir.mkdir(parents=True, exist_ok=True)
+    host_home = Path.home().resolve()
 
     args = [
         bwrap_bin,
@@ -118,22 +151,28 @@ def wrap_command(
 
     # 1. Host virtualenv if running inside one
     if sys.prefix != sys.base_prefix:
-        extra_ro_binds.add(Path(sys.prefix).resolve())
+        extra_ro_binds.add(_validate_ro_bind_path(Path(sys.prefix), host_home))
 
     # 2. Python executable from argument
     if python:
-        py_arg = Path(python).resolve()
+        raw_py = Path(python).expanduser()
+        if raw_py.is_absolute() or len(raw_py.parts) > 1:
+            raw_parent = raw_py.parent.resolve()
+            if not str(raw_parent).startswith(("/usr", "/bin", "/sbin")):
+                _validate_ro_bind_path(raw_parent, host_home)
+        py_arg = raw_py.resolve()
         if (py_arg.parent.parent / "pyvenv.cfg").is_file():
-            extra_ro_binds.add(py_arg.parent.parent.resolve())
+            extra_ro_binds.add(_validate_ro_bind_path(py_arg.parent.parent, host_home))
         elif not str(py_arg).startswith("/usr") and not str(py_arg).startswith("/bin"):
-            extra_ro_binds.add(py_arg.parent.resolve())
+            extra_ro_binds.add(_validate_ro_bind_path(py_arg.parent, host_home))
 
     # 3. Path from sys.executable
     raw_exe = Path(sys.executable)
     if (raw_exe.parent.parent / "pyvenv.cfg").is_file():
-        extra_ro_binds.add(raw_exe.parent.parent.resolve())
+        extra_ro_binds.add(_validate_ro_bind_path(raw_exe.parent.parent, host_home))
 
     for root_path in sorted(extra_ro_binds):
+        _validate_ro_bind_path(root_path, host_home)
         if root_path != iso and root_path != work:
             try:
                 root_path.relative_to(iso)
@@ -147,11 +186,14 @@ def wrap_command(
                 pass
             args.extend(["--ro-bind", str(root_path), str(root_path)])
 
-    # Read-write bindings strictly for isolated copy and work directory
+    # Read-write binding for isolated copy; work_dir is read-only except cache, tmp, and sandbox home
     args.extend(["--bind", str(iso), str(iso)])
-    args.extend(["--bind", str(work), str(work)])
+    args.extend(["--ro-bind", str(work), str(work)])
+    args.extend(["--bind", str(cache_dir), str(cache_dir)])
+    args.extend(["--bind", str(pytest_tmp_dir), str(pytest_tmp_dir)])
+    args.extend(["--bind", str(home_dir), "/home/sandbox"])
 
-    # Remount /home read-only to ensure test process cannot touch host or virtual home
+    # Remount /home read-only so HOME exists and is writable only at /home/sandbox
     args.extend(["--remount-ro", "/home"])
 
     # Network isolation

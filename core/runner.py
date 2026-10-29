@@ -30,33 +30,37 @@ SECRET_ENV_FRAGMENTS = (
 )
 
 
+ALLOWED_ENV_KEYS = frozenset({
+    "PATH",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TMPDIR",
+    "TEMP",
+    "TMP",
+    "SYSTEMROOT",
+    "COMSPEC",
+})
+
+NEVER_PASS_ENV_KEYS = frozenset({
+    "PYTEST_ADDOPTS",
+    "PYTHONSTARTUP",
+    "PYTHONPATH",
+})
+
+
 def sanitized_env(*, allow_network: bool) -> dict[str, str]:
-    """Build a minimal environment. Drop secret-looking variables."""
-    keep = {
-        "PATH",
-        "LANG",
-        "LC_ALL",
-        "LC_CTYPE",
-        "HOME",
-        "USER",
-        "LOGNAME",
-        "TMPDIR",
-        "TEMP",
-        "TMP",
-        "PYTHONPATH",
-        "VIRTUAL_ENV",
-        "SYSTEMROOT",
-        "COMSPEC",
-    }
+    """Build a minimal environment from a strict allowlist. Drop secret-looking variables."""
     env: dict[str, str] = {}
     for key, value in os.environ.items():
-        upper = key.upper()
-        if any(frag in upper for frag in SECRET_ENV_FRAGMENTS):
+        if key in NEVER_PASS_ENV_KEYS:
             continue
-        if key in keep or key.startswith("PYTEST") or key.startswith("PYTHON"):
-            if "SECRET" in upper or "TOKEN" in upper or "KEY" in upper:
-                continue
-            env[key] = value
+        if key not in ALLOWED_ENV_KEYS:
+            continue
+        upper = key.upper()
+        if any(frag in upper for frag in SECRET_ENV_FRAGMENTS) or "KEY" in upper:
+            continue
+        env[key] = value
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     env["PYTHONUNBUFFERED"] = "1"
     if not allow_network:
@@ -140,6 +144,17 @@ def run_pytest(
     import subprocess
     from core.sandbox import get_sandbox_status, wrap_command
 
+    if os.pathsep in str(isolated_root) or os.pathsep in str(work_dir):
+        raise ValueError(
+            f"isolated_root and work_dir must not contain path separator {os.pathsep!r}"
+        )
+    isolated_root = Path(isolated_root).resolve()
+    work_dir = Path(work_dir).resolve()
+    if os.pathsep in str(isolated_root) or os.pathsep in str(work_dir):
+        raise ValueError(
+            f"Resolved isolated_root and work_dir must not contain path separator {os.pathsep!r}"
+        )
+
     sandbox_enabled, sandbox_status, failure_reason = get_sandbox_status(config)
     if failure_reason:
         return ExecutionResult(
@@ -173,12 +188,7 @@ def run_pytest(
     Path(env["HOME"]).mkdir(parents=True, exist_ok=True)
     extra_path = str(isolated_root)
     work_path = str(work_dir)
-    existing = env.get("PYTHONPATH", "")
-    env["PYTHONPATH"] = (
-        work_path + os.pathsep + extra_path
-        if not existing
-        else work_path + os.pathsep + extra_path + os.pathsep + existing
-    )
+    env["PYTHONPATH"] = work_path + os.pathsep + extra_path
     env["QA_AGENT_NOVA"] = "1"
 
     started = time.monotonic()
