@@ -112,6 +112,17 @@ def is_weak_test_node(fn_node: ast.FunctionDef | ast.AsyncFunctionDef) -> tuple[
 
     asserts = [n for n in ast.walk(fn_node) if isinstance(n, ast.Assert)]
     if not asserts:
+        # unittest-style assertions (self.assertEqual, self.assertRaises, self.fail)
+        unittest_calls = any(
+            isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Attribute)
+            and isinstance(n.func.value, ast.Name)
+            and n.func.value.id == "self"
+            and (n.func.attr.startswith("assert") or n.func.attr == "fail")
+            for n in ast.walk(fn_node)
+        )
+        if unittest_calls:
+            return False, "ok"
         return True, "no assertions"
     if all(is_tautology_assert(a) for a in asserts):
         return True, "tautology assertion"

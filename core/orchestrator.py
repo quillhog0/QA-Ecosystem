@@ -255,6 +255,7 @@ class Vesper:
             env=env,
             cwd=isolated,
             allow_in_tests=(self.config.get("sable") or {}).get("allow_in_tests"),
+            sandboxed=report.sandbox == "bwrap",
         )
         allowed_note = ""
         if policy.allowed:

@@ -364,11 +364,20 @@ def _match_allow(rel: str, call: str, allows: list[dict[str, str]]) -> dict[str,
     return None
 
 
+DELETE_CALLS = {"remove", "unlink", "rmtree", "removedirs"}
+SANDBOX_DELETE_REASON = "file deletion is confined to the isolated copy by the Bubblewrap sandbox"
+
+
 def scan_tests_for_risks(
     isolated_root: Path,
     allow_in_tests: Any = None,
+    sandboxed: bool = False,
 ) -> tuple[list[str], list[dict[str, str]]]:
-    """Static AST pass over tests in the isolated copy."""
+    """Static AST pass over tests in the isolated copy.
+
+    When the run is sandboxed, file deletion cannot reach anything outside the
+    isolated copy, so deletion calls are reported as allowed instead of blocked.
+    """
     allows = valid_allow_entries(allow_in_tests)
     hits: list[str] = []
     allowed: list[dict[str, str]] = []
@@ -395,6 +404,14 @@ def scan_tests_for_risks(
                             "call": match["call"],
                             "reason": match["reason"],
                         }
+                    )
+                return
+            if sandboxed and call.split(".")[-1] in DELETE_CALLS:
+                key = (rel, call, SANDBOX_DELETE_REASON)
+                if key not in seen_allowed:
+                    seen_allowed.add(key)
+                    allowed.append(
+                        {"status": "ALLOWED", "path": rel, "call": call, "reason": SANDBOX_DELETE_REASON}
                     )
                 return
             hits.append(message)
@@ -480,6 +497,7 @@ def evaluate_preflight(
     env: dict[str, str] | None = None,
     cwd: Path | None = None,
     allow_in_tests: Any = None,
+    sandboxed: bool = False,
 ) -> PolicyDecision:
     """Return CLEAR or BLOCK. Hierarchy: Sable outranks other roles."""
     checks: dict[str, bool] = {}
@@ -516,7 +534,7 @@ def evaluate_preflight(
     blocked.extend(path_hits)
 
     ast_hits, allowed = scan_tests_for_risks(
-        isolated_root, allow_in_tests=allow_in_tests
+        isolated_root, allow_in_tests=allow_in_tests, sandboxed=sandboxed
     )
     checks["tests_ast_clean"] = len(ast_hits) == 0
     if ast_hits:

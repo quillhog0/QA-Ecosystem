@@ -310,3 +310,30 @@ def test_honest_patterns_are_not_weak(tmp_path):
     weak = detect_weak_tests(tmp_path)
     assert "test_cleanup_with_try_pass" not in weak
     assert "test_mixed_strong_and_trivial" not in weak
+
+
+def test_unittest_style_assertions_are_not_weak():
+    import ast
+    from agents.riley import is_weak_test_node as is_weak_test
+
+    src = (
+        "class T:\n"
+        "    def test_x(self):\n"
+        "        self.assertEqual(f(), 1)\n"
+    )
+    fn = ast.parse(src).body[0].body[0]
+    weak, _ = is_weak_test(fn)
+    assert weak is False
+
+
+def test_sable_allows_test_cleanup_only_when_sandboxed(tmp_path):
+    from policies.sable import scan_tests_for_risks
+
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "test_db.py").write_text("import os\n\ndef test_x():\n    os.remove('x.db')\n")
+    hits, allowed = scan_tests_for_risks(tmp_path)
+    assert hits
+    hits, allowed = scan_tests_for_risks(tmp_path, sandboxed=True)
+    assert not hits
+    assert allowed and allowed[0]["call"].endswith("remove")
