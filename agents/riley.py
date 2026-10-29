@@ -33,7 +33,71 @@ def is_tautology_assert(stmt: ast.Assert) -> bool:
     return False
 
 
+SKIP_NAMES = {"skip", "skipif", "xfail", "skipTest", "skipIf", "skipUnless", "expectedFailure"}
+
+
+def _call_name(node: ast.AST) -> str | None:
+    target = node.func if isinstance(node, ast.Call) else node
+    if isinstance(target, ast.Attribute):
+        return target.attr
+    if isinstance(target, ast.Name):
+        return target.id
+    return None
+
+
+def is_skipped_test(fn_node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    """True when the test is skipped or expected to fail by decorator or by an unconditional skip call."""
+    for dec in fn_node.decorator_list:
+        if _call_name(dec) in SKIP_NAMES:
+            return True
+    for stmt in fn_node.body:
+        if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
+            if _call_name(stmt.value) in {"skip", "skipTest", "xfail"}:
+                return True
+    return False
+
+
+def _handler_swallows(handler: ast.ExceptHandler) -> bool:
+    return all(isinstance(b, (ast.Pass, ast.Continue)) or (isinstance(b, ast.Expr) and isinstance(b.value, ast.Constant)) for b in handler.body)
+
+
+def has_swallowed_assertions(fn_node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    """True when every assertion sits inside a try block whose handler silently swallows the failure."""
+    asserts = [n for n in ast.walk(fn_node) if isinstance(n, ast.Assert)]
+    if not asserts:
+        return False
+    guarded: set[int] = set()
+    for node in ast.walk(fn_node):
+        if isinstance(node, ast.Try) and any(_handler_swallows(h) for h in node.handlers):
+            for stmt in node.body:
+                for inner in ast.walk(stmt):
+                    if isinstance(inner, ast.Assert):
+                        guarded.add(id(inner))
+    return all(id(a) in guarded for a in asserts)
+
+
+def is_trivial_assert(stmt: ast.Assert) -> bool:
+    """Assertions that almost any value satisfies: x >= 0 on sizes, isinstance checks, x == x."""
+    if is_tautology_assert(stmt):
+        return True
+    test_node = stmt.test
+    if isinstance(test_node, ast.Call) and _call_name(test_node) in {"isinstance", "hasattr", "bool"}:
+        return True
+    if isinstance(test_node, ast.Compare) and len(test_node.ops) == 1:
+        op = test_node.ops[0]
+        right = test_node.comparators[0]
+        if ast.dump(test_node.left) == ast.dump(right) and isinstance(op, (ast.Eq, ast.GtE, ast.LtE, ast.Is)):
+            return True
+        if isinstance(op, ast.GtE) and isinstance(right, ast.Constant) and right.value == 0:
+            if isinstance(test_node.left, ast.Call) and _call_name(test_node.left) == "len":
+                return True
+    return False
+
+
 def is_weak_test_node(fn_node: ast.FunctionDef | ast.AsyncFunctionDef) -> tuple[bool, str]:
+    if is_skipped_test(fn_node):
+        return True, "skipped test"
+
     with_raises = any(
         isinstance(n, ast.With)
         and any(
@@ -51,6 +115,10 @@ def is_weak_test_node(fn_node: ast.FunctionDef | ast.AsyncFunctionDef) -> tuple[
         return True, "no assertions"
     if all(is_tautology_assert(a) for a in asserts):
         return True, "tautology assertion"
+    if has_swallowed_assertions(fn_node):
+        return True, "assertion failures swallowed by try/except"
+    if all(is_trivial_assert(a) for a in asserts):
+        return True, "only trivial assertions"
     return False, "ok"
 
 

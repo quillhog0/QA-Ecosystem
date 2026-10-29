@@ -30,6 +30,10 @@ inputs:
     description: "Sandbox mode: auto, required or off."
     required: false
     default: "auto"
+  allow-sysctl-userns:
+    description: "On Ubuntu 24.04 runners, run sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0 so the Bubblewrap sandbox can start. This relaxes a kernel security setting on the runner. Without it the run falls back to unsandboxed mode and says so in the report."
+    required: false
+    default: "false"
   python-version:
     description: "Python version used to run the project's tests."
     required: false
@@ -52,9 +56,13 @@ runs:
 
     - name: Install QA Ecosystem
       shell: bash
+      env:
+        QA_ALLOW_SYSCTL: ${{ inputs.allow-sysctl-userns }}
       run: |
         sudo apt-get install -y -qq bubblewrap >/dev/null || true
-        sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+        if [ "$QA_ALLOW_SYSCTL" = "true" ]; then
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+        fi
         python -m pip install -q -r "$GITHUB_ACTION_PATH/requirements.txt"
 
     - name: Run QA cycle

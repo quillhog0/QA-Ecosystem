@@ -1,8 +1,11 @@
 # Changelog
 
-## [Unreleased]
+## 0.2.0 (2026-10-29)
 
 ### Added
+- GitHub Action (action.yml) that runs the QA gate in any workflow, fails the job on VETO and writes the report to the job summary.
+- Riley flags skipped or xfail tests, assertions swallowed by try/except, and tests with only trivial assertions as weak; a claim covered only by weak tests is not counted as covered and leads to VETO.
+- cheating_agent benchmark fixture (skip, swallowed assertion, trivial assertions).
 - Bubblewrap (`bwrap`) OS-level sandbox for isolated test execution (`core/sandbox.py`).
 - Linux namespace isolation (`--unshare-all`, `--die-with-parent`) disabling network access and restricting filesystem access.
 - Read-only system binds (`/usr`, `/lib`, `/lib64`, `/bin`, `/etc`, python virtualenv) and read-only `work_dir` mount (protecting `_sable_guard.py`), with read-write access restricted to the isolated project copy, `pytest_cache`, `pytest_tmp`, `/home/sandbox` (`work_dir/home`), and a private `/tmp`.
@@ -15,6 +18,15 @@
 - Optional Riley audit phase for mutation scoring (`mutation.enabled`, `mutation.min_score`, `mutation.max_mutants`) via system config or CLI flags `--mutation`, `--mutation-min-score`.
 - Mutation testing Markdown report section detailing mutation score and surviving mutants.
 - Added `strong_tests` and `weak_tests` benchmark fixtures.
+
+### Fixed
+- Mutation audit counted a mutant as killed when the test run crashed before any test executed; such runs are now errors.
+- Sandbox now binds a project venv whose interpreter is a symlink to the system Python.
+- Mutation audit uses the project venv prepared for the run.
+- Report output is English only.
+
+### Changed
+- httpx is an optional dependency (extra "llm"); it is only needed when an LLM is enabled.
 
 ## 0.1.0 (2026-10-28)
 

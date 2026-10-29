@@ -255,3 +255,58 @@ def test_riley_vetoes_when_pip_install_failed():
 
 
 
+
+
+def test_detects_cheating_patterns(tmp_path):
+    from agents.riley import detect_weak_tests
+
+    (tmp_path / "test_cheat.py").write_text(
+        "import pytest\n\n"
+        "@pytest.mark.skip(reason='flaky')\n"
+        "def test_skipped():\n"
+        "    assert 1 + 1 == 3\n\n"
+        "def test_skip_call():\n"
+        "    pytest.skip('later')\n"
+        "    assert 1 + 1 == 3\n\n"
+        "def test_swallowed():\n"
+        "    try:\n"
+        "        assert 1 + 1 == 3\n"
+        "    except Exception:\n"
+        "        pass\n\n"
+        "def test_trivial():\n"
+        "    x = len([1])\n"
+        "    assert x is not None\n"
+        "    assert isinstance(x, int)\n"
+        "    assert len([x]) >= 0\n",
+        encoding="utf-8",
+    )
+    weak = detect_weak_tests(tmp_path)
+    assert weak["test_skipped"] == "skipped test"
+    assert weak["test_skip_call"] == "skipped test"
+    assert weak["test_swallowed"] == "assertion failures swallowed by try/except"
+    assert weak["test_trivial"] == "only trivial assertions"
+
+
+def test_honest_patterns_are_not_weak(tmp_path):
+    from agents.riley import detect_weak_tests
+
+    (tmp_path / "test_ok.py").write_text(
+        "import pytest\n\n"
+        "def test_cleanup_with_try_pass():\n"
+        "    assert 2 + 2 == 4\n"
+        "    try:\n"
+        "        open('/nonexistent')\n"
+        "    except OSError:\n"
+        "        pass\n\n"
+        "def test_mixed_strong_and_trivial():\n"
+        "    x = 4\n"
+        "    assert x is not None\n"
+        "    assert x == 4\n\n"
+        "@pytest.mark.skipif(False, reason='never')\n"
+        "def test_conditional_skip_is_flagged_only_by_decorator():\n"
+        "    assert 1 == 1 + 0\n",
+        encoding="utf-8",
+    )
+    weak = detect_weak_tests(tmp_path)
+    assert "test_cleanup_with_try_pass" not in weak
+    assert "test_mixed_strong_and_trivial" not in weak

@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/quillhog0/QA-Ecosystem/actions/workflows/ci.yml/badge.svg)](https://github.com/quillhog0/QA-Ecosystem/actions/workflows/ci.yml)
 
-Version 0.1.0. See CHANGELOG.md.
+Version 0.2.0. See CHANGELOG.md.
 
 Part of the quillhog toolkit — [github.com/quillhog0](https://github.com/quillhog0) · [quillhog.xyz](https://quillhog.xyz) · X [@Quillhog0](https://x.com/Quillhog0).
 
@@ -150,7 +150,7 @@ Add QA Ecosystem as a gate in any repository's workflow. The job fails when the 
     strict: "true"
 ```
 
-Inputs: project, docs, strict, mutation, mutation-min-score, sandbox (auto, required or off) and python-version. Outputs: verdict and report.
+Inputs: project, docs, strict, mutation, mutation-min-score, sandbox (auto, required or off), allow-sysctl-userns and python-version. On GitHub's Ubuntu 24.04 runners the sandbox needs allow-sysctl-userns set to true, which relaxes a kernel security setting on the runner; without it the run is unsandboxed and the report says so. Outputs: verdict and report.
 
 ## Tests and benchmark
 
@@ -182,6 +182,7 @@ Benchmark fixtures:
 | tautology_test | VETO by Riley |
 | uncommitted_bug | VETO by Nova/Riley |
 | weak_tests | VETO, surviving mutants drop score below threshold |
+| cheating_agent | VETO: skipped test, assertion swallowed by try/except, only trivial assertions |
 
 ## Mutation testing
 
@@ -224,6 +225,7 @@ Sable and Nova never depend on a model. OpenRouter is used only when `OPENROUTER
   - *What bwrap covers:* Kernel-enforced denial of socket creation and outbound network connections, prevention of writes to `work_dir/_sable_guard.py` or outside the isolated project copy and designated scratch directories (`pytest_cache`, `pytest_tmp`, `/home/sandbox`), rejection of read-only mounts equal to or above `$HOME` or `/`, and isolation from host user files and credentials in `$HOME`.
   - *What bwrap does not cover:* It does not protect against host Linux kernel vulnerabilities; it does not enforce cgroup-based CPU/memory quotas; `/etc` is mounted read-only so world-readable host files under `/etc` remain readable; and dependency installation (`pip install`) runs in a preliminary step before the sandbox (though manifests are statically screened for unsafe package sources). On platforms without `bwrap` or non-Linux systems in `auto` mode, execution falls back to process-level isolation (`chmod`, `-p _sable_guard` monkeypatching, and static AST scanning) and reports `sandbox: unavailable (ran unsandboxed)`.
   - *Ubuntu 24.04 user namespace restriction:* On Ubuntu 24.04, AppArmor restricts unprivileged user namespaces (`kernel.apparmor_restrict_unprivileged_userns=1`); `is_bwrap_available` probes bwrap namespace creation and falls back to unsandboxed execution with `sandbox: unavailable (bwrap present but not usable: <reason>)` in `auto` mode or vetoes in `required` mode unless permitted by AppArmor or sysctl.
+- **Dependency installation is not sandboxed.** When the project has a requirements file or pyproject dependencies, pip installs them before the sandbox starts and with network access, so package build scripts run on the host. Manifests are screened for unsafe sources, but only the test run itself is sandboxed.
 - **With an LLM enabled, docs and code go to the provider unmasked.** Nothing is redacted or anonymised before the API call.
 - **Claim-to-test mapping is a heuristic.** Aria matches doc claims to tests by token overlap and test-body analysis. It is not formal verification.
 
