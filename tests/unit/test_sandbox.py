@@ -463,3 +463,26 @@ def test_bwrap_probe_timeout_and_oserror_handling(monkeypatch: pytest.MonkeyPatc
     usable, reason = sb_mod._probe_bwrap("/usr/bin/bwrap")
     assert usable is False
     assert reason == "failed to exec bwrap"
+
+
+def test_venv_python_symlink_binds_venv_root(tmp_path: Path):
+    """A venv's bin/python links to the base interpreter; the venv root must still be bound."""
+    iso = tmp_path / "iso"
+    work = tmp_path / "work"
+    venv = tmp_path / "other" / "venv"
+    iso.mkdir()
+    work.mkdir()
+    (venv / "bin").mkdir(parents=True)
+    (venv / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
+    (venv / "bin" / "python").symlink_to("/usr/bin/python3")
+
+    wrapped = wrap_command(
+        ["python", "-m", "pytest"],
+        isolated_root=iso,
+        work_dir=work,
+        python=venv / "bin" / "python",
+        allow_network=False,
+        bwrap_path="/usr/bin/bwrap",
+    )
+    joined = " ".join(wrapped)
+    assert f"--ro-bind {venv.resolve()} {venv.resolve()}" in joined

@@ -437,7 +437,7 @@ def run_mutation_testing(
                             "mutated": mutant.mutated,
                         }
                     )
-                elif res.failed > 0 or res.exit_code != 0:
+                elif res.failed > 0 or res.errors > 0 or (res.exit_code != 0 and active_count > 0):
                     mutant.status = "killed"
                     mutant.details = f"killed (exit={res.exit_code}, failed={res.failed})"
                     killed += 1

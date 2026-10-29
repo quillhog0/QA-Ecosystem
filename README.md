@@ -181,10 +181,9 @@ An optional adversarial test quality audit evaluated by **Riley** after baseline
 
 Running mutation testing on QA Ecosystem itself (`python main.py --self-test --mutation`, evaluating 30 deterministic mutants) yields:
 
-- **Score:** **93.3%** (28/30 killed, 2 survived; up from 12/30 = 40.0%). The mutant sample is deterministic (seed 42) but shifts as the code changes.
-- **Surviving mutants (both equivalent):**
-  - `core/runner.py:61` (`or` → `and`): equivalent because `key in ALLOWED_ENV_KEYS` already restricts `upper` to the 9 allowlisted variable names, none of which match `SECRET_ENV_FRAGMENTS` or `"KEY"`, so both boolean operands are always `False`.
-  - `policies/sable.py:76` (`==` → `!=` on `tokens[1] == "-m"`): equivalent because `looks_like_python_pytest` can only be true when `tokens[2] == "pytest"`, and then `"pytest" in lowered` already passes the check on its own.
+- **Score:** **70.0%** (21/30 killed, 9 survived). The mutant sample is deterministic (seed 42) but shifts as the code changes; the previous sample scored 28/30.
+- **Note:** earlier builds counted a mutant as killed when the test run crashed before any test executed (for example when the sandbox could not start the project venv). That bug is fixed and covered by tests, so this score only counts real test failures.
+- **Surviving mutants (not yet triaged):** core/isolation.py:318, core/mutation.py:458, core/orchestrator.py:352, core/report.py:69, core/report.py:120, core/runner.py:210, core/sandbox.py:37, core/sandbox.py:227, main.py:127.
 
 ## Config
 

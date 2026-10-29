@@ -229,7 +229,11 @@ def wrap_command(
             if not str(raw_parent).startswith(("/usr", "/bin", "/sbin")):
                 _validate_ro_bind_path(raw_parent, host_home)
         py_arg = raw_py.resolve()
-        if (py_arg.parent.parent / "pyvenv.cfg").is_file():
+        # A venv's bin/python is usually a symlink to the base interpreter, so
+        # look for pyvenv.cfg next to the unresolved path before resolving it.
+        if (raw_py.parent.parent / "pyvenv.cfg").is_file():
+            extra_ro_binds.add(_validate_ro_bind_path(raw_py.parent.parent.resolve(), host_home))
+        elif (py_arg.parent.parent / "pyvenv.cfg").is_file():
             extra_ro_binds.add(_validate_ro_bind_path(py_arg.parent.parent, host_home))
         elif not str(py_arg).startswith("/usr") and not str(py_arg).startswith("/bin"):
             extra_ro_binds.add(_validate_ro_bind_path(py_arg.parent, host_home))

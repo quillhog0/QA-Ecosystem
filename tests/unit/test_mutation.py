@@ -227,3 +227,17 @@ def test_tested_project_cannot_enable_or_modify_mutation_config(tmp_path: Path):
     assert report.verdict == Verdict.CLEAR.value
     assert report.mutation.get("status") == "skipped"
     assert report.mutation.get("reason") == "disabled"
+
+
+def test_mutant_is_not_killed_when_no_tests_ran(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """A crash before any test runs (e.g. missing interpreter) is an error, not a kill."""
+    import core.mutation as mutation
+    from core.packets import ExecutionResult
+
+    (tmp_path / "calc.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    monkeypatch.setattr(
+        mutation, "run_pytest", lambda *a, **k: ExecutionResult(exit_code=1, stderr="execvp: No such file")
+    )
+    res = mutation.run_mutation_testing(tmp_path, work_dir=tmp_path / "w", config={})
+    assert res["killed"] == 0
+    assert res["score"] == 0.0
