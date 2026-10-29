@@ -137,6 +137,21 @@ Process exit code: `0` = `CLEAR`, `1` = `VETO` or `ESCALATE`.
 python main.py --project examples/sample-project --docs examples/sample-project/docs
 ```
 
+## GitHub Action
+
+Add QA Ecosystem as a gate in any repository's workflow. The job fails when the verdict is VETO, and the report is written to the job summary.
+
+```yaml
+- uses: actions/checkout@v4
+- uses: quillhog0/QA-Ecosystem@master
+  with:
+    project: .
+    docs: docs
+    strict: "true"
+```
+
+Inputs: project, docs, strict, mutation, mutation-min-score, sandbox (auto, required or off) and python-version. Outputs: verdict and report.
+
 ## Tests and benchmark
 
 ```bash

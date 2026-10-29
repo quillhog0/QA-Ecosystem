@@ -44,3 +44,16 @@ jobs:
         with:
           name: reports-${{ matrix.python-version }}
           path: reports/
+
+  action-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run the action on the sample project
+        id: qa
+        uses: ./
+        with:
+          project: examples/sample-project
+          docs: examples/sample-project/docs
+      - name: Check verdict
+        run: test "${{ steps.qa.outputs.verdict }}" = "CLEAR"

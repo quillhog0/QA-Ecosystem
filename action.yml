@@ -1,0 +1,85 @@
+name: "QA Ecosystem"
+description: "Deterministic QA gate: runs your tests in an isolated, sandboxed copy, maps doc claims to tests and fails on VETO."
+author: "quillhog"
+branding:
+  icon: "shield"
+  color: "green"
+
+inputs:
+  project:
+    description: "Path to the project under test, relative to the workspace."
+    required: false
+    default: "."
+  docs:
+    description: "Path to the documentation root, relative to the workspace."
+    required: false
+    default: "docs"
+  strict:
+    description: "Veto on documented claims without a covering test (true/false)."
+    required: false
+    default: "false"
+  mutation:
+    description: "Run the mutation testing audit (true/false)."
+    required: false
+    default: "false"
+  mutation-min-score:
+    description: "Minimum mutation score (0.0 to 1.0) when mutation is enabled."
+    required: false
+    default: ""
+  sandbox:
+    description: "Sandbox mode: auto, required or off."
+    required: false
+    default: "auto"
+  python-version:
+    description: "Python version used to run the project's tests."
+    required: false
+    default: "3.12"
+
+outputs:
+  verdict:
+    description: "Final verdict (CLEAR, VETO or ESCALATE)."
+    value: ${{ steps.run.outputs.verdict }}
+  report:
+    description: "Path to the Markdown report."
+    value: ${{ steps.run.outputs.report }}
+
+runs:
+  using: "composite"
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Install QA Ecosystem
+      shell: bash
+      run: |
+        sudo apt-get install -y -qq bubblewrap >/dev/null || true
+        sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+        python -m pip install -q -r "$GITHUB_ACTION_PATH/requirements.txt"
+
+    - name: Run QA cycle
+      id: run
+      shell: bash
+      env:
+        QA_PROJECT: ${{ inputs.project }}
+        QA_DOCS: ${{ inputs.docs }}
+        QA_STRICT: ${{ inputs.strict }}
+        QA_MUTATION: ${{ inputs.mutation }}
+        QA_MIN_SCORE: ${{ inputs.mutation-min-score }}
+        QA_SANDBOX: ${{ inputs.sandbox }}
+      run: |
+        args=(--project "$GITHUB_WORKSPACE/$QA_PROJECT" --docs "$GITHUB_WORKSPACE/$QA_DOCS"
+              --sandbox "$QA_SANDBOX" --reports-dir "$RUNNER_TEMP/qa-reports")
+        [ "$QA_STRICT" = "true" ] && args+=(--strict)
+        [ "$QA_MUTATION" = "true" ] && args+=(--mutation)
+        [ -n "$QA_MIN_SCORE" ] && args+=(--mutation-min-score "$QA_MIN_SCORE")
+        set +e
+        python "$GITHUB_ACTION_PATH/main.py" "${args[@]}" | tee "$RUNNER_TEMP/qa-out.txt"
+        code=${PIPESTATUS[0]}
+        set -e
+        verdict=$(grep -m1 '^verdict=' "$RUNNER_TEMP/qa-out.txt" | cut -d= -f2)
+        report=$(grep -m1 '^report=' "$RUNNER_TEMP/qa-out.txt" | cut -d= -f2-)
+        echo "verdict=$verdict" >> "$GITHUB_OUTPUT"
+        echo "report=$report" >> "$GITHUB_OUTPUT"
+        [ -f "$report" ] && cat "$report" >> "$GITHUB_STEP_SUMMARY"
+        exit $code
