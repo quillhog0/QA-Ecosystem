@@ -25,6 +25,8 @@ def render_markdown(report: FinalReport) -> str:
     ]
     if report.sandbox == "unavailable":
         lines.append("- **warning:** sandbox: unavailable (ran unsandboxed)")
+    elif str(report.sandbox).startswith("unavailable"):
+        lines.append(f"- **warning:** sandbox: {report.sandbox} (ran unsandboxed)")
     if report.tested_tree:
         lines.append(f"- **tested_tree:** {report.tested_tree}")
     if report.escalation:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import types
 from pathlib import Path
 from unittest.mock import patch
 
@@ -236,7 +237,7 @@ def test_project_config_cannot_disable_sandbox(tmp_path: Path):
     if is_bwrap_available():
         assert report.sandbox == "bwrap"
     else:
-        assert report.sandbox == "unavailable"
+        assert report.sandbox.startswith("unavailable")
 
 
 @pytest.mark.skipif(not is_bwrap_available(), reason="bwrap is not available on this system")
@@ -329,3 +330,136 @@ def test_unauthorized_home_write():
     report = Vesper(config).run(project, docs_dir)
     assert report.verdict == Verdict.VETO.value
     assert report.sandbox == "bwrap"
+
+
+def test_bwrap_probe_usable_and_cached(monkeypatch: pytest.MonkeyPatch):
+    from unittest.mock import MagicMock
+    import core.sandbox as sb_mod
+
+    sb_mod.clear_probe_cache()
+    mock_run = MagicMock()
+    mock_run.return_value = types.SimpleNamespace(
+        args=["bwrap", "--unshare-all", "--ro-bind", "/", "/", "true"],
+        returncode=0,
+        stdout="",
+        stderr="",
+    )
+    monkeypatch.setattr("core.sandbox.subprocess.run", mock_run)
+    monkeypatch.setattr("core.sandbox.shutil.which", lambda _: "/usr/bin/bwrap")
+    monkeypatch.setattr("sys.platform", "linux")
+
+    usable, reason = sb_mod._probe_bwrap("/usr/bin/bwrap")
+    assert usable is True
+    assert reason is None
+    assert mock_run.call_count == 1
+
+    # Second call uses cache
+    usable2, reason2 = sb_mod._probe_bwrap("/usr/bin/bwrap")
+    assert usable2 is True
+    assert reason2 is None
+    assert mock_run.call_count == 1
+
+
+def test_bwrap_probe_failure_mode_auto_runs_unsandboxed_and_reports(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    import core.sandbox as sb_mod
+
+    sb_mod.clear_probe_cache()
+    real_run = sb_mod.subprocess.run
+
+    def probe_failure_run(cmd, *args, **kwargs):
+        if cmd and "true" in cmd and "--unshare-all" in cmd:
+            return types.SimpleNamespace(
+                args=cmd,
+                returncode=1,
+                stdout="",
+                stderr="bwrap: setting up uid map: Permission denied\n",
+            )
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr("core.sandbox.subprocess.run", probe_failure_run)
+    monkeypatch.setattr("core.sandbox.shutil.which", lambda _: "/usr/bin/bwrap")
+    monkeypatch.setattr("sys.platform", "linux")
+
+    assert is_bwrap_available() is False
+
+    enabled, status, failure = get_sandbox_status({"sandbox": {"mode": "auto"}})
+    assert enabled is False
+    assert status == "unavailable (bwrap present but not usable: bwrap: setting up uid map: Permission denied)"
+    assert failure is None
+
+    project = mini_project(tmp_path / "proj")
+    reports = tmp_path / "reports"
+    config = {
+        "sandbox": {"mode": "auto"},
+        "reports_dir": str(reports),
+        "isolation_method": "copy",
+    }
+    report = Vesper(config).run(project, project / "docs")
+    assert report.verdict == Verdict.CLEAR.value
+    assert report.sandbox == "unavailable (bwrap present but not usable: bwrap: setting up uid map: Permission denied)"
+    md_text = (reports / f"{report.run_id}.md").read_text(encoding="utf-8")
+    assert "sandbox: unavailable (bwrap present but not usable: bwrap: setting up uid map: Permission denied)" in md_text
+    assert any("sandbox: unavailable (bwrap present but not usable: bwrap: setting up uid map: Permission denied)" in r.summary for r in report.role_results)
+
+
+def test_bwrap_probe_failure_mode_required_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    import core.sandbox as sb_mod
+
+    sb_mod.clear_probe_cache()
+    real_run = sb_mod.subprocess.run
+
+    def probe_failure_run(cmd, *args, **kwargs):
+        if cmd and "true" in cmd and "--unshare-all" in cmd:
+            return types.SimpleNamespace(
+                args=cmd,
+                returncode=1,
+                stdout="",
+                stderr="bwrap: Creating new namespace failed: Permission denied\n",
+            )
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr("core.sandbox.subprocess.run", probe_failure_run)
+    monkeypatch.setattr("core.sandbox.shutil.which", lambda _: "/usr/bin/bwrap")
+    monkeypatch.setattr("sys.platform", "linux")
+
+    assert is_bwrap_available() is False
+
+    enabled, status, failure = get_sandbox_status({"sandbox": {"mode": "required"}})
+    assert enabled is False
+    assert status == "unavailable (bwrap present but not usable: bwrap: Creating new namespace failed: Permission denied)"
+    assert failure is not None
+    assert "bwrap present but not usable: bwrap: Creating new namespace failed: Permission denied" in failure
+
+    project = mini_project(tmp_path / "proj")
+    reports = tmp_path / "reports"
+    config = {
+        "sandbox": {"mode": "required"},
+        "reports_dir": str(reports),
+        "isolation_method": "copy",
+    }
+    report = Vesper(config).run(project, project / "docs")
+    assert report.verdict == Verdict.VETO.value
+    assert report.sandbox == "unavailable (bwrap present but not usable: bwrap: Creating new namespace failed: Permission denied)"
+    assert any("sandbox required but bwrap unavailable" in r.summary for r in report.role_results)
+
+
+def test_bwrap_probe_timeout_and_oserror_handling(monkeypatch: pytest.MonkeyPatch):
+    from unittest.mock import MagicMock
+    import core.sandbox as sb_mod
+
+    sb_mod.clear_probe_cache()
+    mock_run = MagicMock(side_effect=sb_mod.subprocess.TimeoutExpired(cmd="bwrap", timeout=5))
+    monkeypatch.setattr("core.sandbox.subprocess.run", mock_run)
+    monkeypatch.setattr("core.sandbox.shutil.which", lambda _: "/usr/bin/bwrap")
+    monkeypatch.setattr("sys.platform", "linux")
+
+    usable, reason = sb_mod._probe_bwrap("/usr/bin/bwrap")
+    assert usable is False
+    assert reason == "probe timed out"
+
+    sb_mod.clear_probe_cache()
+    mock_run = MagicMock(side_effect=OSError("failed to exec bwrap"))
+    monkeypatch.setattr("core.sandbox.subprocess.run", mock_run)
+    usable, reason = sb_mod._probe_bwrap("/usr/bin/bwrap")
+    assert usable is False
+    assert reason == "failed to exec bwrap"

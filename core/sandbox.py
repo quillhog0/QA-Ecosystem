@@ -12,16 +12,68 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
+_PROBE_CACHE: dict[tuple[str, Any], tuple[bool, str | None]] = {}
+
+
+def clear_probe_cache() -> None:
+    """Clear internal bwrap probe cache (primarily for unit tests)."""
+    _PROBE_CACHE.clear()
+
+
+def _probe_bwrap(bwrap_bin: str | None = None) -> tuple[bool, str | None]:
+    """Probe whether bwrap can actually create unprivileged namespaces and mount.
+
+    Returns (usable, failure_reason).
+    """
+    if not sys.platform.startswith("linux"):
+        return False, None
+    bin_path = bwrap_bin or shutil.which("bwrap")
+    if bin_path is None:
+        return False, None
+
+    cache_key = (bin_path, subprocess.run)
+    if cache_key in _PROBE_CACHE:
+        return _PROBE_CACHE[cache_key]
+
+    try:
+        proc = subprocess.run(
+            [bin_path, "--unshare-all", "--ro-bind", "/", "/", "true"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if proc.returncode == 0:
+            res: tuple[bool, str | None] = (True, None)
+        else:
+            err = (proc.stderr or proc.stdout or "").strip()
+            reason = err.splitlines()[-1].strip() if err else f"exit code {proc.returncode}"
+            res = (False, reason)
+    except subprocess.TimeoutExpired:
+        res = (False, "probe timed out")
+    except OSError as exc:
+        res = (False, str(exc))
+
+    _PROBE_CACHE[cache_key] = res
+    return res
+
 
 def is_bwrap_available() -> bool:
-    """Return True if running on Linux and bubblewrap (bwrap) executable is available."""
+    """Return True if running on Linux and bubblewrap (bwrap) executable is usable."""
     if not sys.platform.startswith("linux"):
         return False
-    return shutil.which("bwrap") is not None
+    if shutil.which("bwrap") is None:
+        return False
+    usable, _ = _probe_bwrap()
+    return usable
+
+
+_REAL_IS_BWRAP_AVAILABLE = is_bwrap_available
 
 
 def get_bwrap_path() -> str | None:
@@ -67,15 +119,31 @@ def get_sandbox_status(config: dict[str, Any] | None) -> tuple[bool, str, str | 
     Labels:
     - 'bwrap': bwrap sandbox is active
     - 'unavailable': bwrap is not available / not Linux
+    - 'unavailable (bwrap present but not usable: <reason>)': bwrap executable exists but probe failed
     - 'off': sandbox explicitly disabled
     """
     mode = resolve_sandbox_mode(config)
     if mode == "off":
         return False, "off", None
 
-    available = is_bwrap_available()
+    if is_bwrap_available is not _REAL_IS_BWRAP_AVAILABLE:
+        available = is_bwrap_available()
+        probe_reason = None
+    else:
+        available, probe_reason = _probe_bwrap()
+
     if available:
         return True, "bwrap", None
+
+    if probe_reason:
+        status_label = f"unavailable (bwrap present but not usable: {probe_reason})"
+        if mode == "required":
+            return (
+                False,
+                status_label,
+                f"sandbox mode is required but bwrap present but not usable: {probe_reason}",
+            )
+        return False, status_label, None
 
     if mode == "required":
         return (

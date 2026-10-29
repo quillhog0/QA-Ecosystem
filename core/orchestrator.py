@@ -317,6 +317,8 @@ class Vesper:
                     + (
                         "sandbox: unavailable (ran unsandboxed)"
                         if execution.sandbox_status == "unavailable"
+                        else f"sandbox: {execution.sandbox_status} (ran unsandboxed)"
+                        if str(execution.sandbox_status).startswith("unavailable")
                         else f"sandbox={execution.sandbox_status}"
                     )
                 ),

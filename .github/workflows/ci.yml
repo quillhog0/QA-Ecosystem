@@ -32,5 +32,15 @@ jobs:
       - name: Run fixture benchmark
         run: python benchmark/run_benchmark.py
 
+      - name: Enable unprivileged user namespaces for bwrap
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+
       - name: Run self-test
-        run: python main.py --self-test
+        run: python main.py --self-test || (cat reports/*.md; exit 1)
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports-${{ matrix.python-version }}
+          path: reports/
