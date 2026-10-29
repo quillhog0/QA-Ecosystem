@@ -45,11 +45,11 @@ def render_markdown(report: FinalReport) -> str:
         if str(s.get("id") or "").startswith("C")
     ]
     if claim_scenarios:
-        lines += ["## Claim coverage", "", "| tvrzení | covered_by | score |", "|---|---|---|"]
+        lines += ["## Claim coverage", "", "| claim | covered_by | score |", "|---|---|---|"]
         for s in claim_scenarios:
             title = str(s.get("title") or "").replace("|", "\\|")
             covered = s.get("covered_by") or []
-            covered_str = ", ".join(covered) if covered else "ŽÁDNÝ"
+            covered_str = ", ".join(covered) if covered else "NONE"
             score = s.get("score") if s.get("score") is not None else 0
             lines.append(f"| {title} | {covered_str} | {score} |")
         lines.append("")

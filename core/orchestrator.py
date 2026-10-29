@@ -14,6 +14,7 @@ from core.isolation import (
     release_isolation,
     _make_sources_readonly,
 )
+from core.deps import venv_python
 from core.packets import (
     FinalReport,
     HandoffPacket,
@@ -429,7 +430,7 @@ class Vesper:
             report.mutation = {"status": "skipped", "reason": "disabled"}
         else:
             py_bin = None
-            venv_py = work_dir / ".venv" / "bin" / "python"
+            venv_py = venv_python(work_dir)
             if venv_py.is_file():
                 py_bin = venv_py
 

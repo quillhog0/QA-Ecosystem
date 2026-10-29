@@ -177,3 +177,35 @@ def test_adapters_complete_and_status_network_and_provider_guards(monkeypatch):
     assert res == "verdict: CLEAR"
 
 
+
+
+def test_venv_python_matches_prepare_venv_location(tmp_path: Path):
+    from core.deps import venv_dir, venv_python
+
+    assert venv_dir(tmp_path) == tmp_path / "venv"
+    assert venv_python(tmp_path).parent.parent == tmp_path / "venv"
+
+
+def test_mutation_audit_uses_project_venv_python(tmp_path: Path):
+    project = mini_project(tmp_path / "proj")
+    fake_python = tmp_path / "fake-python"
+    fake_python.write_text("", encoding="utf-8")
+    config = {
+        "dry_run": True,
+        "allow_network": False,
+        "reports_dir": str(tmp_path / "reports"),
+        "llm": {"provider": "none"},
+        "isolation_method": "copy",
+        "mutation": {"enabled": True},
+    }
+    captured: dict = {}
+
+    def fake_audit(isolated, **kwargs):
+        captured.update(kwargs)
+        return {"status": "completed", "verdict": Verdict.CLEAR.value, "score": 1.0}
+
+    with patch("core.orchestrator.venv_python", return_value=fake_python), \
+         patch("agents.riley.audit_mutations", side_effect=fake_audit):
+        Vesper(config).run(project, project / "docs")
+
+    assert captured.get("python") == fake_python

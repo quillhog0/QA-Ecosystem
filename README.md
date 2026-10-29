@@ -41,14 +41,14 @@ Judgment roles run on deterministic heuristics by default. An LLM is optional, a
 
 ## Example output
 
-Run against `examples/sample-project` (bundled in this repo). The claim-coverage table header `tvrzení` is printed verbatim by `core/report.py`; it means "claim".
+Run against `examples/sample-project` (bundled in this repo).
 
 ```
 verdict=CLEAR
 nova / execute: collected=3 passed=3 failed=0 exit=0 install=no dependency manifest
 ```
 
-| tvrzení (claim) | covered_by | score |
+| claim | covered_by | score |
 |---|---|---|
 | `divide` must reject a zero divisor with `ValueError`. | tests/test_calculator.py::test_divide_rejects_zero, tests/test_calculator.py::test_divide | 13 |
 
@@ -205,6 +205,7 @@ Sable and Nova never depend on a model. OpenRouter is used only when `OPENROUTER
 
 ## Known limits
 
+- **Static scan scope:** Sable's AST scan flags `subprocess`, `socket`, `httpx` and `requests` usage only in test files. Application code may legitimately spawn processes or open connections, so it is not blocked statically; at runtime the socket guard plugin and the network-less sandbox still apply.
 - **Bubblewrap coverage & non-covered vectors:** On Linux with `bwrap` installed, test suites run in an unprivileged container sandbox (unshared network, mount, PID, IPC, UTS, and user namespaces, read-only system trees and `work_dir`, writable mounts restricted to `isolated_root`, `pytest_cache`, `pytest_tmp`, and `/home/sandbox`, and tmpfs `/tmp`).
   - *What bwrap covers:* Kernel-enforced denial of socket creation and outbound network connections, prevention of writes to `work_dir/_sable_guard.py` or outside the isolated project copy and designated scratch directories (`pytest_cache`, `pytest_tmp`, `/home/sandbox`), rejection of read-only mounts equal to or above `$HOME` or `/`, and isolation from host user files and credentials in `$HOME`.
   - *What bwrap does not cover:* It does not protect against host Linux kernel vulnerabilities; it does not enforce cgroup-based CPU/memory quotas; `/etc` is mounted read-only so world-readable host files under `/etc` remain readable; and dependency installation (`pip install`) runs in a preliminary step before the sandbox (though manifests are statically screened for unsafe package sources). On platforms without `bwrap` or non-Linux systems in `auto` mode, execution falls back to process-level isolation (`chmod`, `-p _sable_guard` monkeypatching, and static AST scanning) and reports `sandbox: unavailable (ran unsandboxed)`.
@@ -230,6 +231,10 @@ tests/               unit tests and fixture benchmark test
 
 - Not a fixer, not a coverage tool, not a production runner
 - Not a single-chat role-play: each role has its own prompt or policy and only structured packets move between them
+
+## Related
+
+[safe-agent-kit](https://github.com/quillhog0/safe-agent-kit) is the companion rule set: plain-Markdown role templates that tell AI coding agents what they may and may not do. This repo is the enforcement side: it checks the result in isolation and returns a report or a veto.
 
 ## License
 

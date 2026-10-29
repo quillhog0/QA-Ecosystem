@@ -188,6 +188,6 @@ def test_claim_coverage_markdown_has_score_column():
         },
     )
     md = render_markdown(report)
-    assert "| tvrzení | covered_by | score |" in md
+    assert "| claim | covered_by | score |" in md
     assert "| MTU Safety | tests/test_core.py::test_mtu_batch_size_cap | 3 |" in md
-    assert "| Unmatched Claim | ŽÁDNÝ | 0 |" in md
+    assert "| Unmatched Claim | NONE | 0 |" in md

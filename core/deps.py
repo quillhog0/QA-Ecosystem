@@ -44,8 +44,18 @@ def _read_pyproject_deps(path: Path) -> list[str]:
     return deps
 
 
+def venv_dir(work_dir: Path) -> Path:
+    """Single source of truth for the per-run virtualenv location."""
+    return work_dir / "venv"
+
+
+def venv_python(work_dir: Path) -> Path:
+    """Python executable inside the per-run virtualenv."""
+    return venv_dir(work_dir) / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+
+
 def prepare_venv(isolated_root: Path, work_dir: Path, *, timeout: int) -> tuple[Path | None, str]:
-    venv_path = work_dir / "venv"
+    venv_path = venv_dir(work_dir)
     pip_log_path = work_dir / "pip.log"
 
     # Find dependency manifest
@@ -90,7 +100,7 @@ def prepare_venv(isolated_root: Path, work_dir: Path, *, timeout: int) -> tuple[
     except subprocess.CalledProcessError as e:
         return None, f"venv creation failed: {e.stderr.strip()}"
 
-    python_executable = venv_path / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    python_executable = venv_python(work_dir)
 
     # Install pytest and dependencies
     pip_command = [
