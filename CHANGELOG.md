@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.1 (2026-10-29)
+
+### Fixed
+- Fewer false vetoes on real projects:
+  - Sable allows file deletion in tests when the Bubblewrap sandbox is active, because it can only touch the isolated copy. Without the sandbox, deletion still blocks.
+  - Riley counts unittest-style assertions (self.assert*, self.fail).
+  - Python files that start with a UTF-8 byte order mark now parse.
+  - Lexi treats a plain backticked doc word that is missing from code as a warning. It still vetoes code-shaped names (snake_case, UPPER_SNAKE, camelCase), call forms and names used in claims. Plain words veto only with --strict.
+  - Lexi also looks for documented names in JS/TS, HTML, shell, SQL and config keys.
+
 ## 0.2.0 (2026-10-29)
 
 ### Added
