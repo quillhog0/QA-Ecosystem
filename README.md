@@ -181,10 +181,10 @@ An optional adversarial test quality audit evaluated by **Riley** after baseline
 
 Running mutation testing on QA Ecosystem itself (`python main.py --self-test --mutation`, evaluating 30 deterministic mutants) yields:
 
-- **Score:** **90.0%** (27/30 killed, 3 survived; up from 12/30 = 40.0%). The mutant sample is deterministic but shifts as the code changes; earlier runs on a smaller codebase scored 28/30.
-- **Known equivalent survivors** (the third survivor is not yet analysed):
+- **Score:** **93.3%** (28/30 killed, 2 survived; up from 12/30 = 40.0%). The mutant sample is deterministic (seed 42) but shifts as the code changes.
+- **Surviving mutants (both equivalent):**
   - `core/runner.py:61` (`or` → `and`): equivalent because `key in ALLOWED_ENV_KEYS` already restricts `upper` to the 9 allowlisted variable names, none of which match `SECRET_ENV_FRAGMENTS` or `"KEY"`, so both boolean operands are always `False`.
-  - `policies/sable.py:74` (`>=` → `>`): equivalent because `looks_like_python_pytest` requires `tokens[2] == "pytest"`, which already makes `"pytest" in lowered` true on line 79 regardless of whether `len(tokens)` is `>= 3` or `> 3`.
+  - `policies/sable.py:76` (`==` → `!=` on `tokens[1] == "-m"`): equivalent because `looks_like_python_pytest` can only be true when `tokens[2] == "pytest"`, and then `"pytest" in lowered` already passes the check on its own.
 
 ## Config
 
