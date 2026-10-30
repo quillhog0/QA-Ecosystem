@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/quillhog0/QA-Ecosystem/actions/workflows/ci.yml/badge.svg)](https://github.com/quillhog0/QA-Ecosystem/actions/workflows/ci.yml)
 
-Version 0.2.1. See CHANGELOG.md.
+Version 0.2.2. See CHANGELOG.md.
 
 Part of the quillhog toolkit — [github.com/quillhog0](https://github.com/quillhog0) · [quillhog.xyz](https://quillhog.xyz) · X [@Quillhog0](https://x.com/Quillhog0).
 
@@ -215,6 +215,7 @@ See `config.yaml`.
 - `llm.provider`: `none` (heuristics), `openrouter`, or `local`
 - `nova.install_deps`, `nova.pip_timeout`: dependency install in the isolated venv
 - `lexi.doc_globs`, `lexi.ignore_identifiers`: which docs to read, which terms to ignore
+- `lexi.ignore_identifiers` is read only from the operator config, never from the config.yaml of the project under test
 
 Sable and Nova never depend on a model. OpenRouter is used only when `OPENROUTER_API_KEY` is set, `llm.provider` is `openrouter`, dry-run LLM is allowed, and `--allow-network` is on. The key is never written into reports.
 
@@ -228,6 +229,7 @@ Sable and Nova never depend on a model. OpenRouter is used only when `OPENROUTER
 - **Dependency installation is not sandboxed.** When the project has a requirements file or pyproject dependencies, pip installs them before the sandbox starts and with network access, so package build scripts run on the host. Manifests are screened for unsafe sources, but only the test run itself is sandboxed.
 - **With an LLM enabled, docs and code go to the provider unmasked.** Nothing is redacted or anonymised before the API call.
 - **Claim-to-test mapping is a heuristic.** Aria matches doc claims to tests by token overlap and test-body analysis. It is not formal verification.
+- **String literals count as code.** A function removed from code but whose name still appears as a string literal is not reported by Lexi.
 
 ## Project layout
 

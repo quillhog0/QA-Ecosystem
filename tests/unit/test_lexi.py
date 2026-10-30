@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from agents.lexi import inspect
 from core.packets import Verdict
 from tests.support import mini_project
@@ -236,3 +238,142 @@ def test_lexi_bare_missing_term_is_warning_by_default(tmp_path: Path):
     )
     assert report.verdict == Verdict.CLEAR.value
     assert any(f.kind == "missing_code" and f.severity == "medium" for f in report.findings)
+
+
+def test_lexi_term_present_only_as_string_literal_is_not_missing_code(tmp_path: Path):
+    """Regression: a docs term that exists in code as an exact string literal
+    (e.g. an env-var fragment or CLI binary name in a policy tuple) must not be
+    reported as ``missing_code``. Lexi should still keep the term out of every
+    drift bucket because the literal is a real, verbatim code reference."""
+    root = mini_project(
+        tmp_path / "proj",
+        code={
+            "bins.py": 'NETWORK_BINARIES = ("netfetch",)\n',
+        },
+        docs="# Bins\n\nThe tool `netfetch` must never be invoked.\n",
+    )
+    report = inspect(
+        docs_root=root / "docs",
+        project_root=root,
+        config={"llm": {"provider": "none"}, "dry_run": True},
+    )
+    # No missing_code (or any other) drift finding for a term that lives in
+    # code as a bare string literal.
+    assert not any(f.path == "netfetch" for f in report.findings)
+
+
+def test_lexi_term_present_nowhere_is_still_missing_code(tmp_path: Path):
+    """A backticked term that appears nowhere in code, tests, comments or other
+    sources must still be flagged as ``missing_code``."""
+    root = mini_project(
+        tmp_path / "proj",
+        code={
+            "bins.py": 'NETWORK_BINARIES = ("netfetch",)\n',
+        },
+        docs="# Bins\n\nThe tool `ghostbinary` must never be invoked.\n",
+    )
+    report = inspect(
+        docs_root=root / "docs",
+        project_root=root,
+        config={"llm": {"provider": "none"}, "dry_run": True},
+    )
+    assert any(
+        f.kind == "missing_code" and f.path == "ghostbinary" for f in report.findings
+    )
+
+
+def test_lexi_declared_dependency_in_requirements_is_not_missing_code(tmp_path: Path):
+    """A docs term that names a distribution listed in ``requirements.txt`` is
+    a declared dependency, not drift."""
+    root = mini_project(
+        tmp_path / "proj",
+        docs="# Deps\n\nWe rely on `PyYAML` for parsing.\n",
+    )
+    (root / "requirements.txt").write_text("PyYAML>=6\n", encoding="utf-8")
+    report = inspect(
+        docs_root=root / "docs",
+        project_root=root,
+        config={"llm": {"provider": "none"}, "dry_run": True},
+    )
+    assert not any(f.kind == "missing_code" and f.path == "PyYAML" for f in report.findings)
+
+
+def test_lexi_declared_dependency_matches_by_pep503_normalization(tmp_path: Path):
+    """PEP 503 collapses runs of ``[-_.]`` to a single ``-`` and lowercases, so
+    a docs term like ``ruamel_yaml`` must match a declared ``ruamel.yaml``."""
+    root = mini_project(
+        tmp_path / "proj",
+        docs="# Deps\n\nImport `ruamel_yaml` at startup.\n",
+    )
+    (root / "requirements.txt").write_text("ruamel.yaml>=0.18\n", encoding="utf-8")
+    report = inspect(
+        docs_root=root / "docs",
+        project_root=root,
+        config={"llm": {"provider": "none"}, "dry_run": True},
+    )
+    assert not any(
+        f.kind == "missing_code" and f.path == "ruamel_yaml" for f in report.findings
+    )
+
+
+def test_lexi_undeclared_package_like_term_is_still_missing_code(tmp_path: Path):
+    """A term shaped like a package but not actually declared must still be
+    reported as ``missing_code``."""
+    root = mini_project(
+        tmp_path / "proj",
+        docs="# Deps\n\nWe rely on `PyYAML` and `NotADeclaredPkg` here.\n",
+    )
+    (root / "requirements.txt").write_text("PyYAML>=6\n", encoding="utf-8")
+    report = inspect(
+        docs_root=root / "docs",
+        project_root=root,
+        config={"llm": {"provider": "none"}, "dry_run": True},
+    )
+    assert not any(
+        f.kind == "missing_code" and f.path == "PyYAML" for f in report.findings
+    )
+    assert any(
+        f.kind == "missing_code" and f.path == "NotADeclaredPkg"
+        for f in report.findings
+    )
+
+
+def test_lexi_broken_pyproject_does_not_crash(tmp_path: Path):
+    """A malformed ``pyproject.toml`` must not raise: Lexi just falls back to
+    treating every term as undeclared and keeps its usual drift behavior."""
+    root = mini_project(
+        tmp_path / "proj",
+        docs="# Deps\n\nWe rely on `PyYAML` and `ghostdep`.\n",
+    )
+    (root / "pyproject.toml").write_text(
+        "[project\ndependencies = [\"PyYAML>=6\"\n", encoding="utf-8"
+    )
+    report = inspect(
+        docs_root=root / "docs",
+        project_root=root,
+        config={"llm": {"provider": "none"}, "dry_run": True},
+    )
+    # Because the manifest failed to parse, PyYAML is not treated as declared,
+    # so it still surfaces as a (non-veto by default) finding. The important
+    # bit is that inspect() returned a report instead of raising.
+    paths = {f.path for f in report.findings}
+    assert "PyYAML" in paths
+    assert "ghostdep" in paths
+
+
+def test_lexi_project_config_key_unused_in_code_is_missing_code(tmp_path: Path):
+    """A key from the config.yaml of the project under test must not hide drift:
+    if docs mention it and code never reads it, it is reported."""
+    root = mini_project(
+        tmp_path / "proj",
+        docs="# Config\n\nSet `stale_option` to enable the feature.\n",
+    )
+    (root / "config.yaml").write_text("stale_option: true\n", encoding="utf-8")
+    report = inspect(
+        docs_root=root / "docs",
+        project_root=root,
+        config={"llm": {"provider": "none"}, "dry_run": True, "lexi": {"veto_on_missing_code": True}},
+    )
+    assert any(
+        f.kind == "missing_code" and f.path == "stale_option" for f in report.findings
+    )

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.2 (2026-10-30)
+
+### Fixed
+- Lexi no longer reports `missing_code` for a docs term that exists as an exact string literal in project code (tests and docs excluded).
+- Lexi no longer reports `missing_code` for a docs term that names a declared dependency (requirements*.txt, pyproject.toml dependencies and optional-dependencies, PEP 503 name normalization).
+- Self-test passes again: the simulated pytest timeout in tests/unit/test_runner.py is allowlisted for Sable (it raises subprocess.TimeoutExpired without spawning a process).
+
+### Security
+- The project under test can no longer suppress Lexi findings via its own config.yaml. Its keys are no longer ignored, and config file keys no longer count as evidence that a documented name exists; only names read by code do.
+
 ## 0.2.1 (2026-10-29)
 
 ### Fixed

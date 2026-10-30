@@ -45,6 +45,9 @@ sable:
     - path: tests/unit/test_deps.py
       call: subprocess.run
       reason: venv creation and pip install verification
+    - path: tests/unit/test_runner.py
+      call: subprocess.TimeoutExpired
+      reason: simulated pytest timeout (no process spawned)
     - path: core/isolation.py
       call: shutil.rmtree
       reason: cleanup isolated copy

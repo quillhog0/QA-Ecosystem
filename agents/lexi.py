@@ -5,6 +5,7 @@ from __future__ import annotations
 import builtins
 import re
 import ast
+import tomllib
 from pathlib import Path
 import tokenize
 import io
@@ -153,14 +154,9 @@ def _ignore_identifiers(
     ignore |= _flatten_keys(config)
     extra = (config.get("lexi") or {}).get("ignore_identifiers") or []
     ignore |= {str(item) for item in extra}
-    cfg_path = project_root / "config.yaml"
-    if cfg_path.is_file():
-        try:
-            loaded = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
-        except yaml.YAMLError:
-            loaded = {}
-        if isinstance(loaded, dict):
-            ignore |= _flatten_keys(loaded)
+    # Keys from the config.yaml of the project under test are deliberately not
+    # ignored here: a tested project must not be able to hide drift. A key that
+    # code really reads is still found via string literals and other sources.
     for path in list_docs(docs_root, globs=doc_globs):
         try:
             ignore |= _yaml_fence_keys(path.read_text(encoding="utf-8", errors="replace"))
@@ -197,7 +193,6 @@ _OTHER_SOURCE_EXT = {
     ".yaml", ".yml", ".json", ".toml", ".ini", ".cfg", ".sql",
 }
 _CONFIG_EXT = {".yaml", ".yml", ".json", ".toml", ".ini", ".cfg"}
-_CONFIG_KEY_RE = re.compile(r"""^\s*["']?([A-Za-z_][\w.-]*)["']?\s*[:=]""", re.MULTILINE)
 _SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__", "docs", "dist", "build"}
 
 
@@ -210,14 +205,15 @@ def _other_sources_text(project_root: Path, limit_bytes: int = 5_000_000) -> str
             continue
         if path.suffix.lower() not in _OTHER_SOURCE_EXT or not path.is_file():
             continue
+        if path.suffix.lower() in _CONFIG_EXT:
+            # Config files of the project under test are not evidence: a key
+            # only counts if code actually reads it (see _collect_code_strings).
+            continue
         try:
             size = path.stat().st_size
             if size > 1_000_000 or total + size > limit_bytes:
                 continue
             text = path.read_text(encoding="utf-8", errors="replace")
-            if path.suffix.lower() in _CONFIG_EXT:
-                # config files count only for their keys, not free-text values
-                text = "\n".join(_CONFIG_KEY_RE.findall(text))
             chunks.append(text)
             total += size
         except OSError:
@@ -337,6 +333,127 @@ def _collect_code_ast_terms(code_files: list[Path]) -> tuple[set[str], set[str]]
     return all_identifiers, function_names
 
 
+def _collect_code_strings(code_files: list[Path], project_root: Path) -> set[str]:
+    """Every exact str constant in the given code files.
+
+    A string literal used as a value or as a dict key is captured here because
+    both are ``ast.Constant`` nodes with a ``str`` payload. Lexi uses this set
+    to avoid flagging a docs term as ``missing_code`` when the term exists in
+    code only as a literal (for example an env-var fragment in a policy tuple,
+    or a CLI binary name). Tests are excluded by the caller via
+    ``split_code_and_tests``; any stray ``.py`` living under a ``docs`` /
+    ``doc`` directory is skipped here.
+    """
+    values: set[str] = set()
+    for path in code_files:
+        try:
+            rel_parts = path.relative_to(project_root).parts[:-1]
+        except ValueError:
+            rel_parts = path.parts[:-1]
+        if any(part.lower() in {"docs", "doc"} for part in rel_parts):
+            continue
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8-sig", errors="replace"))
+        except (OSError, SyntaxError, UnicodeDecodeError, ValueError):
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                values.add(node.value)
+    return values
+
+
+_PEP508_NAME_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)")
+_PEP503_SEP_RE = re.compile(r"[-_.]+")
+
+
+def _pep503_name(name: str) -> str:
+    """PEP 503 package-name normalization: lowercase and collapse ``[-_.]+``."""
+    return _PEP503_SEP_RE.sub("-", name.strip().lower())
+
+
+def _requirement_line_name(line: str) -> str | None:
+    """Extract and normalize the distribution name from one pip requirement.
+
+    Strips trailing ``# comment``, environment markers (``;``-suffix), version
+    specifiers and extras (``[...]``), and returns the PEP 503 normalized form.
+    Returns ``None`` for blank / comment-only / pip-option (``-r``, ``-e``,
+    ``--find-links``, ...) or continuation (``\\``) lines and for anything that
+    does not begin with a valid PEP 508 name. URL and VCS requirement forms are
+    intentionally not parsed here; they will simply not match a plain docs
+    term, which is a safe under-approximation.
+    """
+    raw = line.strip()
+    if not raw or raw.startswith("#"):
+        return None
+    # Environment markers come after the version specifier; drop them first so
+    # a name like ``foo; python_version<'3.11'`` is reduced to just ``foo``.
+    raw = raw.split(";", 1)[0].strip()
+    # Inline comments must be whitespace-preceded per pip's own parser.
+    raw = re.split(r"\s+#", raw, maxsplit=1)[0].strip()
+    if not raw or raw.startswith("-") or raw.endswith("\\"):
+        return None
+    match = _PEP508_NAME_RE.match(raw)
+    if not match:
+        return None
+    return _pep503_name(match.group(1))
+
+
+def _declared_package_names(project_root: Path) -> set[str]:
+    """PEP 503 normalized distribution names declared by the project under test.
+
+    Reads every ``requirements*.txt`` at the project root and every dependency
+    list under ``[project]`` / ``[project.optional-dependencies]`` in
+    ``pyproject.toml``. Missing or broken files yield nothing rather than
+    raising, so Lexi can never crash on an unparseable manifest: an empty set
+    simply disables the declared-package skip.
+    """
+    names: set[str] = set()
+    try:
+        req_files = sorted(
+            p for p in project_root.glob("requirements*.txt") if p.is_file()
+        )
+    except OSError:
+        req_files = []
+    for path in req_files:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            name = _requirement_line_name(line)
+            if name:
+                names.add(name)
+    try:
+        data = tomllib.loads(
+            (project_root / "pyproject.toml").read_text(encoding="utf-8", errors="replace")
+        )
+    except (OSError, ValueError, tomllib.TOMLDecodeError):
+        # FileNotFoundError, missing/unreadable file, invalid UTF-8, or a
+        # malformed TOML body — all treated as "no declared packages" here.
+        data = None
+    if isinstance(data, dict):
+        project = data.get("project")
+        if isinstance(project, dict):
+            deps = project.get("dependencies")
+            if isinstance(deps, list):
+                for item in deps:
+                    if isinstance(item, str):
+                        name = _requirement_line_name(item)
+                        if name:
+                            names.add(name)
+            optional = project.get("optional-dependencies")
+            if isinstance(optional, dict):
+                for group in optional.values():
+                    if not isinstance(group, list):
+                        continue
+                    for item in group:
+                        if isinstance(item, str):
+                            name = _requirement_line_name(item)
+                            if name:
+                                names.add(name)
+    return names
+
+
 def _is_code_term(ident: str, all_identifiers: set[str], function_names: set[str]) -> bool:
     if ident in all_identifiers:
         return True
@@ -372,6 +489,8 @@ def _heuristic_drift(
     imported_names = _imported_names(project_root)
     code_text_content = _collect_code_text_content(project_root)
     all_code_identifiers, function_names = _collect_code_ast_terms(code_files)
+    code_strings = _collect_code_strings(code_files, project_root)
+    declared_packages = _declared_package_names(project_root)
 
     code_index: dict[str, str] = {}
     for path in code_files:
@@ -430,6 +549,15 @@ def _heuristic_drift(
                     severity="low",
                 )
             )
+            continue
+        if ident in code_strings:
+            # The term exists verbatim as a string literal or dict key in a
+            # project .py file (excluding tests and docs) — that is not drift.
+            continue
+        if _pep503_name(ident) in declared_packages:
+            # The term names a declared dependency (requirements*.txt or
+            # pyproject.toml ``[project]`` / ``optional-dependencies``) — that
+            # is not drift either.
             continue
         if other_text is None:
             other_text = _other_sources_text(project_root)
