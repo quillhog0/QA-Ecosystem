@@ -126,3 +126,23 @@ def test_run_pytest_rejects_pathsep_and_resolves_paths(tmp_path, monkeypatch):
     assert res.isolated_root == str(iso.resolve())
 
 
+def test_run_pytest_timeout_preserves_empty_stdout(tmp_path, monkeypatch):
+    """On timeout with empty captured output, stdout must stay '' (guards `exc.stdout or \"\"`)."""
+    import subprocess
+    from core.runner import run_pytest
+
+    iso = tmp_path / "iso"
+    work = tmp_path / "work"
+    iso.mkdir()
+    work.mkdir()
+
+    def fake_run(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd="pytest", timeout=1, output="", stderr="")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    res = run_pytest(iso, work_dir=work, allow_network=False, timeout=1, config={"sandbox": {"mode": "off"}})
+    assert res.exit_code == 124
+    assert res.stdout == ""
+    assert "TIMEOUT" in res.stderr
+
+

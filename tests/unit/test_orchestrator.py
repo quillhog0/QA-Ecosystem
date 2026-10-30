@@ -209,3 +209,24 @@ def test_mutation_audit_uses_project_venv_python(tmp_path: Path):
         Vesper(config).run(project, project / "docs")
 
     assert captured.get("python") == fake_python
+
+
+def test_sable_execute_summary_when_no_blocked_reasons(tmp_path: Path):
+    """Post-execution Sable summary falls back to 'collected > 0' (guards `... or \"collected > 0\"`)."""
+    project = mini_project(tmp_path / "proj")
+    config = {
+        "dry_run": True,
+        "allow_network": False,
+        "reports_dir": str(tmp_path / "reports"),
+        "llm": {"provider": "none"},
+        "isolation_method": "copy",
+        "sandbox": {"mode": "off"},
+    }
+    report = Vesper(config).run(project, project / "docs")
+
+    sable_execute = [
+        r for r in report.role_results if r.role == "sable" and r.stage == "execute"
+    ]
+    assert sable_execute, "expected a Sable post-execution result"
+    assert sable_execute[-1].verdict == Verdict.CLEAR.value
+    assert sable_execute[-1].summary == "collected > 0"

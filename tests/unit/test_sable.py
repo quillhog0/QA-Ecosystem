@@ -11,6 +11,7 @@ from policies.sable import (
     valid_allow_entries,
     scan_tests_for_risks,
     _arg_looks_tmp,
+    _command_is_pytest_only,
     install_runtime_guards,
 )
 
@@ -352,5 +353,26 @@ def test_sable_scans_project_files_and_nested_conftest(tmp_path: Path):
     hits, _ = scan_tests_for_risks(iso)
     assert any("src/worker.py: call eval" in h for h in hits)
     assert any("nested/conftest.py: call shutil.rmtree" in h for h in hits)
+
+
+def test_command_is_pytest_only_accepts_pytest_invocations():
+    """Plain pytest and python -m pytest forms pass, including absolute interpreter paths."""
+    assert _command_is_pytest_only(["pytest", "tests/"]) == (True, "pytest-only")
+    assert _command_is_pytest_only(["python3", "-m", "pytest", "tests"]) == (True, "pytest-only")
+    assert _command_is_pytest_only(["/usr/bin/python", "-m", "pytest", "-q"]) == (True, "pytest-only")
+
+
+def test_command_is_pytest_only_rejects_empty_and_non_pytest_commands():
+    assert _command_is_pytest_only([]) == (False, "empty command")
+    assert _command_is_pytest_only(["ls", "-la"]) == (False, "command is not pytest")
+    assert _command_is_pytest_only(["python", "-m", "unittest"]) == (False, "command is not pytest")
+
+
+def test_command_is_pytest_only_rejects_forbidden_network_and_destructive_tokens():
+    assert _command_is_pytest_only(["pytest", "rm", "file"]) == (False, "forbidden token: rm")
+    assert _command_is_pytest_only(["pytest", "nc"]) == (False, "network binary: nc")
+    ok, reason = _command_is_pytest_only(["python -m pytest ; rm -rf /"])
+    assert ok is False
+    assert reason.startswith("destructive pattern in command:")
 
 

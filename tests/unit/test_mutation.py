@@ -241,3 +241,49 @@ def test_mutant_is_not_killed_when_no_tests_ran(tmp_path: Path, monkeypatch: pyt
     res = mutation.run_mutation_testing(tmp_path, work_dir=tmp_path / "w", config={})
     assert res["killed"] == 0
     assert res["score"] == 0.0
+
+
+def test_mutation_verdict_clear_when_score_meets_min_score(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """A score at or above min_score must stay CLEAR (guards `min_score > 0 and score < min_score`)."""
+    import core.mutation as mutation
+    from core.packets import ExecutionResult
+
+    (tmp_path / "calc.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    # Every mutant fails the suite -> all killed, score 1.0
+    monkeypatch.setattr(
+        mutation,
+        "run_pytest",
+        lambda *a, **k: ExecutionResult(exit_code=1, collected=1, failed=1),
+    )
+    res = mutation.run_mutation_testing(
+        tmp_path,
+        work_dir=tmp_path / "w",
+        config={"mutation": {"min_score": 0.5}},
+    )
+    assert res["score"] == 1.0
+    assert res["killed"] > 0
+    assert res["survived"] == 0
+    assert res["verdict"] == Verdict.CLEAR.value
+
+
+def test_mutation_verdict_clear_when_score_equals_min_score(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """score == min_score must stay CLEAR (guards `score < min_score`, not `<=`)."""
+    import core.mutation as mutation
+    from core.packets import ExecutionResult
+
+    (tmp_path / "calc.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    # Two mutable points (+ and return): first killed, second survives -> score 0.5
+    results = iter([
+        ExecutionResult(exit_code=1, collected=1, failed=1),
+        ExecutionResult(exit_code=0, collected=1, passed=1),
+    ])
+    monkeypatch.setattr(mutation, "run_pytest", lambda *a, **k: next(results))
+    res = mutation.run_mutation_testing(
+        tmp_path,
+        work_dir=tmp_path / "w",
+        config={"mutation": {"min_score": 0.5}},
+    )
+    assert res["killed"] == 1
+    assert res["survived"] == 1
+    assert res["score"] == 0.5
+    assert res["verdict"] == Verdict.CLEAR.value

@@ -486,3 +486,26 @@ def test_venv_python_symlink_binds_venv_root(tmp_path: Path):
     )
     joined = " ".join(wrapped)
     assert f"--ro-bind {venv.resolve()} {venv.resolve()}" in joined
+
+
+def test_probe_bwrap_missing_binary_returns_false_tuple(monkeypatch: pytest.MonkeyPatch):
+    """Missing bwrap must yield (False, None), not None or a usable verdict."""
+    import core.sandbox as sb_mod
+
+    sb_mod.clear_probe_cache()
+    monkeypatch.setattr("sys.platform", "linux")
+    monkeypatch.setattr("core.sandbox.shutil.which", lambda _: None)
+    try:
+        assert sb_mod._probe_bwrap() == (False, None)
+
+        enabled, status, failure = get_sandbox_status({"sandbox": {"mode": "auto"}})
+        assert enabled is False
+        assert status == "unavailable"
+        assert failure is None
+
+        enabled, status, failure = get_sandbox_status({"sandbox": {"mode": "required"}})
+        assert enabled is False
+        assert status == "unavailable"
+        assert failure is not None
+    finally:
+        sb_mod.clear_probe_cache()
