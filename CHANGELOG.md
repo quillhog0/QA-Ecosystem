@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.1 (2026-10-30)
+
+### Tests
+- Kill-tests for 13 of the 15 surviving mutants reported at 0.3.0; self-test mutation score 48.3% -> 93.1% (27 killed, 2 survived, 1 error). The two remaining survivors (agents/aria.py:48, core/mutation.py:385) are equivalent mutants.
+
 ## 0.3.0 (2026-10-30)
 
 ### Added

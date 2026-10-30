@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from core.isolation import (
     IsolationHandle,
+    _copy_tree,
+    _get_tested_tree_info,
+    _is_git_toplevel,
     create_isolation,
     is_secret_path,
     isolation_destination,
@@ -233,5 +238,83 @@ def test_release_isolation_git_worktree_captures_output(tmp_path: Path):
     assert "prune" in prune_call.args[0]
     assert prune_call.kwargs.get("capture_output") is True
     assert prune_call.kwargs.get("text") is True
+
+
+def test_is_git_toplevel_false_when_git_binary_missing(tmp_path: Path, monkeypatch):
+    """isolation.py:80 - the OSError fallback must return exactly False."""
+    def fake_run(*args, **kwargs):
+        raise OSError("git not installed")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    assert _is_git_toplevel(tmp_path) is False
+
+
+def test_is_git_toplevel_false_when_toplevel_resolve_fails(tmp_path: Path, monkeypatch):
+    """isolation.py:87 - an unresolvable toplevel path must return exactly False."""
+    def fake_run(cmd, **kwargs):
+        return SimpleNamespace(returncode=0, stdout=str(tmp_path), stderr="")
+
+    def boom(self, *args, **kwargs):
+        raise OSError("cannot resolve")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.setattr(Path, "resolve", boom)
+    assert _is_git_toplevel(tmp_path) is False
+
+
+def test_tested_tree_info_head_lookup_runs_unchecked(tmp_path: Path, monkeypatch):
+    """isolation.py:97 - rev-parse HEAD must use check=False: an unborn HEAD
+    yields 'unknown' instead of escaping as CalledProcessError."""
+    Err = subprocess.CalledProcessError
+    seen_checks: list[object] = []
+
+    def fake_run(cmd, **kwargs):
+        check = kwargs.get("check")
+        seen_checks.append(check)
+        joined = " ".join(str(part) for part in cmd)
+        if "--show-toplevel" in joined:
+            return SimpleNamespace(returncode=0, stdout=str(tmp_path), stderr="")
+        if "--short" in joined:
+            if check:
+                raise Err(returncode=128, cmd=cmd, stderr="fatal: ambiguous argument 'HEAD'")
+            return SimpleNamespace(returncode=128, stdout="", stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    info = _get_tested_tree_info(tmp_path)
+    assert info == "working (HEAD unknown + 0 uncommitted files)"
+    assert False in seen_checks
+
+
+def test_tested_tree_info_non_git_project_is_plain_copy(tmp_path: Path, monkeypatch):
+    """isolation.py:110 - non-git projects must report the exact copy label."""
+    def fake_run(cmd, **kwargs):
+        return SimpleNamespace(returncode=1, stdout="", stderr="")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    assert _get_tested_tree_info(tmp_path) == "working (copy)"
+
+
+def test_copy_tree_preserves_internal_symlinks(tmp_path: Path):
+    """isolation.py:202 - copytree must run with symlinks=True (links stay links)."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "real.txt").write_text("payload", encoding="utf-8")
+    os.symlink("real.txt", src / "link.txt")
+    dst = tmp_path / "dst"
+    _copy_tree(src, dst)
+    assert (dst / "link.txt").is_symlink()
+    assert (dst / "real.txt").read_text(encoding="utf-8") == "payload"
+
+
+def test_copy_tree_refuses_existing_destination(tmp_path: Path):
+    """isolation.py:202 - dirs_exist_ok must stay False: never merge into an existing copy."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.txt").write_text("x", encoding="utf-8")
+    dst = tmp_path / "dst"
+    dst.mkdir()
+    with pytest.raises(FileExistsError):
+        _copy_tree(src, dst)
 
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from agents.aria import _find_covering_tests, design
+from agents.aria import _extract_body_tokens, _find_covering_tests, _stems, design
 from tests.support import mini_project
 
 
@@ -191,3 +191,17 @@ def test_claim_coverage_markdown_has_score_column():
     assert "| claim | covered_by | score |" in md
     assert "| MTU Safety | tests/test_core.py::test_mtu_batch_size_cap | 3 |" in md
     assert "| Unmatched Claim | NONE | 0 |" in md
+
+
+def test_stems_only_splits_plural_words_longer_than_three():
+    """aria.py:37 - the 's' stem applies only when len(word) > 3, not >= 3."""
+    assert _stems("bus") == {"bus"}
+    assert _stems("here") == {"here"}
+    assert "box" in _stems("boxes")
+
+
+def test_extract_body_tokens_underscore_parts_honour_length_and_stopwords():
+    """aria.py:75 - underscore parts are kept iff len >= 3 and not a stop word."""
+    assert "add" in _extract_body_tokens("add_")
+    assert "xy" not in _extract_body_tokens("xy_z")
+    assert "z" not in _extract_body_tokens("xy_z")

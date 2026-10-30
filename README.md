@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/quillhog0/QA-Ecosystem/actions/workflows/ci.yml/badge.svg)](https://github.com/quillhog0/QA-Ecosystem/actions/workflows/ci.yml)
 
-Version 0.3.0. See CHANGELOG.md.
+Version 0.3.1. See CHANGELOG.md.
 
 Part of the quillhog toolkit — [github.com/quillhog0](https://github.com/quillhog0) · [quillhog.xyz](https://quillhog.xyz) · X [@Quillhog0](https://x.com/Quillhog0).
 
@@ -228,9 +228,9 @@ An optional adversarial test quality audit evaluated by **Riley** after baseline
 
 Running mutation testing on QA Ecosystem itself (`python main.py --self-test --mutation`, evaluating 30 deterministic mutants) yields:
 
-- **Score:** **48.3%** at release 0.3.0 (14 killed, 15 survived, 0 timeout, 1 error, out of 30 sampled mutants; errors are excluded from the score). The mutant sample is deterministic (seed 42) but shifts as the code changes, so the figure varies between releases; re-run the command to measure the current tree.
+- **Score:** **93.1%** at release 0.3.1 (27 killed, 2 survived, 0 timeout, 1 error, out of 30 sampled mutants; errors are excluded from the score). The mutant sample is deterministic (seed 42) but shifts as the code changes, so the figure varies between releases; re-run the command to measure the current tree.
 - **Note:** earlier builds counted a mutant as killed when the test run crashed before any test executed (for example when the sandbox could not start the project venv). That bug is fixed and covered by tests, so this score only counts real test failures.
-- **Surviving mutants at 0.3.0 (not yet triaged):** agents/aria.py:37, agents/aria.py:48, agents/aria.py:75, agents/lexi.py:386, agents/lexi.py:464, core/deps.py:101, core/isolation.py:80, core/isolation.py:87, core/isolation.py:97, core/isolation.py:110, core/isolation.py:202, core/mutation.py:385, core/mutation.py:436, core/report.py:115, core/report.py:126.
+- **Surviving mutants at 0.3.1:** agents/aria.py:48 (`>` -> `>=`) and core/mutation.py:385 (`True` -> `False`). Both are equivalent mutants: at aria.py:48 the single-part match re-adds a token that is already added and then deduplicated, so the output is unchanged; at mutation.py:385 the ignore-errors flag on the cleanup tree removal only matters in filesystem states where the original would also fail.
 
 ## Config
 

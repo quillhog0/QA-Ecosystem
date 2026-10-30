@@ -316,3 +316,53 @@ def test_select_mutants_non_positive_returns_empty(tmp_path: Path):
     assert mutants
     assert select_mutants(mutants, max_mutants=0, seed=1) == []
     assert select_mutants(mutants, max_mutants=-3, seed=1) == []
+
+
+def _classification_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_result):
+    """Run mutation testing over a 2-mutant file with every pytest call faked.
+
+    calc.py offers exactly two mutation points (the '+' and the return value),
+    so the classification counters map one-to-one onto the fake result.
+    """
+    import core.mutation as mutation
+
+    (tmp_path / "calc.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    monkeypatch.setattr(mutation, "run_pytest", lambda *a, **k: fake_result)
+    return mutation.run_mutation_testing(tmp_path, work_dir=tmp_path / "w", config={})
+
+
+def test_active_tests_are_detected_from_collected_count(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """mutation.py:436 - 'collected or sum' keeps `or`: collected>0 alone marks the run active."""
+    from core.packets import ExecutionResult
+
+    res = _classification_run(
+        tmp_path, monkeypatch, ExecutionResult(exit_code=0, collected=3, passed=0, failed=0, skipped=0, errors=0)
+    )
+    assert res["evaluated"] == 2
+    assert res["survived"] == 2
+    assert res["killed"] == 0
+    assert res["error"] == 0
+
+
+def test_active_tests_are_detected_from_skipped_count(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """mutation.py:436 - the sum fallback includes skipped, so it must not drop out via '-' or 'and'."""
+    from core.packets import ExecutionResult
+
+    res = _classification_run(
+        tmp_path, monkeypatch, ExecutionResult(exit_code=0, collected=0, passed=0, failed=0, skipped=1, errors=0)
+    )
+    assert res["survived"] == 2
+    assert res["killed"] == 0
+    assert res["error"] == 0
+
+
+def test_active_tests_are_detected_from_error_count(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """mutation.py:436 - collection errors count as active tests and must keep the mutant survived."""
+    from core.packets import ExecutionResult
+
+    res = _classification_run(
+        tmp_path, monkeypatch, ExecutionResult(exit_code=0, collected=0, passed=0, failed=0, skipped=0, errors=1)
+    )
+    assert res["survived"] == 2
+    assert res["killed"] == 0
+    assert res["error"] == 0

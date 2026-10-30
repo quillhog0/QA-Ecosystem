@@ -97,3 +97,18 @@ def test_prepare_venv_installs_deps_and_pytest(tmp_path: Path):
         check=True,
     )
     assert "Name: requests" in result.stdout
+
+
+def test_prepare_venv_reports_creation_failure_as_tuple(tmp_path: Path, monkeypatch):
+    """deps.py:101 - a failed venv creation must return the (None, message)
+    tuple, so callers that unpack it keep working."""
+    Err = subprocess.CalledProcessError
+
+    def fake_run(cmd, **kwargs):
+        raise Err(returncode=1, cmd=cmd, stderr="ensurepip failed\n")
+
+    root = mini_project(tmp_path / "proj", with_tests=False, docs="")
+    (root / "requirements.txt").write_text("pytest\n", encoding="utf-8")
+    monkeypatch.setattr("subprocess.run", fake_run)
+    result = prepare_venv(root, tmp_path / "work", timeout=5)
+    assert result == (None, "venv creation failed: ensurepip failed")

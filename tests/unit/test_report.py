@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from core.packets import FinalReport, Verdict
-from core.report import _short, render_markdown
+from core.packets import FinalReport, RoleResult, Verdict
+from core.report import _short, _yaml, append_result, render_markdown
 
 
 def _report_with_mutation(status: str) -> FinalReport:
@@ -71,3 +71,22 @@ def test_render_markdown_keeps_short_execution_stdout():
     md = render_markdown(report)
     assert "1 passed in 0.01s" in md
     assert "stdout: null" not in md
+
+
+def test_yaml_returns_dumped_string_preserving_insertion_order():
+    """report.py:115 - _yaml dumps with sort_keys=False (and returns text, not None).
+
+    Keys are written out of alphabetical order so flipping sort_keys to True
+    reorders the output; allow_unicode keeps non-ASCII text intact.
+    """
+    out = _yaml({"zeta": 1, "alpha": 2, "list": [1, 2]})
+    assert out == "zeta: 1\nalpha: 2\nlist:\n- 1\n- 2"
+
+
+def test_append_result_returns_the_appended_result():
+    """report.py:126 - append_result returns the same RoleResult it appended."""
+    results: list[RoleResult] = []
+    result = RoleResult(role="lexi", stage="drift_check", verdict="CLEAR", summary="ok")
+    returned = append_result(results, result)
+    assert returned is result
+    assert results == [result]

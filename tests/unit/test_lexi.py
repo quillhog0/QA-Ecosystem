@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from agents.lexi import inspect
+from agents.lexi import _is_code_term, _requirement_line_name, inspect
 from core.packets import Verdict
 from tests.support import mini_project
 
@@ -376,3 +376,20 @@ def test_lexi_project_config_key_unused_in_code_is_missing_code(tmp_path: Path):
     assert any(
         f.kind == "missing_code" and f.path == "stale_option" for f in report.findings
     )
+
+
+def test_is_code_term_three_letter_snake_matches_function_substring():
+    """lexi.py:464 - a 3-character snake form is long enough for the substring check."""
+    assert _is_code_term("Add", set(), {"address_book"}) is True
+
+
+def test_is_code_term_two_letter_snake_does_not_match_function_substring():
+    """lexi.py:464 - a 2-character snake must not be treated as a code term."""
+    assert _is_code_term("Ab", set(), {"cabdriver"}) is False
+
+
+def test_requirement_line_name_returns_none_for_non_requirement_lines():
+    """lexi.py:386 - blank and comment-only requirement lines yield None, not truthy."""
+    assert _requirement_line_name("# a comment") is None
+    assert _requirement_line_name("") is None
+    assert _requirement_line_name("  ") is None
