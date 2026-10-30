@@ -10,6 +10,7 @@ from policies.sable import (
     evaluate_preflight,
     valid_allow_entries,
     scan_tests_for_risks,
+    _all_python_files,
     _arg_looks_tmp,
     _command_is_pytest_only,
     install_runtime_guards,
@@ -18,6 +19,12 @@ from policies.sable import (
 
 def _pytest_cmd(target: Path) -> list[str]:
     return [sys.executable, "-m", "pytest", str(target), "-q"]
+
+
+def test_all_python_files_returns_empty_list_for_non_directory(tmp_path: Path):
+    """sable.py:251 - a missing/non-directory root yields an empty list, not None
+    (callers iterate the result)."""
+    assert _all_python_files(tmp_path / "does_not_exist") == []
 
 
 def test_sable_blocks_rm_rf(tmp_path: Path):

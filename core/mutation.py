@@ -10,10 +10,12 @@ from __future__ import annotations
 import ast
 import copy
 import os
+import queue
 import random
 import shutil
 import stat
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -331,6 +333,32 @@ def make_tree_writable(root: Path) -> None:
         pass
 
 
+MAX_MUTATION_WORKERS = 16
+
+
+def _resolve_mutation_workers(mutation_cfg: dict[str, Any]) -> int:
+    """Resolve the mutation worker count from operator config only.
+
+    Default is min(4, cpu_count); the value is always clamped to [1, 16]. A
+    malformed or out-of-range entry degrades to the guarded default rather than
+    an unbounded spawn, mirroring how the other mutation knobs are read.
+    """
+    default_workers = min(4, os.cpu_count() or 1)
+    raw = mutation_cfg.get("workers")
+    if raw is None:
+        workers = default_workers
+    else:
+        try:
+            workers = int(raw)
+        except (TypeError, ValueError):
+            workers = default_workers
+    if workers < 1:
+        workers = 1
+    if workers > MAX_MUTATION_WORKERS:
+        workers = MAX_MUTATION_WORKERS
+    return workers
+
+
 def run_mutation_testing(
     isolated_root: Path,
     *,
@@ -380,90 +408,151 @@ def run_mutation_testing(
         }
 
     # Create writable mutant sandbox copy
-    mutants_tree = work_dir / "mutants_tree"
-    if mutants_tree.exists():
-        shutil.rmtree(mutants_tree, ignore_errors=True)
-    shutil.copytree(isolated_root, mutants_tree, symlinks=True)
-    make_tree_writable(mutants_tree)
-
+    workers = _resolve_mutation_workers(mutation_cfg)
     sable_guard = work_dir / "_sable_guard.py"
+
+    # Outcomes are stored by selection index so the aggregated counters and the
+    # survivor list stay byte-for-byte identical to a sequential run, no matter
+    # which worker finishes a given mutant first.
+    outcomes: list[tuple[str, dict[str, Any] | None]] = [("", None)] * len(selected)
+
+    def _make_tree(name: str) -> Path:
+        tree = work_dir / name
+        if tree.exists():
+            shutil.rmtree(tree, ignore_errors=True)
+
+        work_resolved = work_dir.resolve()
+
+        def _ignore_work_dir(src, names):
+            # Never recurse the workspace back into a tree copy: the mutant
+            # trees and per-run dirs live under work_dir, which may itself sit
+            # inside isolated_root (unit fixtures).
+            skipped = set()
+            for n in names:
+                try:
+                    if (Path(src) / n).resolve() == work_resolved:
+                        skipped.add(n)
+                except OSError:
+                    pass
+            return skipped
+
+        shutil.copytree(isolated_root, tree, symlinks=True, ignore=_ignore_work_dir)
+        make_tree_writable(tree)
+        return tree
+
+    def _evaluate(mutant: Mutant, tree: Path) -> tuple[str, dict[str, Any] | None]:
+        target_file = tree / mutant.file_path
+        if not target_file.is_file():
+            mutant.status = "error"
+            mutant.details = "target file missing in mutant tree"
+            return ("error", None)
+
+        original_code = target_file.read_text(encoding="utf-8", errors="replace")
+        try:
+            mutated_code = apply_mutation_to_source(original_code, mutant.node_index)
+        except Exception as exc:
+            mutant.status = "error"
+            mutant.details = f"failed to apply mutation: {exc}"
+            return ("error", None)
+
+        target_file.write_text(mutated_code, encoding="utf-8")
+
+        m_work = work_dir / f"m_run_{mutant.id}"
+        m_work.mkdir(parents=True, exist_ok=True)
+        if sable_guard.is_file():
+            try:
+                shutil.copy2(sable_guard, m_work / "_sable_guard.py")
+            except OSError:
+                pass
+
+        try:
+            res: ExecutionResult = run_pytest(
+                tree,
+                work_dir=m_work,
+                allow_network=allow_network,
+                timeout=timeout_per_mutant,
+                python=python,
+                config=config,
+                extra_args=["-x", "-q"],
+            )
+
+            active_count = res.collected or (res.passed + res.failed + res.skipped + res.errors)
+            if res.exit_code == 124 or "TIMEOUT" in str(res.stderr or ""):
+                mutant.status = "timeout"
+                mutant.details = f"timed out after {timeout_per_mutant}s"
+                return ("timeout", None)
+            elif res.exit_code == 0 and res.failed == 0 and (active_count > 0 or res.passed > 0):
+                mutant.status = "survived"
+                mutant.details = f"passed ({res.passed} passed)"
+                survivor = {
+                    "id": mutant.id,
+                    "location": f"{mutant.file_path}:{mutant.lineno}",
+                    "type": mutant.mutation_type,
+                    "original": mutant.original,
+                    "mutated": mutant.mutated,
+                }
+                return ("survived", survivor)
+            elif res.failed > 0 or res.errors > 0 or (res.exit_code != 0 and active_count > 0):
+                mutant.status = "killed"
+                mutant.details = f"killed (exit={res.exit_code}, failed={res.failed})"
+                return ("killed", None)
+            else:
+                mutant.status = "error"
+                mutant.details = f"error running tests (exit={res.exit_code}, collected={res.collected})"
+                return ("error", None)
+        finally:
+            target_file.write_text(original_code, encoding="utf-8")
+            shutil.rmtree(m_work, ignore_errors=True)
+
+    if workers == 1:
+        tree = _make_tree("mutants_tree")
+        try:
+            for idx, mutant in enumerate(selected):
+                outcomes[idx] = _evaluate(mutant, tree)
+        finally:
+            shutil.rmtree(tree, ignore_errors=True)
+    else:
+        # Each worker owns a writable tree copy; the queue guarantees a mutant
+        # runs alone on its tree, so parallel results match a sequential run.
+        trees = [_make_tree(f"mutants_tree_{i}") for i in range(workers)]
+        tree_pool: "queue.Queue[Path]" = queue.Queue()
+        for tree in trees:
+            tree_pool.put(tree)
+
+        def _run_with_tree(idx: int, mutant: Mutant) -> None:
+            tree = tree_pool.get()
+            try:
+                outcomes[idx] = _evaluate(mutant, tree)
+            finally:
+                tree_pool.put(tree)
+
+        try:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = [
+                    pool.submit(_run_with_tree, idx, mutant)
+                    for idx, mutant in enumerate(selected)
+                ]
+                for fut in futures:
+                    fut.result()
+        finally:
+            for tree in trees:
+                shutil.rmtree(tree, ignore_errors=True)
 
     killed = 0
     survived = 0
     timeout_count = 0
     error_count = 0
     survived_list: list[dict[str, Any]] = []
-
-    try:
-        for mutant in selected:
-            target_file = mutants_tree / mutant.file_path
-            if not target_file.is_file():
-                mutant.status = "error"
-                mutant.details = "target file missing in mutant tree"
-                error_count += 1
-                continue
-
-            original_code = target_file.read_text(encoding="utf-8", errors="replace")
-            try:
-                mutated_code = apply_mutation_to_source(original_code, mutant.node_index)
-            except Exception as exc:
-                mutant.status = "error"
-                mutant.details = f"failed to apply mutation: {exc}"
-                error_count += 1
-                continue
-
-            target_file.write_text(mutated_code, encoding="utf-8")
-
-            m_work = work_dir / f"m_run_{mutant.id}"
-            m_work.mkdir(parents=True, exist_ok=True)
-            if sable_guard.is_file():
-                try:
-                    shutil.copy2(sable_guard, m_work / "_sable_guard.py")
-                except OSError:
-                    pass
-
-            try:
-                res: ExecutionResult = run_pytest(
-                    mutants_tree,
-                    work_dir=m_work,
-                    allow_network=allow_network,
-                    timeout=timeout_per_mutant,
-                    python=python,
-                    config=config,
-                    extra_args=["-x", "-q"],
-                )
-
-                active_count = res.collected or (res.passed + res.failed + res.skipped + res.errors)
-                if res.exit_code == 124 or "TIMEOUT" in str(res.stderr or ""):
-                    mutant.status = "timeout"
-                    mutant.details = f"timed out after {timeout_per_mutant}s"
-                    timeout_count += 1
-                elif res.exit_code == 0 and res.failed == 0 and (active_count > 0 or res.passed > 0):
-                    mutant.status = "survived"
-                    mutant.details = f"passed ({res.passed} passed)"
-                    survived += 1
-                    survived_list.append(
-                        {
-                            "id": mutant.id,
-                            "location": f"{mutant.file_path}:{mutant.lineno}",
-                            "type": mutant.mutation_type,
-                            "original": mutant.original,
-                            "mutated": mutant.mutated,
-                        }
-                    )
-                elif res.failed > 0 or res.errors > 0 or (res.exit_code != 0 and active_count > 0):
-                    mutant.status = "killed"
-                    mutant.details = f"killed (exit={res.exit_code}, failed={res.failed})"
-                    killed += 1
-                else:
-                    mutant.status = "error"
-                    mutant.details = f"error running tests (exit={res.exit_code}, collected={res.collected})"
-                    error_count += 1
-            finally:
-                target_file.write_text(original_code, encoding="utf-8")
-                shutil.rmtree(m_work, ignore_errors=True)
-    finally:
-        shutil.rmtree(mutants_tree, ignore_errors=True)
+    for kind, survivor in outcomes:
+        if kind == "killed":
+            killed += 1
+        elif kind == "survived":
+            survived += 1
+            survived_list.append(survivor)
+        elif kind == "timeout":
+            timeout_count += 1
+        else:
+            error_count += 1
 
     evaluated = len(selected)
     active = killed + survived

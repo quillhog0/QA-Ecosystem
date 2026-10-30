@@ -88,6 +88,12 @@ def render_markdown(report: FinalReport) -> str:
             else:
                 lines.append("No mutants survived.")
         lines.append("")
+    if report.timings:
+        lines += ["## Phase timings (seconds)", ""]
+        for name in ("isolation", "install", "pytest", "execute", "mutation"):
+            if name in report.timings:
+                lines.append(f"- {name}: {report.timings[name]:.3f}")
+        lines.append("")
     lines += [
         "## Bounds",
         "",

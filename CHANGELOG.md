@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.2 (2026-10-30)
+
+### Added
+- Phase timings (isolation, install, pytest, mutation) in the report.
+- Parallel mutation audit: `mutation.workers` (default min(4, CPU count), cap 16) and `--mutation-workers`. Each worker uses its own tree copy; per-mutant results, counts and survivor order are identical to a sequential run. Self-test with mutation is about 3x faster.
+- Venv cache keyed by a hash of the requirement file contents and the interpreter, stored under the operator's cache directory (`QA_VENV_CACHE_DIR` or `~/.cache/qa-ecosystem/venvs`), never in the tested project. Only a successful install is cached.
+
+### Fixed
+- Lexi no longer reports `missing_code` for keyword-argument and parameter names, or for git branch names read from the live project's `.git` (plain file reads, the isolated copy still has no `.git`).
+
+### Tests
+- Kill-tests for new survivors; self-test mutation score 96.7% (29 killed, 1 equivalent survivor).
+
 ## 0.3.1 (2026-10-30)
 
 ### Tests

@@ -15,6 +15,8 @@ mutation:
   max_mutants: 30
   timeout_per_mutant: 30
   seed: 42
+  # Parallel mutant workers (operator only). Default min(4, cpu_count), hard cap 16.
+  workers: 4
 
 nova:
   install_deps: true
@@ -54,6 +56,9 @@ sable:
     - path: core/mutation.py
       call: shutil.rmtree
       reason: cleanup mutant workspace
+    - path: core/deps.py
+      call: shutil.rmtree
+      reason: cleanup reusable virtualenv cache copy
     - path: main.py
       call: shutil.rmtree
       reason: cleanup self-test temp docs

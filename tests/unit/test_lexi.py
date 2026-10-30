@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from agents.lexi import _is_code_term, _requirement_line_name, inspect
+from agents.lexi import _git_ref_names, _is_code_term, _requirement_line_name, inspect
 from core.packets import Verdict
 from tests.support import mini_project
 
@@ -388,8 +388,129 @@ def test_is_code_term_two_letter_snake_does_not_match_function_substring():
     assert _is_code_term("Ab", set(), {"cabdriver"}) is False
 
 
+def test_is_code_term_true_from_case_variant_identifier_not_function():
+    """lexi.py:508 - a name whose case-variant is a known code identifier counts
+    as a code term even when it matches no function name."""
+    # exact ident "MyClass" is absent, but its lowercase variant is a known
+    # identifier; the function-name set is empty so only the variant branch fires.
+    assert _is_code_term("MyClass", {"myclass"}, set()) is True
+
+
+def test_lexi_reports_contradiction_when_execution_collects_zero(tmp_path: Path):
+    """lexi.py:661 - collected == 0 with a test surface expected is a contradiction."""
+    root = mini_project(tmp_path / "proj", docs="# API\n\nPublic helper `add`.\n")
+    report = inspect(
+        docs_root=root / "docs",
+        project_root=root,
+        config={"llm": {"provider": "none"}, "dry_run": True},
+        execution={"collected": 0, "passed": 0, "failed": 0, "errors": 0, "exit_code": 0},
+    )
+    assert any(f.kind == "contradiction" for f in report.findings)
+
+
 def test_requirement_line_name_returns_none_for_non_requirement_lines():
     """lexi.py:386 - blank and comment-only requirement lines yield None, not truthy."""
     assert _requirement_line_name("# a comment") is None
     assert _requirement_line_name("") is None
     assert _requirement_line_name("  ") is None
+
+
+def _missing_code_paths(root: Path) -> set[str]:
+    report = inspect(
+        docs_root=root / "docs",
+        project_root=root,
+        config={"llm": {"provider": "none"}, "dry_run": True},
+    )
+    return {f.path for f in report.findings if f.kind == "missing_code"}
+
+
+def _make_git_branch(
+    project_root: Path, *, head_branch: str, ref_branches: list[str]
+) -> None:
+    """Create a minimal ``.git`` layout using plain files (no repository init)."""
+    git = project_root / ".git"
+    (git / "refs" / "heads").mkdir(parents=True, exist_ok=True)
+    (git / "HEAD").write_text(f"ref: refs/heads/{head_branch}\n", encoding="utf-8")
+    for branch in ref_branches:
+        ref = git / "refs" / "heads" / branch
+        ref.parent.mkdir(parents=True, exist_ok=True)
+        ref.write_text("e3b0c44298fc1c149afbf4c8996fb92427ae41e4\n", encoding="utf-8")
+
+
+def test_lexi_keyword_argument_name_is_not_missing_code(tmp_path: Path):
+    """Case A - a keyword used only as a call kwarg is an existing code term."""
+    root = mini_project(
+        tmp_path / "proj",
+        code={
+            "cleanup.py": (
+                "import shutil\n\n"
+                "def wipe(path):\n"
+                "    shutil.rmtree(path, ignore_errors=True)\n"
+            )
+        },
+        docs="# Ops\n\n`wipe` passes `ignore_errors`; `absent_widget` is unknown.\n",
+    )
+    paths = _missing_code_paths(root)
+    assert "ignore_errors" not in paths
+    assert "absent_widget" in paths
+
+
+def test_lexi_function_parameter_name_is_not_missing_code(tmp_path: Path):
+    """Case A - a parameter name that the body never rebinds is still a code term."""
+    root = mini_project(
+        tmp_path / "proj",
+        code={"server.py": "def configure(verbosity: int) -> None:\n    return None\n"},
+        docs="# Server\n\n`configure` reads `verbosity`; `absent_gadget` is unknown.\n",
+    )
+    paths = _missing_code_paths(root)
+    assert "verbosity" not in paths
+    assert "absent_gadget" in paths
+
+
+def test_lexi_git_branch_from_refs_heads_is_not_missing_code(tmp_path: Path):
+    """Case B - a branch present under .git/refs/heads is treated as a known term."""
+    root = mini_project(
+        tmp_path / "proj",
+        docs="# Git\n\n`release` is protected; `absent_flower` is unknown.\n",
+    )
+    _make_git_branch(root, head_branch="main", ref_branches=["release"])
+    paths = _missing_code_paths(root)
+    assert "release" not in paths
+    assert "absent_flower" in paths
+
+
+def test_lexi_branch_like_term_is_missing_without_git(tmp_path: Path):
+    """Case B - with no .git directory, a bare branch word is still reported."""
+    root = mini_project(
+        tmp_path / "proj",
+        docs="# Git\n\n`release` is protected; `absent_field` is unknown.\n",
+    )
+    assert not (root / ".git").exists()
+    paths = _missing_code_paths(root)
+    assert "release" in paths
+
+
+def test_lexi_absent_term_still_reported_as_missing_code(tmp_path: Path):
+    """Constraint - a term that appears nowhere remains missing_code."""
+    root = mini_project(
+        tmp_path / "proj",
+        docs="# Misc\n\nThe helper `totally_unseen_widget` is documented only.\n",
+    )
+    assert "totally_unseen_widget" in _missing_code_paths(root)
+
+
+def test_git_ref_names_reads_head_and_refs_and_ignores_missing_git(tmp_path: Path):
+    """Case B helper - branch names come only from an existing .git directory."""
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert _git_ref_names(plain) == set()
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _make_git_branch(repo, head_branch="main", ref_branches=["release", "feature/login"])
+    assert _git_ref_names(repo) == {"main", "release", "feature/login"}
+
+    detached = tmp_path / "detached"
+    _make_git_branch(detached, head_branch="main", ref_branches=[])
+    (detached / ".git" / "HEAD").write_text("0123456789abcdef\n", encoding="utf-8")
+    assert _git_ref_names(detached) == set()

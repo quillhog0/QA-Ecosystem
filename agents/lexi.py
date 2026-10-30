@@ -329,6 +329,15 @@ def _collect_code_ast_terms(code_files: list[Path]) -> tuple[set[str], set[str]]
                 all_identifiers.add(node.id)
             elif isinstance(node, ast.Attribute):
                 all_identifiers.add(node.attr)
+            elif isinstance(node, ast.keyword):
+                # ``f(ignore_errors=True)`` names ``ignore_errors`` as a real
+                # code term even though it is never bound as a variable.
+                if node.arg:
+                    all_identifiers.add(node.arg)
+            elif isinstance(node, ast.arg):
+                # A function parameter name is part of the public shape of the
+                # project even when the body never rebinds it.
+                all_identifiers.add(node.arg)
     return all_identifiers, function_names
 
 
@@ -359,6 +368,42 @@ def _collect_code_strings(code_files: list[Path], project_root: Path) -> set[str
             if isinstance(node, ast.Constant) and isinstance(node.value, str):
                 values.add(node.value)
     return values
+
+
+def _git_ref_names(project_root: Path) -> set[str]:
+    """Branch names known to the project's own repository, via plain file reads.
+
+    Reads ``.git/HEAD`` (a ``ref: refs/heads/<name>`` line, or a bare commit id
+    when detached) and every file under ``.git/refs/heads``. A project with no
+    ``.git`` directory - including a worktree, where ``.git`` is a pointer file -
+    yields an empty set, so nothing changes for isolated copies. No subprocess
+    is run and no word list is hardcoded: only names actually present in the
+    repository are returned.
+    """
+    names: set[str] = set()
+    git = project_root / ".git"
+    if not git.is_dir():
+        return names
+    try:
+        head = (git / "HEAD").read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        head = ""
+    prefix = "ref: refs/heads/"
+    if head.startswith(prefix):
+        branch = head[len(prefix):].strip()
+        if branch:
+            names.add(branch)
+    heads_dir = git / "refs" / "heads"
+    if heads_dir.is_dir():
+        try:
+            for entry in heads_dir.rglob("*"):
+                if entry.is_file():
+                    rel = entry.relative_to(heads_dir).as_posix().strip()
+                    if rel:
+                        names.add(rel)
+        except OSError:
+            pass
+    return names
 
 
 _PEP508_NAME_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)")
@@ -474,6 +519,7 @@ def _heuristic_drift(
     project_root: Path,
     config: dict[str, Any],
     execution: dict[str, Any] | None = None,
+    live_root: Path | None = None,
 ) -> DriftReport:
     py_files = list_python(project_root)
     code_files, test_files = split_code_and_tests(py_files, project_root)
@@ -490,6 +536,12 @@ def _heuristic_drift(
     all_code_identifiers, function_names = _collect_code_ast_terms(code_files)
     code_strings = _collect_code_strings(code_files, project_root)
     declared_packages = _declared_package_names(project_root)
+    known_refs = _git_ref_names(project_root)
+    # The tree under test is an isolated copy that never carries ``.git``; read
+    # branch names from the untouched live root as well (plain file reads only).
+    if live_root is not None:
+        known_refs |= _git_ref_names(live_root)
+    known_refs_lower = {name.lower() for name in known_refs}
 
     code_index: dict[str, str] = {}
     for path in code_files:
@@ -536,6 +588,10 @@ def _heuristic_drift(
         if ident in imported_names:
             continue
         if ident in code_index:
+            continue
+        if ident in known_refs or ident.lower() in known_refs_lower:
+            # A real branch name in the project's own repository is a known
+            # term, not documentation drift.
             continue
         if _is_code_term(ident, all_code_identifiers, function_names):
             continue
@@ -672,12 +728,14 @@ def inspect(
     project_root: Path,
     config: dict[str, Any],
     execution: dict[str, Any] | None = None,
+    live_root: Path | None = None,
 ) -> DriftReport:
     report = _heuristic_drift(
         docs_root=docs_root,
         project_root=project_root,
         config=config,
         execution=execution,
+        live_root=live_root,
     )
     payload = {
         "docs_files": report.docs_files[:80],

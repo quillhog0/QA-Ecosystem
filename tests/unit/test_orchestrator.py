@@ -249,3 +249,44 @@ def test_orchestrator_invalid_sandbox_mode_fails_before_isolation(tmp_path: Path
             Vesper(config).run(project, project / "docs")
     create.assert_not_called()
     assert not reports.exists()
+
+
+def test_orchestrator_suppresses_live_git_branch_in_drift(tmp_path: Path):
+    """Case B end-to-end: a branch known only to the live ``.git`` is not flagged,
+    even though the isolated copy the drift check reads never carries ``.git``.
+
+    A genuinely absent term is still reported, and under strict mode that keeps
+    the whole run a VETO, so the pipeline returns before Nova and the assertion
+    is about the drift findings alone.
+    """
+    project = mini_project(tmp_path / "proj")
+    git = project / ".git"
+    (git / "refs" / "heads").mkdir(parents=True, exist_ok=True)
+    (git / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    (git / "refs" / "heads" / "release").write_text(
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4\n", encoding="utf-8"
+    )
+    (project / "docs" / "overview.md").write_text(
+        "# Workflow\n\nThe `release` branch is protected; `absent_flower` is unknown.\n",
+        encoding="utf-8",
+    )
+
+    reports = tmp_path / "reports"
+    config = {
+        "dry_run": True,
+        "allow_network": False,
+        "reports_dir": str(reports),
+        "llm": {"provider": "none"},
+        "isolation_method": "copy",
+        "lexi": {"veto_on_missing_code": True},
+    }
+    report = Vesper(config).run(project, project / "docs")
+
+    missing = {
+        item["path"]
+        for item in report.drift.get("findings", [])
+        if item.get("kind") == "missing_code"
+    }
+    assert "release" not in missing
+    assert "absent_flower" in missing
+    assert report.verdict == Verdict.VETO.value

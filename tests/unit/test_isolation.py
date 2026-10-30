@@ -307,6 +307,23 @@ def test_copy_tree_preserves_internal_symlinks(tmp_path: Path):
     assert (dst / "real.txt").read_text(encoding="utf-8") == "payload"
 
 
+def test_clean_symlinks_removes_link_pointing_to_in_copy_secret(tmp_path: Path):
+    """isolation.py:168 - a symlink whose resolved target is a secret file inside
+    the copy must be removed even when the link's own name is not secret."""
+    from core.isolation import _clean_symlinks_and_secrets
+
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    (dest / ".env").write_text("SECRET=x\n", encoding="utf-8")
+    os.symlink(".env", dest / "notes.txt")  # link name is benign; target is secret
+
+    skipped: list[str] = []
+    _clean_symlinks_and_secrets(dest, skipped)
+
+    assert not (dest / "notes.txt").exists()
+    assert "notes.txt" in skipped
+
+
 def test_copy_tree_refuses_existing_destination(tmp_path: Path):
     """isolation.py:202 - dirs_exist_ok must stay False: never merge into an existing copy."""
     src = tmp_path / "src"

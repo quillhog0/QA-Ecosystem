@@ -178,6 +178,24 @@ def test_riley_vetoes_on_uncovered_claims_when_configured():
     assert "uncovered claims" in review_veto.root_cause
 
 
+def test_riley_review_plan_does_not_flag_uncovered_claims_by_default():
+    """riley.py:197 - with veto_on_uncovered_claims absent (default False), an
+    otherwise-complete plan must not accumulate an 'uncovered claims' gap."""
+    plan = TestPlan(
+        scenarios=[
+            Scenario(id="C1", title="claim without test", steps=["verify"], acceptance=["pass"], negative=False, covered_by=[]),
+            Scenario(id="S1", title="negative", steps=["run"], acceptance=["fail"], negative=True),
+        ]
+    )
+    review = review_plan(
+        plan,
+        config={"llm": {"provider": "none"}, "dry_run": True},
+    )
+    assert review.verdict == Verdict.CLEAR.value
+    assert review.gaps == []
+    assert not any("uncovered claims" in g for g in review.gaps)
+
+
 def test_riley_ast_detects_weak_tests_and_vetoes_uncovered_claim(tmp_path):
     from agents.riley import detect_weak_tests
     from pathlib import Path

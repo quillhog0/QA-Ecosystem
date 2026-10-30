@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/quillhog0/QA-Ecosystem/actions/workflows/ci.yml/badge.svg)](https://github.com/quillhog0/QA-Ecosystem/actions/workflows/ci.yml)
 
-Version 0.3.1. See CHANGELOG.md.
+Version 0.3.2. See CHANGELOG.md.
 
 Part of the quillhog toolkit — [github.com/quillhog0](https://github.com/quillhog0) · [quillhog.xyz](https://quillhog.xyz) · X [@Quillhog0](https://x.com/Quillhog0).
 
@@ -222,15 +222,15 @@ An optional adversarial test quality audit evaluated by **Riley** after baseline
 - **Mutation operators:** AST-level mutations for comparisons (`< <= > >= == !=`), arithmetic (`+ -`), boolean constants (`True/False`), return values (`return expr -> return None`), and boolean operators (`and/or`).
 - **Isolation:** Each mutant runs in a clean working copy inside the Bubblewrap sandbox with Sable guards active.
 - **Scoring:** `score = killed / (killed + survived)`. If `mutation.min_score > 0` and the score falls below the threshold, Riley issues a `VETO`.
-- **Configuration:** Enabled only via system config or CLI flags `--mutation`, `--mutation-min-score [float]`, `--mutation-max-mutants [int]`. Tested projects can never modify or disable mutation settings.
+- **Configuration:** Enabled only via system config or CLI flags `--mutation`, `--mutation-min-score [float]`, `--mutation-max-mutants [int]`, `--mutation-workers [int]`. Tested projects can never modify or disable mutation settings.
 
 ### Self-test results
 
 Running mutation testing on QA Ecosystem itself (`python main.py --self-test --mutation`, evaluating 30 deterministic mutants) yields:
 
-- **Score:** **93.1%** at release 0.3.1 (27 killed, 2 survived, 0 timeout, 1 error, out of 30 sampled mutants; errors are excluded from the score). The mutant sample is deterministic (seed 42) but shifts as the code changes, so the figure varies between releases; re-run the command to measure the current tree.
+- **Score:** **96.7%** at release 0.3.2 (29 killed, 1 survived, 0 timeout, 0 error, out of 30 sampled mutants; errors are excluded from the score). The mutant sample is deterministic (seed 42) but shifts as the code changes, so the figure varies between releases; re-run the command to measure the current tree.
 - **Note:** earlier builds counted a mutant as killed when the test run crashed before any test executed (for example when the sandbox could not start the project venv). That bug is fixed and covered by tests, so this score only counts real test failures.
-- **Surviving mutants at 0.3.1:** agents/aria.py:48 (`>` -> `>=`) and core/mutation.py:385 (`True` -> `False`). Both are equivalent mutants: at aria.py:48 the single-part match re-adds a token that is already added and then deduplicated, so the output is unchanged; at mutation.py:385 the ignore-errors flag on the cleanup tree removal only matters in filesystem states where the original would also fail.
+- **Surviving mutant at 0.3.2:** agents/aria.py:48 (`>` -> `>=`). It is an equivalent mutant: the single-part match re-adds a token that is already added and then deduplicated, so the output is unchanged.
 
 ## Config
 
@@ -243,6 +243,7 @@ See `config.yaml`.
 - `mutation.enabled`: `false` (default), enable mutation testing phase
 - `mutation.min_score`: `0.0` (default, report only); set > 0.0 to VETO if mutation score is below threshold
 - `mutation.max_mutants`: `30` (default), limit of mutants evaluated per run
+- `mutation.workers`: `min(4, CPU count)` (default, capped at 16), mutants evaluated in parallel, each in its own tree copy; results are identical to a sequential run
 - `llm.provider`: `none` (heuristics), `openrouter`, or `local`
 - `nova.install_deps`, `nova.pip_timeout`: dependency install in the isolated venv
 - `lexi.doc_globs`, `lexi.ignore_identifiers`: which docs to read, which terms to ignore

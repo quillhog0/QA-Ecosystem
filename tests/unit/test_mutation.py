@@ -366,3 +366,70 @@ def test_active_tests_are_detected_from_error_count(tmp_path: Path, monkeypatch:
     assert res["survived"] == 2
     assert res["killed"] == 0
     assert res["error"] == 0
+
+
+def test_resolve_mutation_workers_bounds_and_default(monkeypatch: pytest.MonkeyPatch):
+    """mutation.workers is operator-only, defaults to min(4, cpu_count), hard
+    capped at 16, floored at 1, and degrades to the default when malformed."""
+    import core.mutation as mutation
+
+    monkeypatch.setattr(mutation.os, "cpu_count", lambda: 8)
+    assert mutation._resolve_mutation_workers({}) == 4  # min(4, 8)
+    assert mutation._resolve_mutation_workers({"workers": 1}) == 1
+    assert mutation._resolve_mutation_workers({"workers": 100}) == mutation.MAX_MUTATION_WORKERS
+    assert mutation._resolve_mutation_workers({"workers": 0}) == 1
+    assert mutation._resolve_mutation_workers({"workers": -5}) == 1
+    assert mutation._resolve_mutation_workers({"workers": "bad"}) == 4
+
+    monkeypatch.setattr(mutation.os, "cpu_count", lambda: 2)
+    assert mutation._resolve_mutation_workers({}) == 2  # min(4, 2)
+
+
+def _fake_run_by_mutant_id(*args, **kwargs):
+    """Classify each mutant deterministically from its id, independent of the
+    thread that runs it, so a parallel run must match a sequential one."""
+    from core.packets import ExecutionResult
+
+    work_dir = kwargs.get("work_dir")
+    name = Path(work_dir).name  # m_run_m-00X
+    num = int(name.rsplit("m-", 1)[1])
+    if num % 2 == 0:
+        return ExecutionResult(exit_code=0, collected=1, passed=1)  # survived
+    return ExecutionResult(exit_code=1, collected=1, failed=1)  # killed
+
+
+def test_mutation_parallel_workers_match_sequential(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    import core.mutation as mutation
+
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "calc.py").write_text(
+        "def f(a, b):\n    return a + b - a * b\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(mutation, "run_pytest", _fake_run_by_mutant_id)
+
+    seq = mutation.run_mutation_testing(
+        proj, work_dir=tmp_path / "w1", config={"mutation": {"workers": 1}}
+    )
+    par = mutation.run_mutation_testing(
+        proj, work_dir=tmp_path / "w4", config={"mutation": {"workers": 4}}
+    )
+
+    assert seq["evaluated"] >= 2
+    for key in (
+        "status",
+        "verdict",
+        "score",
+        "killed",
+        "survived",
+        "timeout",
+        "error",
+        "reason",
+        "survived_mutants",
+        "mutants",
+    ):
+        assert seq[key] == par[key], key
+
+    # Both paths clean up every mutant tree they created.
+    assert not (tmp_path / "w1" / "mutants_tree").exists()
+    assert not any(p.name.startswith("mutants_tree") for p in (tmp_path / "w4").iterdir())

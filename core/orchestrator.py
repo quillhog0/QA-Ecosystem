@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Any
 
@@ -59,12 +60,14 @@ class Vesper:
             run_id=run_id,
         )
 
+        _isolation_started = time.monotonic()
         isolation = create_isolation(
             project,
             isolated_dest,
             method=str(self.config.get("isolation_method") or "auto"),
             read_only=False,
         )
+        _isolation_seconds = time.monotonic() - _isolation_started
         archive_note(isolation, run_dir)
         work_dir = run_dir / "nova_work"
         work_dir.mkdir(parents=True, exist_ok=True)
@@ -103,6 +106,7 @@ class Vesper:
             started_at=started,
             tested_tree=isolation.tested_tree,
         )
+        report.timings = {"isolation": round(_isolation_seconds, 3)}
 
         if failure_reason:
             append_result(
@@ -154,6 +158,7 @@ class Vesper:
                 docs_root=docs,
                 project_root=isolated,
                 config=self.config,
+                live_root=isolation.live_root,
             )
             append_result(
                 self.role_results,
@@ -295,12 +300,21 @@ class Vesper:
             to_role=Role.NOVA.value,
             payload={"command": command},
         )
+        _execute_started = time.monotonic()
         execution = nova.execute(
             isolated,
             work_dir=work_dir,
             allow_network=self.allow_network,
             timeout=self.timeout,
             config=self.config,
+        )
+        _execute_seconds = time.monotonic() - _execute_started
+        report.timings["execute"] = round(_execute_seconds, 3)
+        report.timings["pytest"] = round(execution.duration_seconds, 3)
+        # install_deps time is the part of the execute window not spent running
+        # pytest; it is 0 when dependency installation is disabled.
+        report.timings["install"] = round(
+            max(_execute_seconds - execution.duration_seconds, 0.0), 3
         )
         nova_failed = execution.exit_code != 0 or execution.failed > 0
         nova_verdict = (
@@ -385,6 +399,7 @@ class Vesper:
             project_root=isolated,
             config=self.config,
             execution=execution.to_dict(),
+            live_root=isolation.live_root,
         )
         append_result(
             self.role_results,
@@ -437,6 +452,7 @@ class Vesper:
             if venv_py.is_file():
                 py_bin = venv_py
 
+            _mutation_started = time.monotonic()
             mut_res = riley.audit_mutations(
                 isolated,
                 work_dir=work_dir,
@@ -444,6 +460,7 @@ class Vesper:
                 allow_network=self.allow_network,
                 python=py_bin,
             )
+            report.timings["mutation"] = round(time.monotonic() - _mutation_started, 3)
             report.mutation = mut_res
             append_result(
                 self.role_results,

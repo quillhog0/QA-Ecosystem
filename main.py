@@ -91,6 +91,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Maximum number of mutants to evaluate (default 30)",
     )
     parser.add_argument(
+        "--mutation-workers",
+        type=int,
+        default=None,
+        help="Parallel mutant workers (operator only; default min(4, cpu_count), cap 16)",
+    )
+    parser.add_argument(
         "--sarif",
         default="",
         help="Write a SARIF 2.1.0 document describing the run's findings to this path",
@@ -161,6 +167,10 @@ def main(argv: list[str] | None = None) -> int:
         config.setdefault("mutation", {})
         config["mutation"] = dict(config.get("mutation") or {})
         config["mutation"]["max_mutants"] = int(args.mutation_max_mutants)
+    if args.mutation_workers is not None:
+        config.setdefault("mutation", {})
+        config["mutation"] = dict(config.get("mutation") or {})
+        config["mutation"]["workers"] = int(args.mutation_workers)
     if args.reports_dir:
         config["reports_dir"] = args.reports_dir
     else:

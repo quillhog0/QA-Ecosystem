@@ -260,6 +260,7 @@ class FinalReport:
     started_at: str = ""
     finished_at: str = ""
     tested_tree: str = ""
+    timings: dict[str, float] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
