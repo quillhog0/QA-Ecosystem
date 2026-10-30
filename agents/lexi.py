@@ -13,7 +13,7 @@ from typing import Any
 
 import yaml
 
-from agents.adapters import complete, complete_with_status, format_llm_error, load_prompt, parse_yaml_block
+from agents.adapters import complete_with_status, format_llm_error, load_prompt, parse_yaml_block
 from agents.inventory import (
     DOC_GLOBS,
     doc_tokens,
@@ -59,7 +59,6 @@ COMMON_WORDS = {
     "heuristics",
 }
 
-COMMON_HEADINGS = COMMON_WORDS | {"behavior", "sample", "calculator"}
 
 
 def _flatten_keys(obj: Any, prefix: str = "") -> set[str]:
@@ -571,11 +570,6 @@ def _heuristic_drift(
                 severity="high" if (strict_missing or ident in _CALL_FORM or ident in claim_text or _code_shaped(ident)) else "medium",
             )
         )
-
-    for token in tokens:
-        piece = token.split()[0]
-        if piece.lower() in COMMON_HEADINGS:
-            continue
 
     if not test_files:
         findings.append(

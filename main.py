@@ -18,6 +18,7 @@ if str(ROOT) not in sys.path:
 
 from core.orchestrator import Vesper
 from core.report import exit_code_for
+from core.sarif import write_sarif
 
 
 def load_config(path: Path) -> dict[str, Any]:
@@ -88,6 +89,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=int,
         default=None,
         help="Maximum number of mutants to evaluate (default 30)",
+    )
+    parser.add_argument(
+        "--sarif",
+        default="",
+        help="Write a SARIF 2.1.0 document describing the run's findings to this path",
     )
     return parser.parse_args(argv)
 
@@ -183,6 +189,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"mutation_score={report.mutation.get('score', 0.0):.2f}")
     print(f"report={reports_dir / (report.run_id + '.md')}")
     print(f"isolated_root={report.isolated_root}")
+    if args.sarif:
+        try:
+            sarif_path = write_sarif(report, Path(args.sarif).expanduser())
+            print(f"sarif={sarif_path}")
+        except OSError as exc:
+            print(f"sarif write failed: {exc}", file=sys.stderr)
     return exit_code_for(report.verdict)
 
 

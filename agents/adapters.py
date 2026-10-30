@@ -147,5 +147,8 @@ def parse_yaml_block(text: str) -> dict[str, Any]:
         if lines and lines[-1].strip() == "```":
             lines = lines[:-1]
         stripped = "\n".join(lines)
-    loaded = yaml.safe_load(stripped)
+    try:
+        loaded = yaml.safe_load(stripped)
+    except yaml.YAMLError:
+        return {}
     return loaded if isinstance(loaded, dict) else {}

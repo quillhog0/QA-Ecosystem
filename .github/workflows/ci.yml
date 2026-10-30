@@ -56,5 +56,10 @@ jobs:
           project: examples/sample-project
           docs: examples/sample-project/docs
           allow-sysctl-userns: "true"
+          sarif: "true"
       - name: Check verdict
         run: test "${{ steps.qa.outputs.verdict }}" = "CLEAR"
+      - name: Check SARIF output
+        run: |
+          test -n "${{ steps.qa.outputs.sarif }}"
+          test -f "${{ steps.qa.outputs.sarif }}"

@@ -287,3 +287,32 @@ def test_mutation_verdict_clear_when_score_equals_min_score(tmp_path: Path, monk
     assert res["survived"] == 1
     assert res["score"] == 0.5
     assert res["verdict"] == Verdict.CLEAR.value
+
+
+@pytest.mark.parametrize("max_mutants", [0, -1])
+def test_mutation_non_positive_max_mutants_is_skipped_not_clear(tmp_path: Path, max_mutants: int):
+    from core.mutation import run_mutation_testing
+
+    root = tmp_path / "proj"
+    root.mkdir()
+    (root / "calc.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    work = tmp_path / "work"
+    work.mkdir()
+    res = run_mutation_testing(
+        root, work_dir=work, config={"mutation": {"max_mutants": max_mutants}}
+    )
+    assert res["status"] == "skipped"
+    assert res["total_candidates"] > 0
+    assert res["evaluated"] == 0
+    assert "score" not in res
+    assert "max_mutants" in res["reason"]
+    assert res["verdict"] == Verdict.CLEAR.value
+    assert not (work / "mutants_tree").exists()
+
+
+def test_select_mutants_non_positive_returns_empty(tmp_path: Path):
+    (tmp_path / "calc.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    mutants = find_all_mutants(tmp_path)
+    assert mutants
+    assert select_mutants(mutants, max_mutants=0, seed=1) == []
+    assert select_mutants(mutants, max_mutants=-3, seed=1) == []

@@ -3,7 +3,7 @@ from pathlib import Path
 import re
 from typing import Any
 
-from agents.adapters import complete, complete_with_status, format_llm_error, load_prompt, parse_yaml_block
+from agents.adapters import complete_with_status, format_llm_error, load_prompt, parse_yaml_block
 from core.packets import RedTeamReview, TestPlan, Verdict
 
 FAILED_LINE_RE = re.compile(

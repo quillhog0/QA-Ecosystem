@@ -1,6 +1,6 @@
 name: "QA Ecosystem"
 description: "Deterministic QA gate: runs your tests in an isolated, sandboxed copy, maps doc claims to tests and fails on VETO."
-author: "quillhog"
+author: "quillhog0"
 branding:
   icon: "shield"
   color: "green"
@@ -38,6 +38,10 @@ inputs:
     description: "Python version used to run the project's tests."
     required: false
     default: "3.12"
+  sarif:
+    description: "Write a SARIF 2.1.0 document of the run's findings to $RUNNER_TEMP/qa-results.sarif (true/false). Upload is left to the caller."
+    required: false
+    default: "false"
 
 outputs:
   verdict:
@@ -46,6 +50,9 @@ outputs:
   report:
     description: "Path to the Markdown report."
     value: ${{ steps.run.outputs.report }}
+  sarif:
+    description: "Path to the SARIF 2.1.0 document, when the sarif input is true; empty otherwise."
+    value: ${{ steps.run.outputs.sarif }}
 
 runs:
   using: "composite"
@@ -75,12 +82,18 @@ runs:
         QA_MUTATION: ${{ inputs.mutation }}
         QA_MIN_SCORE: ${{ inputs.mutation-min-score }}
         QA_SANDBOX: ${{ inputs.sandbox }}
+        QA_SARIF: ${{ inputs.sarif }}
       run: |
         args=(--project "$GITHUB_WORKSPACE/$QA_PROJECT" --docs "$GITHUB_WORKSPACE/$QA_DOCS"
               --sandbox "$QA_SANDBOX" --reports-dir "$RUNNER_TEMP/qa-reports")
         [ "$QA_STRICT" = "true" ] && args+=(--strict)
         [ "$QA_MUTATION" = "true" ] && args+=(--mutation)
         [ -n "$QA_MIN_SCORE" ] && args+=(--mutation-min-score "$QA_MIN_SCORE")
+        sarif_path=""
+        if [ "$QA_SARIF" = "true" ]; then
+          sarif_path="$RUNNER_TEMP/qa-results.sarif"
+          args+=(--sarif "$sarif_path")
+        fi
         set +e
         python "$GITHUB_ACTION_PATH/main.py" "${args[@]}" | tee "$RUNNER_TEMP/qa-out.txt"
         code=${PIPESTATUS[0]}
@@ -89,5 +102,12 @@ runs:
         report=$(grep -m1 '^report=' "$RUNNER_TEMP/qa-out.txt" | cut -d= -f2-)
         echo "verdict=$verdict" >> "$GITHUB_OUTPUT"
         echo "report=$report" >> "$GITHUB_OUTPUT"
-        [ -f "$report" ] && cat "$report" >> "$GITHUB_STEP_SUMMARY"
+        if [ -n "$sarif_path" ] && [ -f "$sarif_path" ]; then
+          echo "sarif=$sarif_path" >> "$GITHUB_OUTPUT"
+        else
+          echo "sarif=" >> "$GITHUB_OUTPUT"
+        fi
+        if [ -n "$report" ] && [ -f "$report" ]; then
+          cat "$report" >> "$GITHUB_STEP_SUMMARY"
+        fi
         exit $code

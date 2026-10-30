@@ -305,6 +305,8 @@ def find_all_mutants(project_root: Path) -> list[Mutant]:
 
 
 def select_mutants(mutants: list[Mutant], max_mutants: int, seed: int) -> list[Mutant]:
+    if max_mutants <= 0:
+        return []
     if len(mutants) <= max_mutants:
         return list(mutants)
     rng = random.Random(seed)
@@ -345,6 +347,18 @@ def run_mutation_testing(
     min_score = float(mutation_cfg.get("min_score", 0.0))
 
     all_mutants = find_all_mutants(isolated_root)
+    if max_mutants <= 0 and all_mutants:
+        return {
+            "status": "skipped",
+            "enabled": True,
+            "verdict": Verdict.CLEAR.value,
+            "min_score": min_score,
+            "total_candidates": len(all_mutants),
+            "evaluated": 0,
+            "reason": f"max_mutants is {max_mutants}; no mutants evaluated, score not computed",
+            "survived_mutants": [],
+            "mutants": [],
+        }
     selected = select_mutants(all_mutants, max_mutants=max_mutants, seed=seed)
 
     if not selected:

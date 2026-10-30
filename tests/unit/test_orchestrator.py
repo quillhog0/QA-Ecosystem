@@ -3,7 +3,6 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import patch
 
-from agents.riley import review_plan
 from core.orchestrator import ESCALATE_DOMAIN, Vesper
 from core.packets import RedTeamReview, TestPlan, Verdict
 from tests.support import mini_project
@@ -45,7 +44,7 @@ def test_orchestrator_escalates_after_two_riley_plan_vetoes(tmp_path: Path):
     assert len(riley_plan) == 2
     assert calls["n"] == 2
     assert max(r.iteration for r in riley_plan) == 2
-    assert review_plan is not None
+    assert all(r.verdict == Verdict.VETO.value for r in riley_plan)
 
 
 def test_orchestrator_records_llm_fallback_on_exception(tmp_path: Path):
@@ -230,3 +229,23 @@ def test_sable_execute_summary_when_no_blocked_reasons(tmp_path: Path):
     assert sable_execute, "expected a Sable post-execution result"
     assert sable_execute[-1].verdict == Verdict.CLEAR.value
     assert sable_execute[-1].summary == "collected > 0"
+
+
+def test_orchestrator_invalid_sandbox_mode_fails_before_isolation(tmp_path: Path):
+    import pytest
+
+    project = mini_project(tmp_path / "proj")
+    reports = tmp_path / "reports"
+    config = {
+        "dry_run": True,
+        "allow_network": False,
+        "reports_dir": str(reports),
+        "llm": {"provider": "none"},
+        "isolation_method": "copy",
+        "sandbox": {"mode": "bogus"},
+    }
+    with patch("core.orchestrator.create_isolation") as create:
+        with pytest.raises(ValueError, match="Unknown sandbox mode"):
+            Vesper(config).run(project, project / "docs")
+    create.assert_not_called()
+    assert not reports.exists()

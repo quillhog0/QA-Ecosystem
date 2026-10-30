@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.3.0 (2026-10-30)
+
+### Added
+- SARIF 2.1.0 output: `--sarif PATH` writes a document of the run's findings (core/sarif.py). The GitHub Action gains a `sarif` input (true/false) and a `sarif` output with the document path. Stable rule ids: LEXI001-005, LEXI999, SABLE001-009, RILEY001, RILEY002, RILEY999, NOVA001, NOVA002, VESPER001, VESPER002; locations are project-relative under `%SRCROOT%`.
+- VESPER002 ("run vetoed before execution"): a non-CLEAR run with no other SARIF result, such as a sandbox-required veto, now emits one error result instead of an empty document.
+
+### Fixed
+- Malformed YAML from an LLM no longer aborts the run; `parse_yaml_block` returns an empty mapping and the heuristic result is kept.
+- An invalid `sandbox.mode` is rejected before the isolated copy is created, so it no longer leaks a copy under the temp directory.
+- `mutation.max_mutants` of 0 (or negative) no longer reports CLEAR with score 1.0 when candidates exist; mutation is reported as skipped with a reason and has no verdict impact. Negative values no longer crash.
+- Action: the `sarif` output is set only when the file was written, and a missing report no longer masks the real exit code.
+- SABLE007 short description now reads "Blocked call in the isolated copy" (the scan covers all files in the copy).
+
+### Changed
+- CI action smoke test runs with `sarif: "true"` and checks the file exists.
+- README documents `--config`, `--no-dry-run`, the remaining config keys and two more known limits; the mutation self-test figures were re-measured.
+- Removed dead code and unused imports; stronger assertions in two tests; author handle is quillhog0.
+
 ## 0.2.2 (2026-10-30)
 
 ### Fixed

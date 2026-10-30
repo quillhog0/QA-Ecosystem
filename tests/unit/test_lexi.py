@@ -59,9 +59,8 @@ def test_lexi_ignores_config_keys_and_allowlist(tmp_path: Path):
             "lexi": {"ignore_identifiers": ["OPENROUTER_API_KEY"]},
         },
     )
-    assert report.verdict != Verdict.VETO.value or not any(
-        f.path in {"dry_run", "allow_network", "OPENROUTER_API_KEY"} for f in report.findings
-    )
+    flagged = {f.path for f in report.findings}
+    assert not flagged & {"dry_run", "allow_network", "OPENROUTER_API_KEY"}
 
 
 def test_lexi_ignores_imported_project_libraries(tmp_path: Path):

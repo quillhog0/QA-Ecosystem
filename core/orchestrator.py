@@ -31,7 +31,6 @@ from policies import sable
 
 
 ESCALATE_DOMAIN = "ESCALATE: DOMAIN_EXPERT"
-VETO_ORDER = (Role.SABLE.value, Role.RILEY.value, Role.LEXI.value)
 
 
 class Vesper:
@@ -44,6 +43,11 @@ class Vesper:
         self.role_results: list[RoleResult] = []
 
     def run(self, project: Path, docs: Path) -> FinalReport:
+        from core.sandbox import get_sandbox_status, resolve_sandbox_mode
+
+        # Validate operator config before any isolated copy exists, so an
+        # invalid sandbox mode cannot leak a copy under the temp directory.
+        resolve_sandbox_mode(self.config)
         started = utc_now()
         run_id = new_run_id()
         base = Path(self.config.get("reports_dir") or "reports").resolve()
@@ -86,8 +90,6 @@ class Vesper:
                 details=isolation.to_dict(),
             ),
         )
-
-        from core.sandbox import get_sandbox_status
 
         _, sandbox_status, failure_reason = get_sandbox_status(self.config)
         report = FinalReport(

@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/quillhog0/QA-Ecosystem/actions/workflows/ci.yml/badge.svg)](https://github.com/quillhog0/QA-Ecosystem/actions/workflows/ci.yml)
 
-Version 0.2.2. See CHANGELOG.md.
+Version 0.3.0. See CHANGELOG.md.
 
 Part of the quillhog toolkit — [github.com/quillhog0](https://github.com/quillhog0) · [quillhog.xyz](https://quillhog.xyz) · X [@Quillhog0](https://x.com/Quillhog0).
 
@@ -150,7 +150,38 @@ Add QA Ecosystem as a gate in any repository's workflow. The job fails when the 
     strict: "true"
 ```
 
-Inputs: project, docs, strict, mutation, mutation-min-score, sandbox (auto, required or off), allow-sysctl-userns and python-version. On GitHub's Ubuntu 24.04 runners the sandbox needs allow-sysctl-userns set to true, which relaxes a kernel security setting on the runner; without it the run is unsandboxed and the report says so. Outputs: verdict and report.
+Inputs: project, docs, strict, mutation, mutation-min-score, sandbox (auto, required or off), allow-sysctl-userns, python-version and sarif (true/false, defaults to false). On GitHub's Ubuntu 24.04 runners the sandbox needs allow-sysctl-userns set to true, which relaxes a kernel security setting on the runner; without it the run is unsandboxed and the report says so. Outputs: verdict, report and sarif (path to the SARIF document, empty when the sarif input is false or the file was not written). The action writes the SARIF file; uploading it to a code-scanning service is left to the caller.
+
+## SARIF output
+
+Pass `--sarif PATH` on the command line, or set `sarif: "true"` in the action, to emit a SARIF 2.1.0 document that maps the finished run to code annotations. The document is produced by `core/sarif.py` from the report dictionary only; it never re-runs any role and never imports anything from `agents/`. Locations always use project-relative URIs under `%SRCROOT%`; absolute paths, isolated-copy paths and any traversal are dropped instead of being written.
+
+Rule identifiers and their positions in the document's `tool.driver.rules` array are stable across runs and match the table below. To add a rule, append it to `RULE_CATALOG` in `core/sarif.py` and to this table; never reorder existing rows.
+
+| rule id | what it flags | default level |
+|---|---|---|
+| LEXI001 | Docs term has no matching code symbol | warning (severity: high→error, medium→warning, low→note) |
+| LEXI002 | Missing or unreferenced test surface | warning |
+| LEXI003 | Post-audit contradicts the docs | error |
+| LEXI004 | Docs term appears only in comments or docstrings | note |
+| LEXI005 | Documentation drift flagged by review | warning |
+| LEXI999 | Other Lexi drift kind | warning |
+| SABLE001 | Command is not pytest-only | error |
+| SABLE002 | Secret-looking environment keys reach Nova | error |
+| SABLE003 | Secret-looking files in the isolated copy | error |
+| SABLE004 | Refusing to run against the live tree | error |
+| SABLE005 | Isolated root is missing | error |
+| SABLE006 | pytest target, `--rootdir` or cwd escapes the isolated copy | error |
+| SABLE007 | Blocked call in the isolated copy | error |
+| SABLE008 | Network utility invoked while `allow_network` is false | error |
+| SABLE009 | pytest collected zero tests | error |
+| RILEY001 | Weak test detected (skipped, tautological, or assertion swallowed) | warning (error when Riley vetoes) |
+| RILEY002 | Documented claim is uncovered or covered only by a weak test | warning (error when Riley vetoes) |
+| RILEY999 | Other Riley gap | warning (error when Riley vetoes) |
+| NOVA001 | A pytest test failed during the isolated run | error |
+| NOVA002 | Dependency installation failed before pytest ran | error |
+| VESPER001 | The loop did not close and the run escalated | error |
+| VESPER002 | Run vetoed before execution: verdict is not CLEAR and no other rule produced a result | error |
 
 ## Tests and benchmark
 
@@ -197,9 +228,9 @@ An optional adversarial test quality audit evaluated by **Riley** after baseline
 
 Running mutation testing on QA Ecosystem itself (`python main.py --self-test --mutation`, evaluating 30 deterministic mutants) yields:
 
-- **Score:** **70.0%** (21/30 killed, 9 survived). The mutant sample is deterministic (seed 42) but shifts as the code changes; the previous sample scored 28/30.
+- **Score:** **48.3%** at release 0.3.0 (14 killed, 15 survived, 0 timeout, 1 error, out of 30 sampled mutants; errors are excluded from the score). The mutant sample is deterministic (seed 42) but shifts as the code changes, so the figure varies between releases; re-run the command to measure the current tree.
 - **Note:** earlier builds counted a mutant as killed when the test run crashed before any test executed (for example when the sandbox could not start the project venv). That bug is fixed and covered by tests, so this score only counts real test failures.
-- **Surviving mutants (not yet triaged):** core/isolation.py:318, core/mutation.py:458, core/orchestrator.py:352, core/report.py:69, core/report.py:120, core/runner.py:210, core/sandbox.py:37, core/sandbox.py:227, main.py:127.
+- **Surviving mutants at 0.3.0 (not yet triaged):** agents/aria.py:37, agents/aria.py:48, agents/aria.py:75, agents/lexi.py:386, agents/lexi.py:464, core/deps.py:101, core/isolation.py:80, core/isolation.py:87, core/isolation.py:97, core/isolation.py:110, core/isolation.py:202, core/mutation.py:385, core/mutation.py:436, core/report.py:115, core/report.py:126.
 
 ## Config
 
@@ -216,6 +247,13 @@ See `config.yaml`.
 - `nova.install_deps`, `nova.pip_timeout`: dependency install in the isolated venv
 - `lexi.doc_globs`, `lexi.ignore_identifiers`: which docs to read, which terms to ignore
 - `lexi.ignore_identifiers` is read only from the operator config, never from the config.yaml of the project under test
+- `keep_isolated_copy` (default false): keep the isolated copy after the run instead of deleting it
+- `pytest.timeout_seconds` (default 120): timeout for the isolated pytest run
+- `sable.allow_in_tests`: operator allowlist of blocked calls in tests; each entry needs `path`, `call` and `reason`
+- `mutation.seed` (default 42), `mutation.timeout_per_mutant` (default 30 seconds)
+- `riley.veto_on_uncovered_claims`: Riley vetoes when a documented claim has no covering test
+
+CLI: `--config PATH` loads an operator config other than `config.yaml`; `--no-dry-run` turns off dry-run so configured LLM calls can run.
 
 Sable and Nova never depend on a model. OpenRouter is used only when `OPENROUTER_API_KEY` is set, `llm.provider` is `openrouter`, dry-run LLM is allowed, and `--allow-network` is on. The key is never written into reports.
 
@@ -229,6 +267,8 @@ Sable and Nova never depend on a model. OpenRouter is used only when `OPENROUTER
 - **Dependency installation is not sandboxed.** When the project has a requirements file or pyproject dependencies, pip installs them before the sandbox starts and with network access, so package build scripts run on the host. Manifests are screened for unsafe sources, but only the test run itself is sandboxed.
 - **With an LLM enabled, docs and code go to the provider unmasked.** Nothing is redacted or anonymised before the API call.
 - **Claim-to-test mapping is a heuristic.** Aria matches doc claims to tests by token overlap and test-body analysis. It is not formal verification.
+- **The local LLM provider is not gated by `allow_network`.** Only the OpenRouter path checks `allow_network`; `llm.provider: local` is gated only by dry-run.
+- **Sable's static scan is literal-name based.** It misses aliased imports (`import shutil as s`) and calls on variable receivers (`p.unlink()`), and it respects the project's own pytest `norecursedirs`; the Bubblewrap sandbox still applies at runtime.
 - **String literals count as code.** A function removed from code but whose name still appears as a string literal is not reported by Lexi.
 
 ## Project layout
@@ -236,7 +276,7 @@ Sable and Nova never depend on a model. OpenRouter is used only when `OPENROUTER
 ```
 main.py              CLI entry point (--project/--docs, --self-test)
 config.yaml          safe defaults (dry_run, no network, llm.provider: none)
-core/                Vesper orchestrator, isolation, packets, pytest runner, deps, report
+core/                Vesper orchestrator, isolation, packets, pytest runner, deps, report, SARIF writer
 agents/              Lexi, Aria, Riley, Nova + LLM adapters and prompts
 policies/sable.py    Sable pre-flight policy (secrets, live tree, dangerous calls)
 schemas/             report and handoff packet formats

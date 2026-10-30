@@ -8,7 +8,7 @@ from pathlib import Path
 import re
 from typing import Any
 
-from agents.adapters import complete, complete_with_status, format_llm_error, load_prompt, parse_yaml_block
+from agents.adapters import complete_with_status, format_llm_error, load_prompt, parse_yaml_block
 from agents.inventory import doc_tokens, list_python, public_names, split_code_and_tests
 from core.packets import Scenario, TestPlan
 

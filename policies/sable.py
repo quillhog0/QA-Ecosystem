@@ -221,44 +221,6 @@ FORBIDDEN_ATTR_CALLS = {
 }
 NETWORK_NAME_FRAGMENTS = ("urlopen", "request", "get", "post", "connect")
 
-RUNTIME_CONFTEST = '''\
-"""Injected by Sable. Blocks outbound sockets during isolated pytest."""
-
-from __future__ import annotations
-
-import os
-import socket
-
-import pytest
-
-
-@pytest.fixture(autouse=True)
-def _sable_block_socket_connect(monkeypatch):
-    if os.environ.get("NO_NETWORK") != "1":
-        return
-
-    def blocked(*_args, **_kwargs):
-        raise RuntimeError("Sable: socket.connect is blocked in the isolated copy")
-
-    monkeypatch.setattr(socket.socket, "connect", blocked)
-    monkeypatch.setattr(socket.socket, "connect_ex", blocked)
-'''
-
-
-def _pytest_scan_roots(isolated_root: Path) -> list[Path]:
-    ini = isolated_root / "pytest.ini"
-    roots = [isolated_root]
-    if ini.is_file():
-        for line in ini.read_text(encoding="utf-8", errors="replace").splitlines():
-            if line.strip().startswith("testpaths"):
-                _, _, rest = line.partition("=")
-                names = rest.strip().split()
-                if names:
-                    roots = [isolated_root / name for name in names]
-                break
-    return [path for path in roots if path.exists()]
-
-
 def _is_test_file(path: Path, isolated_root: Path) -> bool:
     rel = path.relative_to(isolated_root) if path.is_relative_to(isolated_root) else path
     parts = {p.lower() for p in Path(rel).parts}

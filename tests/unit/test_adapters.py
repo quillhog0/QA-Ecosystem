@@ -54,3 +54,8 @@ def test_llm_enabled_openrouter_requires_api_key(monkeypatch: pytest.MonkeyPatch
     assert llm_enabled(cfg) is False
     monkeypatch.setenv("OPENROUTER_API_KEY", "placeholder-not-a-real-key")
     assert llm_enabled(cfg) is True
+
+
+def test_parse_yaml_block_malformed_yaml_returns_empty_dict():
+    assert parse_yaml_block("key: [unclosed\n  - : :") == {}
+    assert parse_yaml_block("```yaml\na: b: c\n```") == {}
