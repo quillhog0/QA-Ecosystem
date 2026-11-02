@@ -13,7 +13,6 @@ from core.isolation import (
     create_isolation,
     isolation_destination,
     release_isolation,
-    _make_sources_readonly,
 )
 from core.deps import venv_python
 from core.packets import (
@@ -378,8 +377,15 @@ class Vesper:
             return
 
         sable.install_runtime_guards(work_dir)
-        _make_sources_readonly(isolated)
-        isolation.read_only = True
+        # The isolated copy is a standalone checkout that the tested process may
+        # write into (output directories, a local sqlite database, generated
+        # fixtures), exactly like a normal working tree. We deliberately do NOT
+        # strip its write bits: a read-only copy turns legitimate in-tree writes
+        # into PermissionError and mislabels them as product defects. The live
+        # tree is still never written - it is a different directory, mounted
+        # read-only (or not mounted at all) inside the sandbox, so the isolation
+        # guarantee is preserved by structure, not by hardening the copy against
+        # its own tests.
 
         # 5. Nova execute
         packet = packet.next(

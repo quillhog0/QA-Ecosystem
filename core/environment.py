@@ -31,6 +31,8 @@ failure: hiding a defect behind exit 2 is the worse mistake.
 
 from __future__ import annotations
 
+import ast
+import os
 import re
 import tomllib
 from dataclasses import dataclass
@@ -40,8 +42,10 @@ from typing import Any, Mapping
 # pytest interleaves ANSI colour codes and tracebacks wrap, so the separator
 # between the exception name and its message is whitespace, not a fixed space.
 IMPORT_ERROR_RE = re.compile(r"(?:ModuleNotFoundError|ImportError):\s+No module named '([A-Za-z0-9_.]+)'")
+# The exception may print qualified (``importlib.metadata.PackageNotFoundError``)
+# or bare (``PackageNotFoundError``); both are the same missing distribution.
 METADATA_ERROR_RE = re.compile(
-    r"PackageNotFoundError:\s+No package metadata was found for ([A-Za-z0-9_.\-]+)"
+    r"(?:[A-Za-z_][A-Za-z0-9_]*\.)*PackageNotFoundError:\s+No package metadata was found for ([A-Za-z0-9_.\-]+)"
 )
 INSTALL_FAILED_PREFIX = "pip install failed"
 UNSAFE_REQUIREMENT_MARKER = "unsafe requirement:"
@@ -54,6 +58,14 @@ GENERATED_MODULE_LABELS = frozenset({"_version", "version", "_build_meta", "__ab
 # number; the source that raised is printed on the next line.
 FRAME_RE = re.compile(r"^(?P<location>.*\.py):(?P<lineno>\d+): in (?P<func>.+)$")
 RAISE_RE = re.compile(r"^raise\b")
+# Frames that belong to the interpreter or to installed distributions, never to
+# the project source: the standard library lives in a ``pythonX.Y`` (or
+# ``pythonX.YZ``) directory, third-party code in ``site-packages``/``dist-packages``.
+# Such a frame may raise its own error (``importlib.metadata`` raising
+# ``PackageNotFoundError`` is the ordinary way a missing distribution reports
+# itself); that is the runtime answering, not the project failing on purpose.
+_STDLIB_FRAME_RE = re.compile(r"python\d\.\d+(?:\.\d+)?[/\\]")
+_PACKAGE_FRAME_RE = re.compile(r"(?:site|dist)-packages[/\\]")
 # A requirement line's distribution name, up to the first specifier, extra or
 # environment marker. ``-r other.txt`` and URLs are not names and never match.
 REQUIREMENT_NAME_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)")
@@ -196,7 +208,7 @@ def _module_path_in_tree(project_root: Path, name: str) -> bool:
 
 
 def _raised_by_project(text: str, needle_start: int) -> bool:
-    """True when the project raised this import error itself.
+    """True when the project raised this error itself.
 
     pytest prints the raising frame before the exception line::
 
@@ -207,15 +219,26 @@ def _raised_by_project(text: str, needle_start: int) -> bool:
     A frame whose source line starts with ``raise`` means the project chose to
     fail this way, so no environment claim is accepted for it - otherwise a
     single line in a conftest could hide every finding behind an exit 2.
+
+    Frames from the standard library or from installed distributions are not the
+    project: they raise their own errors constantly (``importlib.metadata``
+    raising ``PackageNotFoundError`` is how a missing distribution reports
+    itself). The scan skips over those runtime frames and stops at the first
+    project frame, and only that frame's source line decides.
     """
     lines = text[:needle_start].splitlines()
     for index in range(len(lines) - 1, -1, -1):
-        if not FRAME_RE.match(lines[index].strip()):
+        stripped = lines[index].strip()
+        match = FRAME_RE.match(stripped)
+        if not match:
+            continue
+        location = match.group("location")
+        if _STDLIB_FRAME_RE.search(location) or _PACKAGE_FRAME_RE.search(location):
             continue
         for following in lines[index + 1:]:
-            stripped = following.strip()
-            if stripped:
-                return bool(RAISE_RE.match(stripped))
+            candidate = following.strip()
+            if candidate:
+                return bool(RAISE_RE.match(candidate))
             break
         return False
     return False
@@ -392,6 +415,63 @@ GIT_ABSENT_RE = re.compile(
 MISSING_PROGRAM_RE = re.compile(
     r"(?:FileNotFoundError|OSError):\s*\[Errno 2\][^\n'\"]*['\"](?P<name>[^'/\n\"]+)['\"]"
 )
+# A launcher or wrapper program names a missing tool in its own words instead of
+# raising an OSError: the phrase ``not found`` closes the line
+# (``bash: line 1: node: not found``). Requiring the end of line keeps ordinary
+# assertion prose ("assert 'plugin not found' in output") out of the rule. The
+# name candidate is taken from the *text before* the phrase - the last token,
+# colon stripped - never from a capture group. A line that opens with an
+# exception class header (``OSError: node not found``) is a program's own
+# message, not a tool report, and is refused wholesale; only OSError's canonical
+# ``[Errno 2]`` repr (MISSING_PROGRAM_RE above) excuses a missing module import.
+NOT_FOUND_PHRASE_RE = re.compile(r"\s+not found\s*$", re.MULTILINE)
+EXCEPTION_HEADER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:Error|Exception|Warning|Interrupt):")
+# The OS-level classes a missing program actually surfaces as: ``os.exec*`` and
+# ``subprocess.Popen`` raise ``OSError``/``FileNotFoundError`` when the program
+# cannot be found, so a bare ``OSError: node not found`` is the environment
+# speaking. Every other exception class (``RuntimeError: handler not found``) is
+# a message the project wrote itself and never excuses a missing tool. This is a
+# taxonomy of exception classes, not an allowlist of program names.
+OS_ERROR_RE = re.compile(r"^(?:[A-Za-z_][A-Za-z0-9_]*\.)*(?:OSError|FileNotFoundError):")
+# ``subprocess.CalledProcessError: Command '['git', 'ls-files']' returned
+# non-zero exit status 128.`` - git answering that the copy is not a repository
+# in its own exit code, without printing the words GIT_ABSENT_RE knows. The
+# exception's own ``str()`` wraps the printed command (argv list repr, or the
+# shell string repr) between the literal ``Command '`` and ``' returned``, so the
+# capture takes the text in between and ``_argv_program`` parses it - the program
+# name is read from the command, never guessed from prose.
+CALLED_PROCESS_ERROR_RE = re.compile(
+    r"""CalledProcessError:\s+Command\s+'(?P<argv>.*?)'\s+returned"""
+)
+# ``PermissionError: [Errno 13] Permission denied: '/var/run/app.pid'``. The
+# sandbox bind-mounts only the isolated copy (and a tmp home) writable, so a
+# write aimed at the host - an absolute path outside the copy, or a cwd-relative
+# pid file the runtime protects - is the environment refusing, not the project
+# failing.
+PERMISSION_DENIED_RE = re.compile(
+    r"PermissionError:\s*\[Errno 13\][^\n]*?['\"](?P<path>[^'\n]+)['\"]"
+)
+# A test that cannot proceed because it needs an *external program* the hermetic
+# sandbox simply does not carry announces that in its own words instead of raising
+# an OS error the rules above can trust: ``<Tool> is required ... in CI environment``
+# or ``<Tool> is required ... not installed/available``. Deliberately narrower than
+# the wording it recognises, so it can never hide a real defect:
+#   * the name must be a bare program token sitting directly against ``is required``
+#     (``node``), never a common noun or a path - an ordinary domain validation
+#     ("a password is required", "a valid session id is required") names a concept,
+#     not an executable, and is refused by the program-shape test; and
+#   * the very same sentence must explicitly frame the absence as a build/runtime
+#     toolchain precondition (a CI marker or a "not installed/available/found"
+#     clause), so a plain product assertion that merely contains the word "required"
+#     is never excused; and
+#   * the program must not resolve to a file inside the tested tree (a launcher the
+#     project ships itself is the project's own concern).
+# No list of tool names is consulted, so this is project-agnostic.
+REQUIRED_TOOL_RE = re.compile(
+    r"(?P<tool>[A-Za-z][A-Za-z0-9+#._-]{0,40})\s+is\s+required\b[^\n]*?"
+    r"(?:\bCI\b|in\s+CI\b|\bnot\s+(?:installed|available|found|present)\b|\bon\s+this\s+machine\b)",
+    re.IGNORECASE,
+)
 
 
 def _looks_like_program(name: str) -> bool:
@@ -406,6 +486,104 @@ def _looks_like_program(name: str) -> bool:
     if "/" in cleaned or "\\" in cleaned or "." in cleaned:
         return False
     return all(not char.isspace() for char in cleaned)
+
+
+def _base_program_name(token: str) -> str:
+    """Reduce a prose tool name to a bare program candidate (``Node.js`` -> ``node``).
+
+    Only cosmetic decoration is stripped - a leading article, any ``.js``/``.exe``/
+    version-style suffix, and surrounding punctuation - and the result is lower-cased.
+    This never consults a table of known tools; it just reshapes whatever word the
+    message put in front of ``is required``.
+    """
+    cleaned = (token or "").strip().strip("'\"`()[]{}.,;:")
+    if cleaned[:1].isalpha() and cleaned.lower().startswith("the "):
+        cleaned = cleaned[4:].strip()
+    # Drop a trailing dotted extension or version: Node.js -> Node, python3.11 -> python3.
+    cleaned = re.sub(r"\.[A-Za-z][A-Za-z0-9]*$", "", cleaned)
+    cleaned = re.sub(r"\.\d+(?:\.\d+)*$", "", cleaned)
+    return cleaned.lower()
+
+
+def _argv_program(argv_text: str) -> str:
+    """Program name from the command printed in a CalledProcessError.
+
+    Handles both forms - the argv list repr (``['git', 'ls-files', '-z']``) and
+    the single shell string (``'git ls-files -z'``) - by parsing the literal
+    with ``ast.literal_eval`` and taking the basename of its first element (or
+    first word). Anything unparseable yields the first word of the raw text,
+    and an empty result means "no program candidate".
+    """
+    raw = (argv_text or "").strip()
+    if not raw:
+        return ""
+    try:
+        parsed = ast.literal_eval(raw)
+    except (SyntaxError, ValueError):
+        parsed = None
+    if isinstance(parsed, (list, tuple)):
+        items = [str(item) for item in parsed if item]
+    elif isinstance(parsed, str):
+        items = parsed.split()
+    else:
+        items = raw.split()
+    if not items:
+        return ""
+    first = items[0].strip("'\"()[]")
+    if not first:
+        return ""
+    return Path(first).name
+
+
+def _program_before_phrase(text: str, phrase_start: int) -> str:
+    """The program candidate in front of a ``not found`` phrase, ``''` for none.
+
+    Read from the text position, not from a capture group: the last token of the
+    line holding the phrase, with a trailing colon stripped (``bash: line 1:
+    node: not found`` names ``node``). A line that opens with an exception class
+    header (``OSError: node not found``) is that program's own message, not a
+    launcher reporting a missing tool, and yields no candidate at all.
+    """
+    head = text[:phrase_start].rstrip("\"'`")
+    if not head:
+        return ""
+    line = head[head.rfind("\n") + 1:]
+    line = re.sub(r"^E\s+", "", line.strip())
+    if EXCEPTION_HEADER_RE.match(line) and not OS_ERROR_RE.match(line):
+        return ""
+    tokens = line.split()
+    if not tokens:
+        return ""
+    candidate = tokens[-1].rstrip(":")
+    if ":" in candidate or not candidate.isascii() or not candidate.islower():
+        return ""
+    return candidate
+
+
+def _permission_outside_copy(path_text: str, project_root: Path | None) -> bool:
+    """True when a denied write target could only be the sandbox refusing.
+
+    Accepted, in order: an *absolute* path that is provably outside the tested
+    tree (a host location the bind mount never makes writable), or a
+    cwd-relative pid file (``*.pid``), which the runtime protects wherever the
+    process points its working directory. A denied write to an absolute path
+    *inside* the copy is the project's own business and stays product. Without
+    a known ``project_root`` nothing is provable and nothing is excused.
+    """
+    if project_root is None:
+        return False
+    candidate = (path_text or "").strip()
+    if not candidate:
+        return False
+    if candidate.lower().endswith(".pid") and not os.path.isabs(candidate):
+        return True
+    if not os.path.isabs(candidate):
+        return False
+    try:
+        Path(candidate).relative_to(project_root)
+    except ValueError:
+        return True
+    return False
 
 
 def classify_failure(
@@ -452,6 +630,81 @@ def classify_failure(
                 "directory is not visible to the tested process)",
             )
         program = MISSING_PROGRAM_RE.search(text, program.end())
+    # A git subprocess that exits non-zero in a copy without any .git: git's
+    # answer to "which repository is this" is an exit code, not the words
+    # GIT_ABSENT_RE knows. Only accepted when the tested tree provably has no
+    # repository state - with a real .git present, a failing git call is the
+    # project's own affair.
+    called = CALLED_PROCESS_ERROR_RE.search(text)
+    if (
+        called
+        and _argv_program(called.group("argv")) == "git"
+        and project_root is not None
+        and not (project_root / ".git").exists()
+        and not _raised_by_project(text, called.start())
+    ):
+        return EnvCause(
+            "missing_vcs_metadata",
+            "repository metadata absent: this test shells out to git, and the "
+            "isolated copy is deliberately a file tree without VCS state",
+        )
+    # The same invisible-tool fact as MISSING_PROGRAM_RE, phrased by the tool's
+    # own launcher ("node: not found") instead of by the OSError repr.
+    not_found = NOT_FOUND_PHRASE_RE.search(text)
+    while not_found:
+        name = _program_before_phrase(text, not_found.start())
+        if (
+            _looks_like_program(name)
+            and not _raised_by_project(text, not_found.start())
+            and not (project_root is not None and (project_root / name).exists())
+        ):
+            return EnvCause(
+                "missing_tool",
+                f"external program unavailable: {name} (the sandbox gets an allowlisted "
+                "PATH and a sandbox HOME, so a tool installed only in the user's home "
+                "directory is not visible to the tested process)",
+            )
+        not_found = NOT_FOUND_PHRASE_RE.search(text, not_found.end())
+    # The same invisible-tool fact, this time phrased by the test itself: it needs
+    # an external program the hermetic sandbox does not carry and says so ("Node.js
+    # is required ... in CI environment"). Guarded tightly so it cannot excuse a
+    # product defect - see REQUIRED_TOOL_RE.
+    required = REQUIRED_TOOL_RE.search(text)
+    while required:
+        token = required.group("tool")
+        # A missing external tool is named like a product (capitalised, or carrying a
+        # version/extension marker such as ``Node.js``/``.NET``/``C++``); a domain
+        # requirement is a common noun ("a password is required", "a valid method is
+        # required"). This shape test - not a list of tool names - is what keeps a
+        # real product assertion from being excused as an absent toolchain.
+        named = token[:1].isupper() or any(mark in token for mark in (".", "+", "#"))
+        base = _base_program_name(token)
+        if (
+            named
+            and _looks_like_program(base)
+            and not _raised_by_project(text, required.start())
+            and not (project_root is not None and (project_root / base).exists())
+        ):
+            return EnvCause(
+                "missing_tool",
+                f"external program unavailable: {base} (the suite requires {base} as an "
+                "external tool and the sandbox does not install it; a missing toolchain "
+                "is an environment precondition, not a product defect)",
+            )
+        required = REQUIRED_TOOL_RE.search(text, required.end())
+    # A denied write aimed at the host (absolute path outside the copy) or at a
+    # cwd-relative pid file is the sandbox's bound, not a project defect.
+    denied = PERMISSION_DENIED_RE.search(text)
+    while denied:
+        if _permission_outside_copy(denied.group("path"), project_root) and not _raised_by_project(
+            text, denied.start()
+        ):
+            return EnvCause(
+                "sandbox_denied_write",
+                f"write denied outside the isolated copy: {denied.group('path')} (only "
+                "the tested tree and a temporary home are writable in the sandbox)",
+            )
+        denied = PERMISSION_DENIED_RE.search(text, denied.end())
     # A single test that cannot even be collected because a third-party module is
     # absent is the same precondition the whole-run classifier already excuses, so
     # the per-failure path must agree with it - otherwise fix E's structured

@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/quillhog0/QA-Ecosystem/actions/workflows/ci.yml/badge.svg)](https://github.com/quillhog0/QA-Ecosystem/actions/workflows/ci.yml)
 
-Version 0.3.3. See CHANGELOG.md.
+Version 0.3.4. See CHANGELOG.md.
 
 Part of the quillhog toolkit — [github.com/quillhog0](https://github.com/quillhog0) · [quillhog.xyz](https://quillhog.xyz) · X [@Quillhog0](https://x.com/Quillhog0).
 
@@ -274,7 +274,7 @@ An optional adversarial test quality audit evaluated by **Riley** after baseline
 
 Running mutation testing on QA Ecosystem itself (`python main.py --self-test --mutation`, evaluating 30 deterministic mutants) yields:
 
-- **Score:** **93.1%** at release 0.3.3 (27 killed, 2 survived, 1 timeout, 0 error, out of 30 sampled mutants; errors and timeouts are excluded from the score). The mutant sample is deterministic (seed 42) but shifts as the code changes, so the figure varies between releases; re-run the command to measure the current tree.
+- **Score:** **90.0%** at release 0.3.4 (27 killed, 3 survived, out of 30 sampled mutants; errors and timeouts are excluded from the score). Release 0.3.3 scored 93.1%. The mutant sample is deterministic (seed 42) but shifts as the code changes, so the figure varies between releases; re-run the command to measure the current tree.
 - **Note:** earlier builds counted a mutant as killed when the test run crashed before any test executed (for example when the sandbox could not start the project venv). That bug is fixed and covered by tests, so this score only counts real test failures.
 - **Surviving mutants at 0.3.3:** agents/aria.py:48 (`>` -> `>=`) and core/sandbox.py:248 (`and` -> `or`). Both are equivalent mutants: at aria.py:48 the single-part match re-adds a token that is already added and then deduplicated, so the output is unchanged; at sandbox.py:248 a path equal to the isolated copy or work directory is already skipped by the following `relative_to` checks, so the sandbox arguments are identical.
 

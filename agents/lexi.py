@@ -211,9 +211,13 @@ def _other_sources_text(project_root: Path, limit_bytes: int = 5_000_000) -> str
             continue
         if path.suffix.lower() not in _OTHER_SOURCE_EXT or not path.is_file():
             continue
-        if path.suffix.lower() in _CONFIG_EXT:
+        if path.suffix.lower() in _CONFIG_EXT and "workflows" not in path.parts:
             # Config files of the project under test are not evidence: a key
             # only counts if code actually reads it (see _collect_code_strings).
+            # CI pipeline definitions (a ``workflows/`` directory, the universal
+            # GitHub Actions / GitLab CI layout) are the exception: a workflow
+            # file *is* the executable that declares its own job inputs, so a doc
+            # naming such an input is describing real code, not missing code.
             continue
         try:
             size = path.stat().st_size
@@ -262,7 +266,7 @@ _NEGATION_WORDS = {
 }
 
 # Longer, unambiguous stems: matched at the start of a word, so they also catch
-# inflected and compound forms ("zakázaný", "forbidden", "ForbiddenWords").
+# inflected and compound forms ("forbidden", "forbids", "ForbiddenWords").
 _NEGATION_STEMS = (
     "forbid", "prohibit", "banned", "avoid", "unless", "exclude", "missing",
     "zakaz", "nesmi", "vylou", "odmit", "nepouz", "neuklad",
@@ -345,6 +349,7 @@ class _Mention:
     __slots__ = (
         "line", "heading", "intro", "is_list_item", "in_paren",
         "gap_before", "gap_after", "prev_term", "next_term", "clause_terms",
+        "in_blockquote", "definition", "narrated", "historical",
     )
 
     def __init__(
@@ -359,6 +364,10 @@ class _Mention:
         prev_term: str,
         next_term: str,
         clause_terms: tuple[str, ...],
+        in_blockquote: bool = False,
+        definition: bool = False,
+        narrated: bool = False,
+        historical: bool = False,
     ) -> None:
         self.line = line
         self.heading = heading
@@ -370,6 +379,10 @@ class _Mention:
         self.prev_term = prev_term
         self.next_term = next_term
         self.clause_terms = clause_terms
+        self.in_blockquote = in_blockquote
+        self.definition = definition
+        self.narrated = narrated
+        self.historical = historical
 
     def enumerated(self) -> bool:
         """Part of a run of backticked terms separated only by punctuation.
@@ -386,6 +399,29 @@ class _Mention:
     def gloss(self) -> bool:
         """Sits inside a parenthetical aside, so it explains rather than promises."""
         return self.in_paren
+
+    def aside(self) -> bool:
+        """Sits in a Markdown block-quote, which quotes someone else's words.
+
+        A ``> ...`` line reports or explains - it is not the document asserting
+        its own API surface - so a term that only ever appears there is a quoted
+        aside, not a promise the project must keep.
+        """
+        return self.in_blockquote
+
+    def defined(self) -> bool:
+        """Heads a glossary list item (``- `term`: description``), so it is being
+        defined rather than promised as an API."""
+        return self.definition
+
+    def cited(self) -> bool:
+        """Sits on a line that cites a ``file.ext:line`` source location.
+
+        Such a line narrates existing code (an incident write-up, a change plan)
+        rather than declaring an API, so a name only ever seen here is reported
+        about, not promised.
+        """
+        return self.narrated
 
     def forbidden(self, term: str = "") -> bool:
         """Line-level negation, or a list item under a prohibiting heading/intro.
@@ -408,13 +444,89 @@ class _Mention:
 
 
 def _looks_like_rule_heading(heading: str) -> bool:
-    """A heading that governs a rule list ("Forbidden", "Zakázaný lexikon", ...)."""
+    """A heading that governs a rule list ("Forbidden", "Forbidden lexicon", ...)."""
     words = _WORD_RE.findall(_fold(heading))
     return len(words) <= 8
 
 
 def _strip_fences(text: str) -> str:
     return FENCE_RE.sub("", text)
+
+
+_GLOSSARY_TAIL_RE = re.compile(r"^\s*(?:\([^)]*\))?\s*:")
+# A concrete source citation - ``<file>.<ext>:<line>`` - is how an incident
+# report or a change plan points at the code it is describing (``core_verify.py:
+# 39``, ``rent_service.py:115-117``). A line that cites a location is *narrating*
+# existing code, not declaring the project's public surface, so a name that only
+# ever appears on such lines is a reference the docs are reporting about, not a
+# promise the code broke. Kept deliberately strict: a real dotted extension plus
+# a line number, so ordinary prose ("HTTP 500", "version 2.14") never matches.
+_SOURCE_CITATION_RE = re.compile(r"\b[\w-]+\.\w+:\d+")
+
+
+def _is_glossary_definition(line: str, span: Any) -> bool:
+    """True when a list item *defines* the backticked term it opens with.
+
+    ``- `DIFF_WATCH`: Analyzuj jen git diff`` is a glossary entry: the marker,
+    then the term, then a colon and a plain-language description. The term is the
+    thing being explained, not an API the document promises - unlike a sentence
+    that merely *uses* it ("Provides `handle_user_logout` endpoint"). A bolded
+    label ahead of the term disqualifies it (that prose, not the term, heads the
+    line), and this never fires on a call form, which is escalated on its own.
+    """
+    if not _LIST_ITEM_RE.match(line):
+        return False
+    if not _GLOSSARY_TAIL_RE.match(line[span.end():]):
+        return False
+    head = _LIST_ITEM_RE.sub("", line[:span.start()]).strip()
+    head = head.strip("*`").strip()
+    return head == ""
+
+
+# Historical record documents narrate what already happened - incident logs,
+# post-mortems, changelogs, release notes, decision (ADR) logs and retrospectives.
+# They cite symbols and file:line references as *reporting* on past code, never as
+# a promise about the project's current public surface, so a name that appears only
+# in such a document must never veto. Detection is by path shape alone (a directory
+# name or a file stem), so it is project-agnostic: no allowlist of names, and a term
+# that also appears in an ordinary doc is still scored on its non-historical mentions.
+_HISTORICAL_DIR_NAMES = frozenset(
+    {
+        "incident", "incidents", "postmortem", "postmortems", "post-mortem",
+        "post-mortems", "changelog", "changelogs", "history", "histories",
+        "adr", "adrs", "decisions", "retrospective", "retrospectives",
+        "release-notes", "releasenotes", "release_notes",
+    }
+)
+_HISTORICAL_FILE_STEMS = frozenset(
+    {
+        "incident", "incidents", "postmortem", "postmortems", "post-mortem",
+        "post-mortems", "changelog", "changelogs", "changes", "history",
+        "histories", "releasenotes", "release-notes", "release_notes",
+    }
+)
+_HISTORICAL_FILE_PREFIXES = (
+    "changelog", "history", "postmortem", "post-mortem", "incident",
+)
+
+
+def _is_historical_doc(path: Path, docs_root: Path) -> bool:
+    """True when *path* is a historical record document (by path shape only)."""
+    try:
+        rel = Path(path).resolve().relative_to(Path(docs_root).resolve())
+    except (ValueError, OSError):
+        rel = Path(Path(path).name)
+    parts = [p.lower() for p in rel.parts]
+    for directory in parts[:-1]:
+        if directory in _HISTORICAL_DIR_NAMES:
+            return True
+    name = parts[-1] if parts else ""
+    stem = name.rsplit(".", 1)[0]
+    if stem in _HISTORICAL_FILE_STEMS:
+        return True
+    if any(stem == pre or stem.startswith((pre + "-", pre + "_")) for pre in _HISTORICAL_FILE_PREFIXES):
+        return True
+    return False
 
 
 def _doc_mentions(docs_root: Path, doc_globs: tuple[str, ...]) -> dict[str, list[_Mention]]:
@@ -467,6 +579,7 @@ def _doc_mentions(docs_root: Path, doc_globs: tuple[str, ...]) -> dict[str, list
                 closes = line.count(")", 0, span.start()) + line.count("]", 0, span.start())
                 tail = line[span.end():]
                 in_paren = opens > closes and bool(_CLOSING_RE.search(tail))
+                is_definition = _is_glossary_definition(line, span)
                 mentions.setdefault(ident, []).append(
                     _Mention(
                         line=line,
@@ -479,6 +592,10 @@ def _doc_mentions(docs_root: Path, doc_globs: tuple[str, ...]) -> dict[str, list
                         prev_term=prev_term,
                         next_term=next_term,
                         clause_terms=_clause_terms(spans, index),
+                        in_blockquote=line.lstrip().startswith(">"),
+                        definition=is_definition,
+                        narrated=bool(_SOURCE_CITATION_RE.search(line)),
+                        historical=_is_historical_doc(path, docs_root),
                     )
                 )
             previous = [line]
@@ -536,11 +653,26 @@ def _clause_terms(spans: list[Any], index: int) -> tuple[str, ...]:
 
 
 def _prose_only(term: str, mentions: dict[str, list[_Mention]]) -> bool:
-    """True when every mention of ``term`` is prose (list item, gloss, negation)."""
+    """True when no mention of ``term`` is an API promise.
+
+    A mention is a non-promise when it is prose (list item, gloss, negation,
+    quote, definition), when it sits on a line citing a ``file.ext:line``
+    location (so it narrates existing code), or when it lives in a historical
+    record. An incident log, changelog or postmortem reports on what the code
+    *was* - it never promises the current public surface - so, exactly like a
+    cited narration, a historical mention cannot escalate a term on its own.
+    Only a mention that is none of these (a real, present-tense code-shaped
+    promise) can drive a veto.
+    """
     found = mentions.get(term) or []
     if not found:
         return False
-    return all(m.enumerated() or m.gloss() or m.forbidden(term) for m in found)
+    return all(
+        m.enumerated() or m.gloss() or m.forbidden(term) or m.aside() or m.defined()
+        or m.cited()
+        or m.historical
+        for m in found
+    )
 
 
 def _anchored(term: str, mentions: dict[str, list[_Mention]], resolvable) -> bool:
@@ -551,7 +683,14 @@ def _anchored(term: str, mentions: dict[str, list[_Mention]], resolvable) -> boo
     that the word is prose.
     """
     for mention in mentions.get(term) or []:
-        if mention.enumerated() or mention.gloss() or mention.forbidden(term):
+        if (
+            mention.enumerated()
+            or mention.gloss()
+            or mention.forbidden(term)
+            or mention.aside()
+            or mention.defined()
+            or mention.cited()
+        ):
             continue
         for sibling in mention.clause_terms:
             sib = _mention_ident(sibling)
@@ -687,7 +826,7 @@ def _extract_claims(docs_root: Path, doc_globs: tuple[str, ...]) -> list[str]:
 
 
 # Documentation often *disclaims* an API ("the core library does not include
-# `dump`"), forbids a word ("Zákázaná slova: `compliant`"), glosses a term in
+# `dump`"), forbids a word ("Forbidden words: `compliant`"), glosses a term in
 # parentheses ("(`preload`, `font-display`)") or uses a backticked word as a
 # prose *placeholder* ("where `rowIDs` is some iterable"). None of those names a
 # real callable, so none may escalate a missing identifier to a veto.
@@ -734,6 +873,9 @@ def _missing_code_severity(
     appears as an item of a vocabulary list, a parenthetical gloss, a negated or
     forbidden mention, or a prose placeholder.
     """
+    found = mentions.get(ident) or []
+    if found and all(m.historical for m in found):
+        return "low"
     if strict or ident in _CALL_FORM:
         return "high"
     if _prose_only(ident, mentions):

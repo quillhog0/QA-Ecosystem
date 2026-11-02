@@ -1,6 +1,18 @@
 # Changelog
 
-## Unreleased
+## 0.3.4 (2026-11-02)
+
+Verified with 585 unit tests passing (1 skipped), benchmark 15/15, field test 10/10 and a self-test mutation score of 0.90 (27 killed, 3 survived, verdict CLEAR).
+
+### Summary
+- New `BLOCKED_ENV` verdict (exit `2`) for runs stopped by an environment precondition.
+- Field test harness in `benchmark/field_test.py`.
+- `--llm-network` split and secret scrubbing of LLM payloads.
+- JUnit XML output parsing (`core/junit.py`).
+- Fixed catastrophic backtracking in a Lexi regular expression.
+- Lexi false-positive fixes: anchoring only to defined functions and classes, blockquotes, CI workflow inputs, glossary entries, `file:line` citations, and historical docs capped at `low` severity.
+- Environment classification for `PackageNotFoundError`, sqlite open failures, a missing `.git`, `PermissionError` and a missing `node` executable.
+- The isolated copy is writable like a normal checkout.
 
 ### Fixed
 - Lexi no longer escalates plain documentation words to high severity just because they sit next to an unrelated identifier (for example `json.dumps` in a helper script). Anchoring now requires the sibling to be a defined function or class in the project. Test-only names mentioned in docs are ignored.
