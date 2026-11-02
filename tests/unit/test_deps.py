@@ -225,3 +225,173 @@ def test_prepare_venv_reports_pip_failure_as_tuple(tmp_path, monkeypatch):
     assert python_executable is None
     assert status.startswith("pip install failed")
     assert "could not find a version" in status
+
+
+def test_prepare_venv_captures_pip_output_on_success(tmp_path, monkeypatch):
+    """An offline successful install reports 'ok' and the pip output reaches
+    pip.log, so the install call must keep capturing stdout and stderr."""
+    monkeypatch.setenv("QA_VENV_CACHE_DIR", str(tmp_path / "cache"))
+    root = mini_project(tmp_path / "proj", with_tests=False, docs="")
+    (root / "requirements.txt").write_text("pytest\n", encoding="utf-8")
+    work = tmp_path / "work"
+
+    def fake_run(cmd, **kwargs):
+        if len(cmd) >= 3 and cmd[1] == "-m" and cmd[2] == "venv":
+            vdir = Path(cmd[3])
+            (vdir / "bin").mkdir(parents=True, exist_ok=True)
+            (vdir / "bin" / "python").write_text("#!/bin/sh\n", encoding="utf-8")
+            (vdir / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
+            if kwargs.get("capture_output"):
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+            return SimpleNamespace(returncode=0, stdout=None, stderr=None)
+        # pip install succeeds; without capture the pipes are not connected
+        if kwargs.get("capture_output"):
+            return SimpleNamespace(
+                returncode=0, stdout="Successfully installed pytest\n", stderr=""
+            )
+        return SimpleNamespace(returncode=0, stdout=None, stderr=None)
+
+    monkeypatch.setattr(deps.subprocess, "run", fake_run)
+    python_executable, status = prepare_venv(root, work, timeout=5)
+    assert status == "ok"
+    assert python_executable is not None
+    assert "Successfully installed pytest" in (work / "pip.log").read_text(encoding="utf-8")
+
+
+def _seed_cache_entry(tmp_path, monkeypatch, root):
+    """Build a complete, marker-valid cache entry and return (key, work_dir)."""
+    monkeypatch.setenv("QA_VENV_CACHE_DIR", str(tmp_path / "cache"))
+    key = deps._venv_cache_key([root / "requirements.txt"], [])
+    entry, cache_venv, marker = deps._cache_paths(key)
+    entry.mkdir(parents=True, exist_ok=True)
+    cache_venv.mkdir(parents=True, exist_ok=True)
+    return key, cache_venv, marker
+
+
+def test_cache_copy_failure_returns_false(tmp_path, monkeypatch):
+    """deps.py:121 - an interrupted copy of a valid cache entry must report
+    exactly False, so the caller falls back to building a fresh venv."""
+    root = mini_project(tmp_path / "proj", with_tests=False, docs="")
+    (root / "requirements.txt").write_text("pytest\n", encoding="utf-8")
+    key, cache_venv, marker = _seed_cache_entry(tmp_path, monkeypatch, root)
+    (cache_venv / "bin").mkdir(parents=True)
+    (cache_venv / "bin" / "python").write_text("#!/bin/sh\n", encoding="utf-8")
+    marker.write_text(key, encoding="utf-8")
+
+    def boom(src, dst, **kwargs):
+        raise OSError("copy interrupted")
+
+    monkeypatch.setattr(deps.shutil, "copytree", boom)
+    work = tmp_path / "work"
+    work.mkdir()
+    assert deps._reuse_cached_venv(key, work) is False
+    assert not (work / "venv").exists()
+
+
+def test_copied_cache_without_python_binary_returns_false(tmp_path, monkeypatch):
+    """deps.py:126 - a cache tree that copies cleanly but has no interpreter is
+    no venv: it must be deleted and reported as exactly False."""
+    root = mini_project(tmp_path / "proj", with_tests=False, docs="")
+    (root / "requirements.txt").write_text("pytest\n", encoding="utf-8")
+    key, cache_venv, marker = _seed_cache_entry(tmp_path, monkeypatch, root)
+    (cache_venv / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
+    marker.write_text(key, encoding="utf-8")
+
+    work = tmp_path / "work"
+    work.mkdir()
+    assert deps._reuse_cached_venv(key, work) is False
+    assert not (work / "venv").exists()
+
+
+def test_prepare_venv_pip_log_needs_text_mode(tmp_path, monkeypatch):
+    """deps.py:230 - pip.log is written with ``write_text``, so the install
+    must run in text mode. A fake that honours ``text`` (bytes when unset) makes
+    a silent switch to binary output crash instead of writing an empty log."""
+    monkeypatch.setenv("QA_VENV_CACHE_DIR", str(tmp_path / "cache"))
+    root = mini_project(tmp_path / "proj", with_tests=False, docs="")
+    (root / "requirements.txt").write_text("pytest\n", encoding="utf-8")
+    work = tmp_path / "work"
+    work.mkdir()
+
+    out_text = "Successfully installed pytest-8.0\n"
+    err_text = "WARNING: cache is only supported with a pip version\n"
+
+    def fake_run(cmd, **kwargs):
+        text = bool(kwargs.get("text"))
+        if len(cmd) >= 3 and cmd[1] == "-m" and cmd[2] == "venv":
+            vdir = Path(cmd[3])
+            (vdir / "bin").mkdir(parents=True, exist_ok=True)
+            (vdir / "bin" / "python").write_text("#!/bin/sh\n", encoding="utf-8")
+            (vdir / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        out, err = (out_text, err_text) if text else (out_text.encode(), err_text.encode())
+        return SimpleNamespace(returncode=0, stdout=out, stderr=err)
+
+    monkeypatch.setattr(deps.subprocess, "run", fake_run)
+    python_executable, status = deps.prepare_venv(root, work, timeout=5)
+    assert status == "ok"
+    assert python_executable is not None
+    log = (work / "pip.log").read_text(encoding="utf-8")
+    assert out_text in log
+    assert err_text in log
+
+
+# --- requirement classifier -------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "git+ssh.example.com/repo.git",
+        "hg+bb.example.com/repo",
+        "svn+server.example.com/trunk",
+    ],
+)
+def test_bare_vcs_prefixes_are_unsafe_without_a_url_scheme(line: str):
+    """deps.py:16 - a protocol counts when it starts the line *or* appears after
+    ``://``. These have no scheme at all, so only the first half can catch them;
+    an ``or`` weakened to ``and`` would wave a VCS install through."""
+    assert deps._check_unsafe_requirement(line) == line
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "-r C:\\vendor\\pkgs.tar.gz",
+        "-c D:\\cfg\\constraints.txt",
+        "-r \\\\fileserver\\share\\pkg.txt",
+    ],
+)
+def test_include_files_outside_the_project_are_unsafe(line: str):
+    """deps.py:24-26 - ``-r`` and ``-c`` are alternative prefixes and a drive letter
+    is one of four independent path shapes. Tightening either ``or`` to ``and`` or
+    the drive-letter test to ``!=`` silently accepts a remote include file."""
+    assert deps._check_unsafe_requirement(line) == line
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "pytest>=7.0",
+        "requests==2.31.0",
+        "-r requirements.txt",
+        "-c constraints.txt",
+        "numpy<2,>=1.24",
+        "# only a comment",
+    ],
+)
+def test_ordinary_requirement_lines_stay_accepted(line: str):
+    """deps.py:24-31 - the classifier must not reject a plain sibling include file:
+    a loose path test turns every ordinary requirements.txt into a veto."""
+    assert deps._check_unsafe_requirement(line) is None
+
+
+def test_read_pyproject_deps_missing_or_broken_file_returns_empty_list(tmp_path: Path):
+    """deps.py:37-41 - callers iterate the result unconditionally, so an absent or
+    unparsable pyproject must yield ``[]`` and never ``None``."""
+    assert _read_pyproject_deps(tmp_path / "pyproject.toml") == []
+    assert _read_pyproject_deps(tmp_path) == []
+
+    broken = tmp_path / "pyproject.toml"
+    broken.write_text("[project\nname = ", encoding="utf-8")
+    assert _read_pyproject_deps(broken) == []

@@ -295,7 +295,7 @@ def test_sable_arg_looks_tmp_checks_segments_not_substring(tmp_path: Path):
         "import os\n\ndef test_fn():\n    os.remove('template.py')\n",
         encoding="utf-8",
     )
-    hits, _ = scan_tests_for_risks(iso)
+    hits, _, _ = scan_tests_for_risks(iso)
     assert any("os.remove" in h for h in hits)
 
     # Call on /tmp/foo.txt is treated as tmp and allowed
@@ -303,7 +303,7 @@ def test_sable_arg_looks_tmp_checks_segments_not_substring(tmp_path: Path):
         "import os\n\ndef test_fn():\n    os.remove('/tmp/foo.txt')\n",
         encoding="utf-8",
     )
-    hits, _ = scan_tests_for_risks(iso)
+    hits, _, _ = scan_tests_for_risks(iso)
     assert not any("os.remove" in h for h in hits)
 
 
@@ -345,7 +345,7 @@ def test_sable_blocks_direct_imports_and_eval_exec(tmp_path: Path, code: str, ex
     iso.mkdir(exist_ok=True)
     test_file = iso / "test_sample.py"
     test_file.write_text(code, encoding="utf-8")
-    hits, _ = scan_tests_for_risks(iso)
+    hits, _, _ = scan_tests_for_risks(iso)
     assert any(expected_token in h for h in hits), f"Expected {expected_token} in hits: {hits}"
 
 
@@ -357,7 +357,7 @@ def test_sable_scans_project_files_and_nested_conftest(tmp_path: Path):
     (iso / "tests" / "nested").mkdir(parents=True, exist_ok=True)
     (iso / "tests" / "nested" / "conftest.py").write_text("import shutil\nshutil.rmtree('/tmp/evil')\n", encoding="utf-8")
 
-    hits, _ = scan_tests_for_risks(iso)
+    hits, _, _ = scan_tests_for_risks(iso)
     assert any("src/worker.py: call eval" in h for h in hits)
     assert any("nested/conftest.py: call shutil.rmtree" in h for h in hits)
 
@@ -381,5 +381,181 @@ def test_command_is_pytest_only_rejects_forbidden_network_and_destructive_tokens
     ok, reason = _command_is_pytest_only(["python -m pytest ; rm -rf /"])
     assert ok is False
     assert reason.startswith("destructive pattern in command:")
+
+
+def _sandbox_tree(tmp_path: Path) -> tuple[Path, Path]:
+    """Copy with subprocess in a test file and eval in a non-test source file."""
+    iso = tmp_path / "iso"
+    live = tmp_path / "live"
+    iso.mkdir()
+    live.mkdir()
+    tests = iso / "tests"
+    tests.mkdir()
+    (tests / "test_a.py").write_text(
+        "import subprocess\n\ndef test_x():\n    subprocess.run(['true'])\n",
+        encoding="utf-8",
+    )
+    src = iso / "src"
+    src.mkdir()
+    (src / "mod.py").write_text("def f():\n    return eval('1')\n", encoding="utf-8")
+    return iso, live
+
+
+def test_sable_sandboxed_downgrades_dangerous_to_warnings(tmp_path: Path):
+    """Cause 1: with the bwrap sandbox active, dangerous test/source ops become
+    warnings (verdict CLEAR), each tagged with its file role."""
+    iso, live = _sandbox_tree(tmp_path)
+    decision = evaluate_preflight(
+        command=_pytest_cmd(iso),
+        isolated_root=iso,
+        live_root=live,
+        allow_network=False,
+        env={},
+        cwd=iso,
+        sandboxed=True,
+    )
+    assert decision.verdict == Verdict.CLEAR.value
+    assert decision.blocked_reasons == []
+    assert decision.warnings, "expected sandbox warnings to be reported"
+    assert any("import subprocess" in w and "[in tests]" in w for w in decision.warnings)
+    assert any("call eval" in w and "[in source]" in w for w in decision.warnings)
+    assert decision.checks.get("tests_ast_clean") is True
+
+
+def test_sable_unsandboxed_blocks_same_inputs(tmp_path: Path):
+    """Cause 1: without an active sandbox the same ops still BLOCK (unchanged)."""
+    iso, live = _sandbox_tree(tmp_path)
+    decision = evaluate_preflight(
+        command=_pytest_cmd(iso),
+        isolated_root=iso,
+        live_root=live,
+        allow_network=False,
+        env={},
+        cwd=iso,
+        sandboxed=False,
+    )
+    assert decision.verdict == Verdict.BLOCK.value
+    assert decision.warnings == []
+    joined = " ".join(decision.blocked_reasons)
+    assert "subprocess" in joined and "eval" in joined
+
+
+def test_sable_role_label_distinguishes_tests_from_source(tmp_path: Path):
+    """Cause 1 label fix: a non-test finding is no longer mislabeled as 'in tests'."""
+    iso = tmp_path / "iso"
+    iso.mkdir()
+    src = iso / "src"
+    src.mkdir()
+    (src / "mod.py").write_text("def f():\n    return eval('1')\n", encoding="utf-8")
+    hits, _, _ = scan_tests_for_risks(iso)
+    assert any("[in source]" in h for h in hits)
+    assert not any("[in tests]" in h for h in hits)
+
+
+def test_sable_exempts_project_own_package_import(tmp_path: Path):
+    """Cause 2: the project's own top-level package sharing a network root name
+    (httpx test suite importing httpx) is not a forbidden network import."""
+    iso = tmp_path / "iso"
+    iso.mkdir()
+    (iso / "pyproject.toml").write_text(
+        '[project]\nname = "httpx"\n', encoding="utf-8"
+    )
+    pkg = iso / "src" / "httpx"
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text("class Client:\n    pass\n", encoding="utf-8")
+    tests = iso / "tests"
+    tests.mkdir()
+    (tests / "test_client.py").write_text(
+        "import httpx\n\ndef test_x():\n    httpx.Client()\n", encoding="utf-8"
+    )
+    hits, allowed, warnings = scan_tests_for_risks(iso)
+    assert not any("httpx" in h for h in hits)
+    assert not any("httpx" in w for w in warnings)
+
+
+def test_sable_still_blocks_foreign_httpx_import(tmp_path: Path):
+    """Cause 2: a foreign network-root import is never silently exempted."""
+    iso = tmp_path / "iso"
+    iso.mkdir()
+    (iso / "pyproject.toml").write_text(
+        '[project]\nname = "calculator"\n', encoding="utf-8"
+    )
+    tests = iso / "tests"
+    tests.mkdir()
+    (tests / "test_net.py").write_text("import httpx\n", encoding="utf-8")
+    hits, _, _ = scan_tests_for_risks(iso)
+    assert any("httpx" in h for h in hits)
+
+
+def test_sable_declared_package_name_alone_does_not_exempt(tmp_path: Path):
+    """The network-root exemption is not granted from [project].name alone.
+
+    A distribution that merely calls itself ``requests`` but ships no
+    ``requests/`` package must still be blocked: its ``import requests`` is the
+    third-party library, not a self-import.
+    """
+    iso = tmp_path / "iso"
+    iso.mkdir()
+    (iso / "pyproject.toml").write_text('[project]\nname = "requests"\n', encoding="utf-8")
+    (iso / "calc.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    tests = iso / "tests"
+    tests.mkdir()
+    (tests / "test_net.py").write_text(
+        "import requests\n\n\ndef test_a():\n    requests.get('http://example.invalid')\n",
+        encoding="utf-8",
+    )
+    hits, _, warnings = scan_tests_for_risks(iso)
+    assert any("import requests" in h for h in hits)
+    assert any("requests.get" in h for h in hits)
+    assert not warnings
+
+
+def test_sable_exempts_own_flat_package_without_pyproject(tmp_path: Path):
+    """A real top-level package directory exempts itself, no manifest needed."""
+    iso = tmp_path / "iso"
+    iso.mkdir()
+    pkg = iso / "requests"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("def get(url):\n    return url\n", encoding="utf-8")
+    tests = iso / "tests"
+    tests.mkdir()
+    (tests / "test_api.py").write_text(
+        "import requests\n\n\ndef test_a():\n    requests.get('x')\n", encoding="utf-8"
+    )
+    hits, _, warnings = scan_tests_for_risks(iso, sandboxed=True)
+    assert not any("requests" in h for h in hits)
+    assert not any("requests" in w for w in warnings)
+
+
+def test_sable_package_dir_without_init_is_not_own_package(tmp_path: Path):
+    """A directory is a package only with __init__.py; a bare src/httpx/ tree
+    (namespace dir, no ``__init__.py``) does not earn the exemption."""
+    iso = tmp_path / "iso"
+    iso.mkdir()
+    src = iso / "src" / "httpx"
+    src.mkdir(parents=True)
+    (src / "_client.py").write_text("class Client:\n    pass\n", encoding="utf-8")
+    tests = iso / "tests"
+    tests.mkdir()
+    (tests / "test_client.py").write_text("import httpx\n", encoding="utf-8")
+    hits, _, _ = scan_tests_for_risks(iso)
+    assert any("httpx" in h for h in hits)
+
+
+def test_sable_records_bare_remove_and_unlink_calls(tmp_path: Path):
+    """A bare remove()/unlink() call (an imported name, not an os.* attribute)
+    is still a dangerous delete and must be recorded as a hit."""
+    iso = tmp_path / "iso"
+    iso.mkdir()
+    (iso / "test_clean.py").write_text(
+        "from os import remove, unlink\n\n"
+        "def test_a():\n"
+        "    remove('leftover.dat')\n"
+        "    unlink('other.dat')\n",
+        encoding="utf-8",
+    )
+    hits, _, _ = scan_tests_for_risks(iso)
+    assert any("call remove" in h for h in hits)
+    assert any("call unlink" in h for h in hits)
 
 

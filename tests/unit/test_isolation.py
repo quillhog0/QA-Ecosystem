@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import stat
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,6 +13,7 @@ from core.isolation import (
     _copy_tree,
     _get_tested_tree_info,
     _is_git_toplevel,
+    _make_sources_readonly,
     create_isolation,
     is_secret_path,
     isolation_destination,
@@ -240,6 +242,60 @@ def test_release_isolation_git_worktree_captures_output(tmp_path: Path):
     assert prune_call.kwargs.get("text") is True
 
 
+def test_release_isolation_keep_returns_none_and_preserves_tree(tmp_path: Path):
+    """isolation.py:320 - keep is a bare early return: it must hand back None, so
+    a caller can never read a truthy value as "cleanup finished"."""
+    live = tmp_path / "live"
+    live.mkdir()
+    iso_dest = isolation_destination(live_root=live, run_id="test_keep_release")
+    iso_dest.mkdir(parents=True, exist_ok=True)
+    (iso_dest / "calculator.py").write_text("VALUE = 1\n", encoding="utf-8")
+    handle = IsolationHandle(
+        live_root=live,
+        isolated_root=iso_dest,
+        method="copy",
+        read_only=True,
+        skipped_secrets=[],
+    )
+    try:
+        assert release_isolation(handle, keep=True) is None
+        assert (iso_dest / "calculator.py").is_file()
+    finally:
+        release_isolation(handle, keep=False)
+    assert not iso_dest.exists()
+
+
+def test_release_isolation_git_worktree_tolerates_failing_git(tmp_path: Path, monkeypatch):
+    """isolation.py:338 - the worktree cleanup commands run with check=False:
+    only OSError is swallowed around them, so a non-zero prune must not be
+    allowed to raise CalledProcessError out of release_isolation."""
+    calls: list[list[str]] = []
+    Err = subprocess.CalledProcessError
+
+    def fake_run(cmd, *, check=False, **kwargs):
+        calls.append([str(part) for part in cmd])
+        if check:
+            raise Err(returncode=1, cmd=cmd)
+        return SimpleNamespace(returncode=1, stdout="", stderr="fatal: not a working tree")
+
+    monkeypatch.setattr("core.isolation.subprocess.run", fake_run)
+    live = tmp_path / "live"
+    live.mkdir()
+    handle = IsolationHandle(
+        live_root=live,
+        isolated_root=isolation_destination(live_root=live, run_id="test_wt_prune_fail"),
+        method="git-worktree",
+        read_only=True,
+        skipped_secrets=[],
+        git_worktree=True,
+    )
+    release_isolation(handle, keep=False)
+
+    assert len(calls) == 2
+    assert any("remove" in call for call in calls)
+    assert any("prune" in call for call in calls)
+
+
 def test_is_git_toplevel_false_when_git_binary_missing(tmp_path: Path, monkeypatch):
     """isolation.py:80 - the OSError fallback must return exactly False."""
     def fake_run(*args, **kwargs):
@@ -333,5 +389,50 @@ def test_copy_tree_refuses_existing_destination(tmp_path: Path):
     dst.mkdir()
     with pytest.raises(FileExistsError):
         _copy_tree(src, dst)
+
+
+def test_copy_git_working_tree_falls_back_to_full_copy(tmp_path: Path, monkeypatch):
+    """When ``git ls-files`` cannot run, the isolation is built by copying the
+    whole tree, so the fallback's result must actually be returned and land."""
+    from core.isolation import _copy_git_working_tree
+
+    src = tmp_path / "src"
+    (src / "pkg").mkdir(parents=True)
+    (src / "pkg" / "mod.py").write_text("VALUE = 1\n", encoding="utf-8")
+    dst = tmp_path / "dst"
+
+    def fake_run(cmd, **kwargs):
+        return SimpleNamespace(returncode=1, stdout=b"", stderr=b"not a git repo")
+
+    monkeypatch.setattr("core.isolation.subprocess.run", fake_run)
+    skipped = _copy_git_working_tree(src, dst)
+    assert isinstance(skipped, list)
+    assert (dst / "pkg" / "mod.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+
+
+def test_make_sources_readonly_does_not_lock_symlink_targets(tmp_path: Path):
+    """isolation.py:215 - only real directories inside the copy may be locked. A
+    symlink to a directory is chmod'ed straight through to its target, and that
+    target lives outside the isolated tree: it must keep its owner write bit."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    os.chmod(outside, 0o755)
+
+    root = tmp_path / "copy"
+    (root / "pkg").mkdir(parents=True)
+    (root / "pkg" / "mod.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (root / "link").symlink_to(outside, target_is_directory=True)
+
+    writable = stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH
+    try:
+        _make_sources_readonly(root)
+
+        assert is_readonly_file(root / "pkg" / "mod.py")
+        assert not (root / "pkg").stat().st_mode & writable
+        assert not root.stat().st_mode & writable
+        assert outside.stat().st_mode & stat.S_IWUSR
+    finally:
+        for path in (root / "pkg", root, outside):
+            os.chmod(path, path.stat().st_mode | stat.S_IWUSR | stat.S_IXUSR)
 
 

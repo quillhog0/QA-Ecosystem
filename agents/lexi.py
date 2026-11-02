@@ -311,6 +311,80 @@ def _extract_claims(docs_root: Path, doc_globs: tuple[str, ...]) -> list[str]:
     return claims[:50]
 
 
+# Documentation often *disclaims* an API ("the core library does not include
+# `dump`") or uses a backticked word as a prose *placeholder* ("where `rowIDs`
+# is some iterable", "pass `showindex=rowIDs`"). Neither names a real callable,
+# so neither may escalate a missing identifier to a veto. A genuine call form
+# (`divide()`) and an operator ``--strict`` run still veto. These markers are
+# deliberately conservative: they only suppress escalation, never add it.
+_DISCLAIMER_MARKERS = (
+    "does not", "do not", "don't", "doesn't", "did not",
+    "not include", "not provided", "not supported", "not implement", "not offer",
+    "not available", "no support", "is not", "are not", "cannot", "can't",
+    "instead", "counterpart", "see ", "another package", "other package",
+    "another library", "other library", "separate package", "other module",
+    "another module", "different package",
+)
+
+_PLACEHOLDER_RES_CACHE: dict[str, tuple[re.Pattern, ...]] = {}
+
+
+def _docs_plain_text(docs_root: Path, doc_globs: tuple[str, ...]) -> str:
+    """Raw text of every doc file, used only for placeholder detection."""
+    parts: list[str] = []
+    for path in list_docs(docs_root, globs=doc_globs):
+        try:
+            parts.append(path.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            continue
+    return "\n".join(parts)
+
+
+def _mentions_ident(sentence: str, ident: str) -> bool:
+    esc = re.escape(ident)
+    return bool(re.search(rf"(?<![A-Za-z0-9_])`?{esc}`?(?![A-Za-z0-9_])", sentence))
+
+
+def _claim_asserts_api(ident: str, claims: list[str]) -> bool:
+    """True when a claim sentence presents ``ident`` as an existing API.
+
+    Replaces the old blunt ``ident in claim_text`` test. Every sentence that
+    mentions the identifier alongside a disclaimer marker is ignored; the
+    identifier only asserts itself when some mentioning sentence is clean."""
+    for claim in claims:
+        for sentence in SENTENCE_SPLIT_RE.split(claim):
+            if not _mentions_ident(sentence, ident):
+                continue
+            low = sentence.lower()
+            if any(marker in low for marker in _DISCLAIMER_MARKERS):
+                continue
+            return True
+    return False
+
+
+def _is_placeholder(ident: str, docs_text: str) -> bool:
+    """A backticked word used to define a value in prose, not to name a real
+    callable. Placeholders never justify a veto."""
+    if not docs_text:
+        return False
+    compiled = _PLACEHOLDER_RES_CACHE.get(ident)
+    if compiled is None:
+        esc = re.escape(ident)
+        compiled = tuple(
+            re.compile(p, re.IGNORECASE)
+            for p in (
+                rf"where\s+`?{esc}`?\s+is\b",
+                rf"`{esc}`\s+is\s+(?:some|any|an|a)\b",
+                rf"\b{esc}\s+is\s+some\b",
+                rf"(?:e\.g\.|i\.e\.|for example)\s*[:\-]?\s*`{esc}`",
+                rf"`[^`]*[=:]\s*{esc}\b[^`]*`",
+                rf"\b{esc}\b\s*=\s*(?:some|an|a|any)\b",
+            )
+        )
+        _PLACEHOLDER_RES_CACHE[ident] = compiled
+    return any(p.search(docs_text) for p in compiled)
+
+
 def _collect_code_ast_terms(code_files: list[Path]) -> tuple[set[str], set[str]]:
     all_identifiers: set[str] = set()
     function_names: set[str] = set()
@@ -564,8 +638,11 @@ def _heuristic_drift(
     _CALL_FORM.clear()
     other_text: str | None = None
     # A missing name used in a promise ("`x` must ...") or written as a call
-    # is real drift; other backticked words are only a warning.
-    claim_text = " ".join(_extract_claims(docs_root, doc_globs))
+    # is real drift; other backticked words are only a warning. Sentences are
+    # inspected individually so a disclaimer ("does not include `dump`") or a
+    # prose placeholder ("where `rowIDs` is some iterable") never vetoes.
+    claims = _extract_claims(docs_root, doc_globs)
+    docs_plain = _docs_plain_text(docs_root, doc_globs)
     seen: set[str] = set()
     for ident in _backtick_functions(docs_root, doc_globs):
         if ident in seen:
@@ -623,7 +700,18 @@ def _heuristic_drift(
                 kind="missing_code",
                 path=ident,
                 message=f"docs mention `{ident}` but no matching module or public name exists in code",
-                severity="high" if (strict_missing or ident in _CALL_FORM or ident in claim_text or _code_shaped(ident)) else "medium",
+                severity=(
+                    "high"
+                    if (
+                        strict_missing
+                        or ident in _CALL_FORM
+                        or (
+                            not _is_placeholder(ident, docs_plain)
+                            and (_code_shaped(ident) or _claim_asserts_api(ident, claims))
+                        )
+                    )
+                    else "medium"
+                ),
             )
         )
 
@@ -671,7 +759,6 @@ def _heuristic_drift(
     high = [f for f in findings if f.severity == "high"]
     verdict = Verdict.VETO.value if high else Verdict.CLEAR.value
     notes = "drift detected" if findings else "docs, code, and tests align at identifier level"
-    claims = _extract_claims(docs_root, doc_globs)
     if findings and not high:
         notes = "minor gaps only; not a veto"
     return DriftReport(

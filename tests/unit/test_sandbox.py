@@ -509,3 +509,49 @@ def test_probe_bwrap_missing_binary_returns_false_tuple(monkeypatch: pytest.Monk
         assert failure is not None
     finally:
         sb_mod.clear_probe_cache()
+
+
+def test_probe_bwrap_off_linux_returns_false_tuple(monkeypatch: pytest.MonkeyPatch):
+    """sandbox.py:34 - the non-Linux early return still has to honour the
+    ``(usable, reason)`` contract. A bare ``None`` unpacks into a TypeError inside
+    every caller instead of reporting "bwrap unavailable"."""
+    import core.sandbox as sb_mod
+
+    def explode(*args, **kwargs):
+        raise AssertionError("must not spawn bwrap on a non-Linux platform")
+
+    monkeypatch.setattr("sys.platform", "darwin")
+    monkeypatch.setattr("core.sandbox.shutil.which", lambda _: "/usr/bin/bwrap")
+    monkeypatch.setattr("core.sandbox.subprocess.run", explode)
+
+    assert sb_mod._probe_bwrap("/usr/bin/bwrap") == (False, None)
+
+
+def test_probe_bwrap_reports_captured_diagnostics(monkeypatch: pytest.MonkeyPatch):
+    """sandbox.py:46 - the probe runs with ``capture_output=True``, so the reason
+    handed to the operator is bwrap's own last diagnostic. Without capture the
+    stderr stream is None and all that survives is a bare exit code."""
+    import core.sandbox as sb_mod
+
+    sb_mod.clear_probe_cache()
+    monkeypatch.setattr("sys.platform", "linux")
+    monkeypatch.setattr("core.sandbox.shutil.which", lambda _: "/usr/bin/bwrap")
+
+    diagnostic = "bwrap: pivot_root: Operation not permitted"
+
+    def fake_run(cmd, **kwargs):
+        captured = bool(kwargs.get("capture_output"))
+        return types.SimpleNamespace(
+            args=cmd,
+            returncode=1,
+            stdout="" if captured else None,
+            stderr=f"{diagnostic}\n" if captured else None,
+        )
+
+    monkeypatch.setattr("core.sandbox.subprocess.run", fake_run)
+    try:
+        usable, reason = sb_mod._probe_bwrap("/usr/bin/bwrap")
+        assert usable is False
+        assert reason == diagnostic
+    finally:
+        sb_mod.clear_probe_cache()

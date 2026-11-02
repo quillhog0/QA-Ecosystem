@@ -220,6 +220,39 @@ FORBIDDEN_ATTR_CALLS = {
     ("Path", "unlink"),
 }
 NETWORK_NAME_FRAGMENTS = ("urlopen", "request", "get", "post", "connect")
+# Roots whose only reason to be blocked is that they reach the network. When a
+# project's own top-level package shares one of these names (e.g. the httpx
+# test suite importing httpx), the import is a self-import, not network access,
+# so it is exempted. subprocess is never exempted (it is not a network root).
+NETWORK_FORBIDDEN_ROOTS = {"socket", "httpx", "requests", "urllib"}
+# Builtins that are dangerous in any file but can only ever be a sandbox WARN
+# (never BLOCK) in non-test source when the bwrap sandbox is active.
+BUILTIN_TRIO = {"eval", "exec", "__import__"}
+
+
+def _own_package_names(isolated_root: Path) -> set[str]:
+    """Import names that resolve to a real package directory inside the copy.
+
+    Only actual packages count - a directory holding ``__init__.py`` under
+    ``src/`` or at the copy root. The declared ``[project].name`` in
+    pyproject.toml is deliberately **not** consulted: a distribution that
+    merely calls itself ``requests`` or ``httpx`` would otherwise exempt every
+    real ``import requests`` in its test suite from the network guard, which is
+    the bypass this exemption exists to close.
+    """
+    names: set[str] = set()
+    for base in (isolated_root / "src", isolated_root):
+        if not base.is_dir():
+            continue
+        for child in base.iterdir():
+            if child.is_dir() and (child / "__init__.py").is_file():
+                names.add(child.name)
+    return names
+
+
+def _is_self_network_import(name: str, own: set[str]) -> bool:
+    root = name.split(".")[0]
+    return root in NETWORK_FORBIDDEN_ROOTS and root in own
 
 def _is_test_file(path: Path, isolated_root: Path) -> bool:
     rel = path.relative_to(isolated_root) if path.is_relative_to(isolated_root) else path
@@ -334,15 +367,28 @@ def scan_tests_for_risks(
     isolated_root: Path,
     allow_in_tests: Any = None,
     sandboxed: bool = False,
-) -> tuple[list[str], list[dict[str, str]]]:
-    """Static AST pass over tests in the isolated copy.
+) -> tuple[list[str], list[dict[str, str]], list[str]]:
+    """Static AST pass over the isolated copy.
 
-    When the run is sandboxed, file deletion cannot reach anything outside the
-    isolated copy, so deletion calls are reported as allowed instead of blocked.
+    Returns ``(hits, allowed, warnings)``. ``hits`` block the run; ``allowed``
+    lists operator- or sandbox-permitted calls; ``warnings`` are dangerous
+    operations that are only reported (never vetoed) because the bwrap sandbox
+    is active and confines them to the isolated copy:
+
+    - test files: subprocess/socket/httpx/requests/urllib imports & calls,
+      network-name calls, and eval/exec/__import__ become WARN when sandboxed;
+    - non-test source: only eval/exec/__import__ can become WARN when sandboxed
+      (everything else in source still blocks).
+
+    Without an active sandbox the behavior is unchanged: these are blocking
+    hits. Each message is tagged with the file's role (``in tests``/``in
+    source``) so a non-test finding is no longer mislabeled as "in tests".
     """
     allows = valid_allow_entries(allow_in_tests)
+    own = _own_package_names(isolated_root)
     hits: list[str] = []
     allowed: list[dict[str, str]] = []
+    warnings: list[str] = []
     seen_allowed: set[tuple[str, str, str]] = set()
     for path in _all_python_files(isolated_root):
         try:
@@ -352,8 +398,15 @@ def scan_tests_for_risks(
             continue
         rel = str(path.relative_to(isolated_root)).replace("\\", "/")
         is_test = _is_test_file(path, isolated_root)
+        role_tag = f" [in {'tests' if is_test else 'source'}]"
 
-        def _record(call: str, message: str) -> None:
+        def _record(
+            call: str,
+            message: str,
+            *,
+            kind: str = "dangerous",
+            source_warnable: bool = False,
+        ) -> None:
             match = _match_allow(rel, call, allows)
             if match:
                 key = (match["path"], match["call"], match["reason"])
@@ -368,7 +421,7 @@ def scan_tests_for_risks(
                         }
                     )
                 return
-            if sandboxed and call.split(".")[-1] in DELETE_CALLS:
+            if sandboxed and kind == "delete":
                 key = (rel, call, SANDBOX_DELETE_REASON)
                 if key not in seen_allowed:
                     seen_allowed.add(key)
@@ -376,7 +429,10 @@ def scan_tests_for_risks(
                         {"status": "ALLOWED", "path": rel, "call": call, "reason": SANDBOX_DELETE_REASON}
                     )
                 return
-            hits.append(message)
+            if sandboxed and kind == "dangerous" and (is_test or source_warnable):
+                warnings.append(message + role_tag)
+                return
+            hits.append(message + role_tag)
 
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
@@ -384,46 +440,60 @@ def scan_tests_for_risks(
                     for alias in node.names:
                         root = alias.name.split(".")[0]
                         if alias.name.startswith(FORBIDDEN_IMPORT_ROOTS) or root in FORBIDDEN_IMPORT_ROOTS:
-                            _record(alias.name, f"{rel}: import {alias.name}")
+                            if _is_self_network_import(alias.name, own):
+                                continue
+                            _record(alias.name, f"{rel}: import {alias.name}", kind="dangerous")
             elif isinstance(node, ast.ImportFrom):
                 mod = node.module or ""
                 root = mod.split(".")[0]
                 if is_test and (mod.startswith(FORBIDDEN_IMPORT_ROOTS) or root in FORBIDDEN_IMPORT_ROOTS):
-                    _record(mod or root, f"{rel}: from {mod} import ...")
+                    if not _is_self_network_import(mod, own):
+                        _record(mod or root, f"{rel}: from {mod} import ...", kind="dangerous")
                 if root == "shutil":
                     for alias in node.names:
                         if alias.name == "rmtree":
-                            _record("shutil.rmtree", f"{rel}: from shutil import rmtree")
+                            _record("shutil.rmtree", f"{rel}: from shutil import rmtree", kind="delete")
                 elif root == "os":
                     for alias in node.names:
                         if alias.name in {"system", "popen", "remove", "unlink"}:
-                            _record(f"os.{alias.name}", f"{rel}: from os import {alias.name}")
+                            _record(
+                                f"os.{alias.name}",
+                                f"{rel}: from os import {alias.name}",
+                                kind="delete" if alias.name in DELETE_CALLS else "dangerous",
+                            )
             elif isinstance(node, ast.Call):
                 parts = _call_qualname(node.func)
-                if parts and parts[-1] in {"eval", "exec", "__import__"} and (len(parts) == 1 or parts[0] in {"builtins", "__builtin__"}):
-                    _record(parts[-1], f"{rel}: call {'.'.join(parts)}")
+                if parts and parts[-1] in BUILTIN_TRIO and (len(parts) == 1 or parts[0] in {"builtins", "__builtin__"}):
+                    _record(parts[-1], f"{rel}: call {'.'.join(parts)}", kind="dangerous", source_warnable=True)
                 elif len(parts) >= 2:
                     pair = (parts[0], parts[-1])
                     if pair in FORBIDDEN_ATTR_CALLS or (parts[0], parts[1]) in FORBIDDEN_ATTR_CALLS:
                         if parts[-1] in {"remove", "unlink"} and _arg_looks_tmp(node):
                             continue
-                        _record(".".join(parts), f"{rel}: call {'.'.join(parts)}")
+                        _record(
+                            ".".join(parts),
+                            f"{rel}: call {'.'.join(parts)}",
+                            kind="delete" if parts[-1] in DELETE_CALLS else "dangerous",
+                        )
                 elif len(parts) == 1 and parts[0] in {"rmtree", "system", "popen"}:
-                    _record(parts[0], f"{rel}: call {parts[0]}")
+                    _record(parts[0], f"{rel}: call {parts[0]}", kind="delete" if parts[0] in DELETE_CALLS else "dangerous")
                 elif len(parts) == 1 and parts[0] in {"remove", "unlink"}:
                     if not _arg_looks_tmp(node):
-                        _record(parts[0], f"{rel}: call {parts[0]}")
+                        _record(parts[0], f"{rel}: call {parts[0]}", kind="delete")
                 if is_test:
                     if parts and parts[0] in {"subprocess", "socket", "httpx", "requests"}:
-                        _record(".".join(parts), f"{rel}: call {'.'.join(parts)}")
-                    if parts and parts[-1] in NETWORK_NAME_FRAGMENTS and parts[0] in {
-                        "urllib",
-                        "requests",
-                        "httpx",
-                        "socket",
-                    }:
-                        _record(".".join(parts), f"{rel}: network call {'.'.join(parts)}")
-    return hits, allowed
+                        if _is_self_network_import(parts[0], own):
+                            pass
+                        else:
+                            _record(".".join(parts), f"{rel}: call {'.'.join(parts)}", kind="dangerous")
+                    if (
+                        parts
+                        and parts[-1] in NETWORK_NAME_FRAGMENTS
+                        and parts[0] in {"urllib", "requests", "httpx", "socket"}
+                        and not _is_self_network_import(parts[0], own)
+                    ):
+                        _record(".".join(parts), f"{rel}: network call {'.'.join(parts)}", kind="dangerous")
+    return hits, allowed, warnings
 
 
 RUNTIME_GUARD_MODULE = '''\
@@ -495,12 +565,14 @@ def evaluate_preflight(
     checks["target_inside_isolated"] = len(path_hits) == 0
     blocked.extend(path_hits)
 
-    ast_hits, allowed = scan_tests_for_risks(
+    ast_hits, allowed, ast_warnings = scan_tests_for_risks(
         isolated_root, allow_in_tests=allow_in_tests, sandboxed=sandboxed
     )
     checks["tests_ast_clean"] = len(ast_hits) == 0
     if ast_hits:
-        blocked.append("unsafe operations in tests: " + "; ".join(ast_hits[:8]))
+        blocked.append("dangerous operations in isolated copy: " + "; ".join(ast_hits[:8]))
+    if ast_warnings:
+        checks["tests_ast_warned"] = True
 
     if not allow_network:
         net_bins = _network_binaries_in_command(command)
@@ -520,6 +592,7 @@ def evaluate_preflight(
         checks=checks,
         command=list(command),
         allowed=allowed,
+        warnings=ast_warnings,
     )
 
 

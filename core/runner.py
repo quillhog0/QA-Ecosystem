@@ -131,6 +131,22 @@ def _parse_counts(output: str) -> tuple[int, int, int, int, int]:
     return collected, passed, failed, skipped, errors
 
 
+def _import_roots(isolated_root: Path) -> list[str]:
+    """Directories to search before the interpreter's ``site-packages``.
+
+    A src-layout project keeps its importable package under ``<copy>/src``; the
+    copy root (already on PYTHONPATH) only covers a flat layout. Prepending
+    ``<copy>/src`` lets ``import pkg`` resolve to the isolated copy and, because
+    PYTHONPATH precedes ``site-packages``, the copy shadows any same-named
+    package leaked from the runner interpreter (e.g. a host-installed ``pluggy``).
+    """
+    roots: list[str] = []
+    src = isolated_root / "src"
+    if src.is_dir():
+        roots.append(str(src))
+    return roots
+
+
 def run_pytest(
     isolated_root: Path,
     *,
@@ -189,7 +205,10 @@ def run_pytest(
     Path(env["HOME"]).mkdir(parents=True, exist_ok=True)
     extra_path = str(isolated_root)
     work_path = str(work_dir)
-    env["PYTHONPATH"] = work_path + os.pathsep + extra_path
+    # work, then the copy root, then the copy's own import roots (src-layout).
+    # Order matters: every entry here precedes the interpreter's site-packages.
+    paths = [work_path, extra_path, *_import_roots(isolated_root)]
+    env["PYTHONPATH"] = os.pathsep.join(paths)
     env["QA_AGENT_NOVA"] = "1"
 
     started = time.monotonic()

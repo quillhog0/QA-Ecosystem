@@ -34,6 +34,21 @@ from policies import sable
 ESCALATE_DOMAIN = "ESCALATE: DOMAIN_EXPERT"
 
 
+def _relaxations_granted(policy: Any) -> bool:
+    """True when the Sable pre-flight verdict was softened by the sandbox.
+
+    Either dangerous operations were downgraded to WARN, or file deletions were
+    auto-allowed because the sandbox confines them. Both are promises about the
+    sandbox, so they may only be kept while the sandbox is really active.
+    """
+    if getattr(policy, "warnings", None):
+        return True
+    return any(
+        str(item.get("reason") or "") == sable.SANDBOX_DELETE_REASON
+        for item in (policy.allowed or [])
+    )
+
+
 class Vesper:
     def __init__(self, config: dict[str, Any]):
         self.config = config
@@ -270,6 +285,12 @@ class Vesper:
                 f"{item.get('path')} {item.get('call')} ({item.get('reason')})"
                 for item in policy.allowed
             )
+        warn_note = ""
+        if policy.warnings:
+            warn_note = (
+                f"; WARN ({len(policy.warnings)} dangerous ops allowed under sandbox): "
+                + "; ".join(policy.warnings[:8])
+            )
         append_result(
             self.role_results,
             RoleResult(
@@ -280,7 +301,8 @@ class Vesper:
                     "; ".join(policy.blocked_reasons)
                     or "pre-flight checks passed"
                 )
-                + allowed_note,
+                + allowed_note
+                + warn_note,
                 details=policy.to_dict(),
             ),
         )
@@ -288,6 +310,37 @@ class Vesper:
         if policy.verdict == Verdict.BLOCK.value:
             report.verdict = Verdict.VETO.value
             return
+
+        # TOCTOU guard: pre-flight was evaluated against the sandbox status
+        # known at init, and the runner probes again when it builds the command.
+        # If the sandbox disappeared in between, the relaxed rules must not be
+        # executed unsandboxed - re-evaluate strictly by refusing the run.
+        if _relaxations_granted(policy):
+            from core.sandbox import get_sandbox_status
+
+            sandbox_ready, sandbox_label, sandbox_error = get_sandbox_status(self.config)
+            if not sandbox_ready or sandbox_label != "bwrap":
+                append_result(
+                    self.role_results,
+                    RoleResult(
+                        role=Role.SABLE.value,
+                        stage=Stage.PREFLIGHT.value,
+                        verdict=Verdict.BLOCK.value,
+                        summary=(
+                            "sandbox is no longer active before execution ("
+                            f"{sandbox_error or sandbox_label}) - refusing to run "
+                            f"{len(policy.warnings)} sandbox-relaxed dangerous "
+                            "operations unsandboxed"
+                        ),
+                        details={
+                            "sandbox": sandbox_label,
+                            "warnings": list(policy.warnings[:8]),
+                        },
+                    ),
+                )
+                report.sandbox = sandbox_label
+                report.verdict = Verdict.VETO.value
+                return
 
         sable.install_runtime_guards(work_dir)
         _make_sources_readonly(isolated)

@@ -290,3 +290,157 @@ def test_orchestrator_suppresses_live_git_branch_in_drift(tmp_path: Path):
     assert "release" not in missing
     assert "absent_flower" in missing
     assert report.verdict == Verdict.VETO.value
+
+
+def test_install_timing_is_execute_window_minus_pytest(tmp_path: Path):
+    """The install phase is only the part of the execute window that pytest did
+    not consume, so a long pytest run with no installs yields a zero install."""
+    from core.isolation import IsolationHandle
+    from core.packets import ExecutionResult, FinalReport, HandoffPacket
+
+    project = mini_project(tmp_path / "proj")
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    vesper = Vesper({"reports_dir": str(tmp_path / "reports"), "isolation_method": "copy"})
+    handle = IsolationHandle(
+        live_root=project,
+        isolated_root=project,
+        method="copy",
+        read_only=False,
+        skipped_secrets=[],
+    )
+    packet = HandoffPacket(
+        run_id="r1",
+        stage="init",
+        from_role="vesper",
+        to_role="lexi",
+        project_root=str(project.parent),
+        docs_root=str(project / "docs"),
+        isolated_root=str(project),
+    )
+    report = FinalReport(run_id="r1", verdict=Verdict.PENDING.value)
+    slow_exec = ExecutionResult(
+        collected=1,
+        passed=0,
+        failed=1,
+        exit_code=1,
+        sandbox_status="off",
+        duration_seconds=5.0,
+    )
+    with patch("agents.nova.execute", return_value=slow_exec):
+        vesper._loop(packet, handle, work_dir, report)
+
+    assert report.timings["pytest"] == 5.0
+    assert report.timings["install"] == 0.0
+
+
+def _relaxation_loop_inputs(tmp_path: Path):
+    """A dangerous mini project plus the packet/handle/report _loop needs."""
+    from core.isolation import IsolationHandle
+    from core.packets import FinalReport, HandoffPacket
+
+    project = mini_project(tmp_path / "proj", dangerous=True)
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    handle = IsolationHandle(
+        live_root=project,
+        isolated_root=project,
+        method="copy",
+        read_only=False,
+        skipped_secrets=[],
+    )
+    packet = HandoffPacket(
+        run_id="r1",
+        stage="init",
+        from_role="vesper",
+        to_role="lexi",
+        project_root=str(project.parent),
+        docs_root=str(project / "docs"),
+        isolated_root=str(project),
+    )
+    report = FinalReport(run_id="r1", verdict=Verdict.PENDING.value)
+    # Preflight decided the sandbox was active, so dangerous ops became WARN.
+    report.sandbox = "bwrap"
+    vesper = Vesper({"reports_dir": str(tmp_path / "reports"), "isolation_method": "copy"})
+    return vesper, packet, handle, work_dir, report
+
+
+def test_sandbox_lost_after_preflight_relaxations_vetoes_without_executing(tmp_path: Path):
+    """TOCTOU: relaxations were granted because bwrap was active at pre-flight.
+
+    If the sandbox is no longer usable when execution would start, the cycle must
+    VETO instead of running the isolated copy unsandboxed under relaxed rules.
+    """
+    from core.packets import ExecutionResult
+
+    vesper, packet, handle, work_dir, report = _relaxation_loop_inputs(tmp_path)
+
+    def never_run(*args, **kwargs) -> ExecutionResult:
+        raise AssertionError("nova.execute must not run unsandboxed after relaxations")
+
+    with patch("agents.nova.execute", side_effect=never_run), patch(
+        "core.sandbox.get_sandbox_status", return_value=(False, "unavailable", None)
+    ):
+        vesper._loop(packet, handle, work_dir, report)
+
+    assert report.verdict == Verdict.VETO.value
+    assert report.sandbox == "unavailable"
+    refusals = [
+        item
+        for item in vesper.role_results
+        if item.role == "sable" and "refusing to run" in item.summary
+    ]
+    assert len(refusals) == 1
+    assert refusals[0].verdict == Verdict.BLOCK.value
+    assert refusals[0].details["sandbox"] == "unavailable"
+
+
+def test_sandbox_still_active_keeps_relaxed_preflight(tmp_path: Path):
+    """The same relaxation proceeds to execution when the sandbox is still there."""
+    from core.packets import ExecutionResult
+
+    vesper, packet, handle, work_dir, report = _relaxation_loop_inputs(tmp_path)
+    ok_exec = ExecutionResult(
+        collected=1, passed=1, failed=0, exit_code=0, sandbox_status="bwrap"
+    )
+    with patch("agents.nova.execute", return_value=ok_exec), patch(
+        "core.sandbox.get_sandbox_status", return_value=(True, "bwrap", None)
+    ):
+        vesper._loop(packet, handle, work_dir, report)
+
+    assert not [item for item in vesper.role_results if "refusing to run" in item.summary]
+    assert any(item.role == "nova" for item in vesper.role_results)
+
+
+def test_relaxations_granted_reads_warnings_and_sandbox_allows():
+    from core.orchestrator import _relaxations_granted
+    from policies import sable
+
+    class Decision:
+        def __init__(self, warnings=None, allowed=None):
+            self.warnings = warnings if warnings is not None else []
+            self.allowed = allowed if allowed is not None else []
+
+    assert _relaxations_granted(Decision()) is False
+    assert _relaxations_granted(Decision(warnings=["p.py: call eval [in source]"])) is True
+    assert (
+        _relaxations_granted(
+            Decision(
+                allowed=[
+                    {
+                        "path": "p.py",
+                        "call": "shutil.rmtree",
+                        "reason": sable.SANDBOX_DELETE_REASON,
+                    }
+                ]
+            )
+        )
+        is True
+    )
+    assert (
+        _relaxations_granted(
+            Decision(allowed=[{"path": "p.py", "call": "os.unlink", "reason": "operator allow-list"}])
+        )
+        is False
+    )
+

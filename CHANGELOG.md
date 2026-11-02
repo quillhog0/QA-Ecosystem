@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.3.3 (2026-11-02)
+
+### Changed
+- Sable reports subprocess, exec, eval and `__import__` in tests as WARN instead of BLOCK, but only when the Bubblewrap sandbox is active. In non-test source only eval, exec and `__import__` can become WARN. Without an active sandbox they still block. Findings are labelled `[in tests]` or `[in source]`.
+- A test importing the project's own package is no longer treated as network access when the package name matches a network module (for example httpx). The exemption applies only to packages backed by a directory in the copy (`<name>/__init__.py` or `src/<name>/__init__.py`), never to the declared distribution name.
+- The orchestrator probes the sandbox again after pre-flight. If WARN relaxations or sandbox-confined deletions were granted but Bubblewrap is no longer available, the run is blocked and vetoed before any test executes.
+- For src-layout projects, `src/` inside the isolated copy is added to `PYTHONPATH`, so tests import the copy instead of a same-named package installed in the runner interpreter.
+
+### Fixed
+- Lexi no longer reports drift for identifiers in disclaimers and illustrative prose, and treats names used as string literals in code as present.
+- Riley recognizes assertion helpers (for example `assert_equal` in a shared test module): one level deep, only helpers with a meaningful assertion, and only modules inside the test tree of the project.
+
+### Tests
+- Field test on 10 public Python projects: 0 false VETOs (5 CLEAR, 5 VETOs caused by genuine environment failures such as missing test dependencies).
+- Self-test mutation score 93.1% (27 killed, 2 equivalent survivors, 1 timeout).
+
 ## 0.3.2 (2026-10-30)
 
 ### Added

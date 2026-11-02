@@ -106,6 +106,39 @@ def test_sarif_lexi_maps_kinds_and_preserves_severity() -> None:
     assert "LEXI999" in by_rule
 
 
+def test_add_lexi_happy_path_returns_none_and_emits() -> None:
+    """The drift collector appends into the shared list and returns None."""
+    results: list[dict[str, Any]] = []
+    report = _minimal_report(
+        drift={
+            "findings": [
+                {"kind": "missing_code", "path": "ghost", "message": "not in code", "severity": "high"},
+            ],
+            "docs_files": [],
+            "code_files": [],
+            "test_files": [],
+        }
+    )
+    assert sarif._add_lexi(results, report) is None
+    assert [entry["ruleId"] for entry in results] == ["LEXI001"]
+
+
+def test_add_lexi_non_list_findings_returns_none_and_adds_nothing() -> None:
+    """sarif.py:344 - non-list findings are dropped by a bare early return: the
+    collector must stay None-valued, never a truthy "success" marker."""
+    results: list[dict[str, Any]] = []
+    report = _minimal_report(drift={"findings": {"kind": "missing_code"}})
+    assert sarif._add_lexi(results, report) is None
+    assert results == []
+
+
+def test_add_lexi_non_dict_drift_returns_none_and_adds_nothing() -> None:
+    """sarif.py:341 - drift that is not a mapping is ignored and emits nothing."""
+    results: list[dict[str, Any]] = []
+    assert sarif._add_lexi(results, _minimal_report(drift="VETO")) is None
+    assert results == []
+
+
 def test_sarif_lexi_location_only_for_known_relative_file() -> None:
     report = _minimal_report(
         drift={

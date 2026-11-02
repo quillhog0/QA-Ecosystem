@@ -433,3 +433,59 @@ def test_mutation_parallel_workers_match_sequential(tmp_path: Path, monkeypatch:
     # Both paths clean up every mutant tree they created.
     assert not (tmp_path / "w1" / "mutants_tree").exists()
     assert not any(p.name.startswith("mutants_tree") for p in (tmp_path / "w4").iterdir())
+
+
+def test_is_mutable_file_excludes_non_python_sources():
+    """A non-.py filename (docs, makefiles, extension-less files) is never
+    mutable source, whatever else about the name looks like code."""
+    assert is_mutable_file(Path("README.md")) is False
+    assert is_mutable_file(Path("docs/guide.txt")) is False
+    assert is_mutable_file(Path("Makefile")) is False
+    assert is_mutable_file(Path("config.yaml")) is False
+
+
+def test_mutant_ids_are_sequential_within_a_file(tmp_path: Path):
+    """Collector ids are numbered from m-1 in traversal order, so a later
+    mutant in the same file can never collide with or precede an earlier one."""
+    src = "def f(a, b):\n    return a < b and a + b > 0\n"
+    f = tmp_path / "seq.py"
+    f.write_text(src, encoding="utf-8")
+    mutants = collect_file_mutants(f, "seq.py")
+    assert len(mutants) >= 3
+    assert [m.id for m in mutants] == [f"m-{i}" for i in range(1, len(mutants) + 1)]
+
+
+def test_single_worker_uses_the_shared_mutant_tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """mutation.py:507 - ``workers == 1`` takes the sequential branch and evaluates
+    every mutant on one shared ``mutants_tree`` copy. The numbered ``mutants_tree_<i>``
+    names belong to the worker pool, so seeing one with a single worker means the
+    branch condition was inverted."""
+    import core.mutation as mutation
+    from core.packets import ExecutionResult
+
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "calc.py").write_text(
+        "def f(a, b):\n    return a + b - a * b\n", encoding="utf-8"
+    )
+
+    seen: list[str] = []
+
+    def fake_run(tree, *args, **kwargs):
+        seen.append(Path(tree).name)
+        return ExecutionResult(exit_code=1, collected=1, failed=1)
+
+    monkeypatch.setattr(mutation, "run_pytest", fake_run)
+
+    seq = mutation.run_mutation_testing(
+        proj, work_dir=tmp_path / "w1", config={"mutation": {"workers": 1}}
+    )
+    assert seq["evaluated"] >= 1
+    assert set(seen) == {"mutants_tree"}
+
+    seen.clear()
+    par = mutation.run_mutation_testing(
+        proj, work_dir=tmp_path / "w2", config={"mutation": {"workers": 2}}
+    )
+    assert par["evaluated"] >= 1
+    assert seen and all(name.startswith("mutants_tree_") for name in seen)

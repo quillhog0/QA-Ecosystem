@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 import main
 
 
@@ -73,3 +75,56 @@ def test_main_returns_1_when_project_not_a_directory(tmp_path: Path, capsys):
     )
     assert code == 1
     assert "project path is not a directory" in capsys.readouterr().err
+
+
+_MUTATION_BASELINE = (
+    "mutation:\n"
+    "  enabled: false\n"
+    "  workers: 5\n"
+    "  min_score: 0.4\n"
+    "  max_mutants: 12\n"
+)
+
+
+@pytest.mark.parametrize(
+    "extra_args,preserved_key,preserved_value,set_key,set_value",
+    [
+        (["--mutation"], "workers", 5, "enabled", True),
+        (["--mutation-min-score", "0.9"], "workers", 5, "min_score", 0.9),
+        (["--mutation-max-mutants", "7"], "workers", 5, "max_mutants", 7),
+        (["--mutation-workers", "2"], "max_mutants", 12, "workers", 2),
+    ],
+)
+def test_mutation_flags_keep_existing_mutation_settings(
+    tmp_path: Path,
+    monkeypatch,
+    extra_args: list[str],
+    preserved_key: str,
+    preserved_value: object,
+    set_key: str,
+    set_value: object,
+):
+    """main.py:158-173 - every mutation flag rebinds the configured [mutation]
+    section before overriding a single key. ``config.get("mutation") or {}`` may not
+    collapse to ``and``: that quietly throws away the operator's other settings."""
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(_MUTATION_BASELINE, encoding="utf-8")
+    docs = tmp_path / "docs.md"
+    docs.write_text("# Docs\n", encoding="utf-8")
+    _FakeVesper.captured = {}
+    monkeypatch.setattr(main, "Vesper", _FakeVesper)
+
+    code = main.main(
+        [
+            "--project", str(tmp_path),
+            "--docs", str(docs),
+            "--config", str(cfg),
+            "--reports-dir", str(tmp_path / "reports"),
+            *extra_args,
+        ]
+    )
+
+    assert code == 0
+    mutation = _FakeVesper.captured["mutation"]
+    assert mutation[preserved_key] == preserved_value
+    assert mutation[set_key] == set_value

@@ -11,6 +11,9 @@ FAILED_LINE_RE = re.compile(
     re.MULTILINE,
 )
 
+# pytest default collection: files named test_*.py or *_test.py.
+_PYTEST_COLLECTED_FILE_RE = re.compile(r"^(?:test_.*|.*_test)\.py$")
+
 
 def is_tautology_assert(stmt: ast.Assert) -> bool:
     test_node = stmt.test
@@ -94,11 +97,8 @@ def is_trivial_assert(stmt: ast.Assert) -> bool:
     return False
 
 
-def is_weak_test_node(fn_node: ast.FunctionDef | ast.AsyncFunctionDef) -> tuple[bool, str]:
-    if is_skipped_test(fn_node):
-        return True, "skipped test"
-
-    with_raises = any(
+def _raises_context_present(fn_node: ast.AST) -> bool:
+    return any(
         isinstance(n, ast.With)
         and any(
             isinstance(item.context_expr, ast.Call)
@@ -107,21 +107,237 @@ def is_weak_test_node(fn_node: ast.FunctionDef | ast.AsyncFunctionDef) -> tuple[
         )
         for n in ast.walk(fn_node)
     )
-    if with_raises:
+
+
+def _unittest_assertion_present(fn_node: ast.AST) -> bool:
+    """unittest-style assertions (self.assertEqual, self.assertRaises, self.fail)."""
+    return any(
+        isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Attribute)
+        and isinstance(n.func.value, ast.Name)
+        and n.func.value.id == "self"
+        and (n.func.attr.startswith("assert") or n.func.attr == "fail")
+        for n in ast.walk(fn_node)
+    )
+
+
+def has_meaningful_assertion(fn_node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    """True when this function performs an assertion a wrong value can fail.
+
+    Uses the same checks the test scan applies to tests: a bare ``assert`` counts
+    only when it is not tautological or trivial (``assert True``, ``x == x``,
+    ``isinstance(...)``) and not swallowed by a silent ``try/except``. A
+    ``self.assert*`` / ``self.fail`` call or a ``raises`` context counts, because
+    both fail the test when the expectation is wrong. Without the meaningfulness
+    filter, a helper body of ``assert True`` would lend its credibility to every
+    assertion-free test that calls it.
+    """
+    if _unittest_assertion_present(fn_node) or _raises_context_present(fn_node):
+        return True
+    asserts = [n for n in ast.walk(fn_node) if isinstance(n, ast.Assert)]
+    if not asserts or has_swallowed_assertions(fn_node):
+        return False
+    return any(not is_trivial_assert(a) for a in asserts)
+
+
+def _module_assertion_helpers(tree: ast.Module) -> set[str]:
+    """Names of module-level functions, and methods of module-level classes, that
+    assert meaningfully themselves (``assert_equal`` in ``test/common.py``)."""
+    names: set[str] = set()
+    for stmt in tree.body:
+        defs: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            defs.append(stmt)
+        elif isinstance(stmt, ast.ClassDef):
+            defs.extend(
+                sub
+                for sub in stmt.body
+                if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef))
+            )
+        for node in defs:
+            if has_meaningful_assertion(node):
+                names.add(node.name)
+    return names
+
+
+def _helper_source_files(path: Path, project_root: Path) -> list[Path]:
+    """Modules a test file may import assertion helpers from: the modules living
+    next to it (its test package) and ``conftest.py`` in every ancestor directory
+    up to the project root. Nothing outside the test tree is consulted."""
+    files: list[Path] = []
+    try:
+        siblings = sorted(path.parent.glob("*.py"))
+    except OSError:
+        siblings = []
+    files.extend(other for other in siblings if other != path)
+    directory = path.parent
+    while True:
+        conftest = directory / "conftest.py"
+        if conftest.is_file():
+            files.append(conftest)
+        if directory == project_root or directory == directory.parent:
+            break
+        directory = directory.parent
+    return files
+
+
+def _ancestor_dirs(path: Path, project_root: Path) -> list[Path]:
+    """Directories an unqualified import can resolve from - the test file's own
+    directory and each ancestor up to the project root, which is the search path
+    pytest builds itself. Stops at the root, so nothing outside the tree binds."""
+    directories: list[Path] = []
+    directory = path.parent
+    while True:
+        directories.append(directory)
+        if directory == project_root or directory == directory.parent:
+            break
+        directory = directory.parent
+    return directories
+
+
+def _module_file_in_tree(directory: Path, parts: tuple[str, ...]) -> Path | None:
+    """Resolve a dotted module path under ``directory`` as ``<name>.py`` or a
+    package ``<name>/__init__.py``; None when neither exists."""
+    if not parts:
+        return None
+    base = directory.joinpath(*parts)
+    as_file = base.with_suffix(".py")
+    if as_file.is_file():
+        return as_file
+    as_package = base / "__init__.py"
+    if as_package.is_file():
+        return as_package
+    return None
+
+
+def _imported_module_files(
+    tree: ast.Module, origin: Path, project_root: Path
+) -> dict[str, Path]:
+    """Binding name -> module file, for imports that resolve inside the test tree.
+
+    Covers ``import common``, ``import common as tools``, ``import pkg.mod``
+    (bound as ``pkg``), ``from . import common`` and ``from pkg import mod``.
+    Function-level imports are included because suites do use them. Anything that
+    does not map onto a file under the project root - the standard library,
+    third-party packages, fixtures - is left out, so only a real test-tree module
+    can qualify an attribute call.
+    """
+    bindings: dict[str, Path] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                # `import a.b` binds a, `import a.b as c` binds the submodule c.
+                parts = (
+                    tuple(alias.name.split("."))
+                    if alias.asname
+                    else (alias.name.split(".")[0],)
+                )
+                for directory in _ancestor_dirs(origin, project_root):
+                    found = _module_file_in_tree(directory, parts)
+                    if found is not None:
+                        bindings[alias.asname or parts[0]] = found
+                        break
+        elif isinstance(node, ast.ImportFrom):
+            if node.level > 0:
+                base = origin.parent
+                for _ in range(node.level - 1):
+                    base = base.parent
+                directories = [base]
+            else:
+                directories = _ancestor_dirs(origin, project_root)
+            mod_parts = tuple(node.module.split(".")) if node.module else ()
+            for alias in node.names:
+                for directory in directories:
+                    found = _module_file_in_tree(
+                        directory.joinpath(*mod_parts), (alias.name,)
+                    )
+                    if found is not None:
+                        bindings[alias.asname or alias.name] = found
+                        break
+    return {
+        name: module
+        for name, module in bindings.items()
+        if module.is_relative_to(project_root)
+    }
+
+
+def _module_helpers(path: Path, cache: dict[Path, frozenset[str]]) -> frozenset[str]:
+    """Assertion-helper names defined in one file, parsed at most once per scan."""
+    cached = cache.get(path)
+    if cached is not None:
+        return cached
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8-sig", errors="replace"))
+    except (OSError, SyntaxError):
+        cached = frozenset()
+    else:
+        cached = frozenset(_module_assertion_helpers(tree))
+    cache[path] = cached
+    return cached
+
+
+def _assertion_helpers(
+    path: Path,
+    tree: ast.Module,
+    project_root: Path,
+    cache: dict[Path, frozenset[str]],
+) -> tuple[frozenset[str], dict[str, frozenset[str]]]:
+    """What one test module can assert through: helper names visible in its test
+    tree, plus the helper names exported by each test-tree module it imports."""
+    names = set(_module_assertion_helpers(tree))
+    for extra in _helper_source_files(path, project_root):
+        names |= _module_helpers(extra, cache)
+    modules: dict[str, frozenset[str]] = {}
+    for binding, module in _imported_module_files(tree, path, project_root).items():
+        modules[binding] = _module_helpers(module, cache)
+    return frozenset(names), modules
+
+
+def _calls_assertion_helper(
+    fn_node: ast.FunctionDef | ast.AsyncFunctionDef,
+    helper_names: set[str] | frozenset[str],
+    module_helpers: dict[str, frozenset[str]] | None = None,
+) -> bool:
+    """True when the body calls one of the test-tree helpers: plainly
+    (``assert_equal(...)``) or through a module the test file imported
+    (``common.assert_equal(...)``). Attribute calls on anything else are not
+    resolved - a fixture, mock or handle that merely has a method sharing a
+    helper's name is not an assertion."""
+    for node in ast.walk(fn_node):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Name):
+            if func.id != fn_node.name and func.id in helper_names:
+                return True
+        elif isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+            exported = (module_helpers or {}).get(func.value.id)
+            if exported and func.attr != fn_node.name and func.attr in exported:
+                return True
+    return False
+
+
+def is_weak_test_node(
+    fn_node: ast.FunctionDef | ast.AsyncFunctionDef,
+    helper_names: frozenset[str] = frozenset(),
+    module_helpers: dict[str, frozenset[str]] | None = None,
+) -> tuple[bool, str]:
+    if is_skipped_test(fn_node):
+        return True, "skipped test"
+
+    if _raises_context_present(fn_node):
         return False, "ok"
 
     asserts = [n for n in ast.walk(fn_node) if isinstance(n, ast.Assert)]
     if not asserts:
-        # unittest-style assertions (self.assertEqual, self.assertRaises, self.fail)
-        unittest_calls = any(
-            isinstance(n, ast.Call)
-            and isinstance(n.func, ast.Attribute)
-            and isinstance(n.func.value, ast.Name)
-            and n.func.value.id == "self"
-            and (n.func.attr.startswith("assert") or n.func.attr == "fail")
-            for n in ast.walk(fn_node)
-        )
-        if unittest_calls:
+        if _unittest_assertion_present(fn_node):
+            return False, "ok"
+        # Assertion made through a helper defined in the test tree is still an
+        # assertion; without this, suites that assert via assert_equal-style
+        # helpers look like they have no assertions at all.
+        if (helper_names or module_helpers) and _calls_assertion_helper(
+            fn_node, helper_names, module_helpers
+        ):
             return False, "ok"
         return True, "no assertions"
     if all(is_tautology_assert(a) for a in asserts):
@@ -138,18 +354,30 @@ def detect_weak_tests(project_root: Path | None) -> dict[str, str]:
     if not project_root or not project_root.is_dir():
         return weak_tests
 
+    helper_cache: dict[Path, frozenset[str]] = {}
     for path in project_root.rglob("*.py"):
         if any(part in {".venv", "__pycache__", ".git"} for part in path.parts):
+            continue
+        # Only scan files pytest would actually collect (default python_files
+        # = test_*.py / *_test.py). This skips conftest.py, benchmark scripts,
+        # helpers and runner modules that merely happen to mention "test".
+        if not _PYTEST_COLLECTED_FILE_RE.match(path.name):
             continue
         rel = str(path.relative_to(project_root)).replace("\\", "/")
         try:
             tree = ast.parse(path.read_text(encoding="utf-8-sig", errors="replace"))
         except (OSError, SyntaxError):
             continue
+        helper_names, module_helpers = _assertion_helpers(
+            path, tree, project_root, helper_cache
+        )
         for node in ast.walk(tree):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                if node.name.startswith("test_") or "test" in node.name.lower():
-                    is_weak, reason = is_weak_test_node(node)
+                # Default pytest python_functions = test* — a name merely
+                # containing "test" (pytest_timeout_x, script_has_no_test_steps)
+                # is not collected, so it is not a weak test.
+                if node.name.startswith("test"):
+                    is_weak, reason = is_weak_test_node(node, helper_names, module_helpers)
                     if is_weak:
                         test_id = f"{rel}::{node.name}"
                         weak_tests[test_id] = reason

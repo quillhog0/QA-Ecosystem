@@ -44,6 +44,70 @@ def test_lexi_vetoes_backticked_divide_call_when_missing(tmp_path: Path):
     assert any(f.path == "divide" for f in report.findings)
 
 
+def test_lexi_disclaimed_api_is_not_high(tmp_path: Path):
+    """Cause 4 (tomli-like): an API named only inside a disclaimer sentence
+    ("does not include write capability") is reported but must not veto."""
+    root = mini_project(
+        tmp_path / "proj",
+        with_divide=False,
+        docs=(
+            "# Tomli\n\n"
+            "The write companion only provides `dump` and `dumps`; "
+            "this library does not include write capability.\n"
+        ),
+    )
+    report = inspect(
+        docs_root=root / "docs",
+        project_root=root,
+        config={"llm": {"provider": "none"}, "dry_run": True},
+    )
+    write_findings = [f for f in report.findings if f.path in {"dump", "dumps"}]
+    assert write_findings, "expected dump/dumps to still be reported"
+    assert all(f.severity != "high" for f in write_findings)
+    assert report.verdict != Verdict.VETO.value
+
+
+def test_lexi_prose_placeholder_is_not_high(tmp_path: Path):
+    """Cause 4 (tabulate-like): a camelCase placeholder defined in prose
+    ("where `rowIDs` is some iterable") must not escalate via its code shape."""
+    root = mini_project(
+        tmp_path / "proj",
+        with_divide=False,
+        docs=(
+            "# Tabulate\n\n"
+            "To print custom row labels, pass `showindex=rowIDs` "
+            "where `rowIDs` is some iterable.\n"
+        ),
+    )
+    report = inspect(
+        docs_root=root / "docs",
+        project_root=root,
+        config={"llm": {"provider": "none"}, "dry_run": True},
+    )
+    row_findings = [f for f in report.findings if f.path == "rowIDs"]
+    assert row_findings, "expected rowIDs to still be reported"
+    assert all(f.severity != "high" for f in row_findings)
+    assert report.verdict != Verdict.VETO.value
+
+
+def test_lexi_promised_api_without_disclaimer_is_still_high(tmp_path: Path):
+    """Cause 4 control: a genuine promised API ("must return") with no
+    disclaimer or placeholder keeps its veto."""
+    root = mini_project(
+        tmp_path / "proj",
+        with_divide=False,
+        docs="# API\n\nThe `divide` function must return a float.\n",
+    )
+    report = inspect(
+        docs_root=root / "docs",
+        project_root=root,
+        config={"llm": {"provider": "none"}, "dry_run": True},
+    )
+    div = [f for f in report.findings if f.path == "divide"]
+    assert div and div[0].severity == "high"
+    assert report.verdict == Verdict.VETO.value
+
+
 def test_lexi_ignores_config_keys_and_allowlist(tmp_path: Path):
     root = mini_project(
         tmp_path / "proj",
@@ -514,3 +578,39 @@ def test_git_ref_names_reads_head_and_refs_and_ignores_missing_git(tmp_path: Pat
     _make_git_branch(detached, head_branch="main", ref_branches=[])
     (detached / ".git" / "HEAD").write_text("0123456789abcdef\n", encoding="utf-8")
     assert _git_ref_names(detached) == set()
+
+
+def test_requirement_line_name_returns_none_for_pip_options_and_continuations():
+    """Blank, option and continuation requirement lines carry no package name:
+    the answer is None, not a truthy stand-in."""
+    assert _requirement_line_name("-r requirements.txt") is None
+    assert _requirement_line_name("--find-links https://example.invalid") is None
+    assert _requirement_line_name("pkg \\") is None
+    assert _requirement_line_name("; python_version<'3'") is None
+
+
+def test_from_llm_keeps_reported_finding_paths():
+    """An LLM-supplied finding path survives verbatim, and an absent path
+    becomes empty rather than the text 'None'."""
+    from agents.lexi import _from_llm
+    from core.packets import DriftReport
+
+    fallback = DriftReport(verdict=Verdict.CLEAR.value, notes="fallback")
+    report = _from_llm(
+        {
+            "verdict": "CLEAR",
+            "findings": [
+                {
+                    "kind": "missing_code",
+                    "path": "docs/usage.md",
+                    "message": "m1",
+                    "severity": "medium",
+                },
+                {"kind": "missing_code", "message": "m2"},
+            ],
+        },
+        fallback,
+    )
+    by_message = {f.message: f for f in report.findings}
+    assert by_message["m1"].path == "docs/usage.md"
+    assert by_message["m2"].path == ""

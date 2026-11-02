@@ -146,3 +146,63 @@ def test_run_pytest_timeout_preserves_empty_stdout(tmp_path, monkeypatch):
     assert "TIMEOUT" in res.stderr
 
 
+def test_run_pytest_injects_src_layout_import_roots(tmp_path, monkeypatch):
+    """Cause 3: PYTHONPATH gains the copy's <copy>/src import root, after the
+    work dir and copy root, so a src-layout package resolves to the copy."""
+    import os
+    from core.runner import run_pytest
+
+    iso = tmp_path / "iso"
+    work = tmp_path / "work"
+    (iso / "src" / "pkg").mkdir(parents=True)
+    (iso / "src" / "pkg" / "__init__.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (iso / "tests").mkdir()
+    (iso / "tests" / "test_x.py").write_text(
+        "import pkg\n\ndef test_v():\n    assert pkg.VALUE == 1\n", encoding="utf-8"
+    )
+    work.mkdir()
+
+    captured: dict[str, dict] = {}
+
+    class FakeProc:
+        returncode = 0
+        stdout = "collected 1 item\n========= 1 passed in 0.01s ========="
+        stderr = ""
+
+    def fake_run(cmd, **kwargs):
+        captured["env"] = kwargs.get("env") or {}
+        return FakeProc()
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    run_pytest(iso, work_dir=work, allow_network=False, config={"sandbox": {"mode": "off"}})
+
+    entries = captured["env"].get("PYTHONPATH", "").split(os.pathsep)
+    iso_root = str(iso.resolve())
+    src_root = str(iso.resolve() / "src")
+    assert iso_root in entries
+    assert src_root in entries
+    # copy root precedes its src root; both sit on PYTHONPATH, which the
+    # interpreter searches before site-packages, so the copy shadows host pkgs.
+    assert entries.index(iso_root) < entries.index(src_root)
+
+
+def test_run_pytest_src_layout_imports_the_copy(tmp_path):
+    """Cause 3 end-to-end: a src-layout test importing its own package resolves
+    to the isolated copy instead of failing with ModuleNotFoundError."""
+    from core.runner import run_pytest
+
+    iso = tmp_path / "iso"
+    work = tmp_path / "work"
+    (iso / "src" / "ownpkg").mkdir(parents=True)
+    (iso / "src" / "ownpkg" / "__init__.py").write_text("VALUE = 42\n", encoding="utf-8")
+    (iso / "tests").mkdir()
+    (iso / "tests" / "test_own.py").write_text(
+        "import ownpkg\n\n\ndef test_v():\n    assert ownpkg.VALUE == 42\n", encoding="utf-8"
+    )
+
+    res = run_pytest(iso, work_dir=work, allow_network=False, config={"sandbox": {"mode": "off"}})
+    assert res.collected == 1
+    assert res.passed == 1
+    assert res.errors == 0
+
+
