@@ -1,5 +1,5 @@
 name: "QA Ecosystem"
-description: "Deterministic QA gate: runs your tests in an isolated, sandboxed copy, maps doc claims to tests and fails on VETO."
+description: "Deterministic QA gate: runs your tests in an isolated, sandboxed copy, maps doc claims to tests and fails on VETO or BLOCKED_ENV."
 author: "quillhog0"
 branding:
   icon: "shield"
@@ -45,7 +45,7 @@ inputs:
 
 outputs:
   verdict:
-    description: "Final verdict (CLEAR, VETO or ESCALATE)."
+    description: "Final verdict (CLEAR, VETO, BLOCKED_ENV or ESCALATE). Exit code 0 = CLEAR, 2 = BLOCKED_ENV, 1 = VETO or ESCALATE; every non-zero code fails the step."
     value: ${{ steps.run.outputs.verdict }}
   report:
     description: "Path to the Markdown report."
@@ -101,6 +101,9 @@ runs:
         verdict=$(grep -m1 '^verdict=' "$RUNNER_TEMP/qa-out.txt" | cut -d= -f2)
         report=$(grep -m1 '^report=' "$RUNNER_TEMP/qa-out.txt" | cut -d= -f2-)
         echo "verdict=$verdict" >> "$GITHUB_OUTPUT"
+        if [ "$verdict" = "BLOCKED_ENV" ]; then
+          echo "::warning title=QA environment blocked::The tests could not run because of an environment precondition (exit 2). The report names the exact cause; no defect is claimed against the project."
+        fi
         echo "report=$report" >> "$GITHUB_OUTPUT"
         if [ -n "$sarif_path" ] && [ -f "$sarif_path" ]; then
           echo "sarif=$sarif_path" >> "$GITHUB_OUTPUT"

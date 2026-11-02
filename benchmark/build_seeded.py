@@ -272,9 +272,12 @@ def build():
             (proj_dir / spec["code_name"]).write_text(spec["code"], encoding="utf-8")
 
 
+        # A missing dependency stops the run for environmental reasons, so the
+        # expected verdict is BLOCKED_ENV (exit 2) rather than an accusing VETO.
+        verdict = "BLOCKED_ENV" if spec["category"] == "missing_dep" else "VETO"
         expected_yaml = (
             f"category: {spec['category']}\n"
-            f"verdict: VETO\n"
+            f"verdict: {verdict}\n"
             f"description: \"{spec['description']}\"\n"
         )
         (proj_dir / "expected.yaml").write_text(expected_yaml, encoding="utf-8")

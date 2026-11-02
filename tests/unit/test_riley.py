@@ -79,14 +79,14 @@ def test_riley_collection_error_missing_dependency():
     review = review_results(
         plan, execution, config={"llm": {"provider": "none"}, "dry_run": True}
     )
-    assert review.verdict == Verdict.VETO.value
+    assert review.verdict == Verdict.BLOCKED_ENV.value
     assert "missing dependency: qa_nonexistent_pkg_xyz" in review.root_cause
 
 
 def test_riley_parses_missing_dependency_from_stderr_only():
-    """riley.py:565 - pytest reports import-time collection errors on stderr. The
-    stderr half of the root-cause parse must not be dropped, or the veto degrades
-    to the generic 'pytest reported collection or runtime errors' message."""
+    """pytest reports import-time collection errors on stderr. The stderr half of
+    the root-cause parse must not be dropped, or the cause degrades to the generic
+    'pytest reported collection or runtime errors' message."""
     plan = TestPlan(
         scenarios=[
             Scenario(
@@ -120,7 +120,7 @@ def test_riley_parses_missing_dependency_from_stderr_only():
     review = review_results(
         plan, execution, config={"llm": {"provider": "none"}, "dry_run": True}
     )
-    assert review.verdict == Verdict.VETO.value
+    assert review.verdict == Verdict.BLOCKED_ENV.value
     assert "missing dependency: qa_stderr_only_pkg_xyz" in review.root_cause
 
 
@@ -329,7 +329,9 @@ def test_riley_ast_detects_weak_tests_and_vetoes_uncovered_claim(tmp_path):
     assert "weak test detected" in res_rev.root_cause
 
 
-def test_riley_vetoes_when_pip_install_failed():
+def test_riley_blocks_when_pip_install_refused():
+    """A refused unsafe requirement is an environment stop, not an accusation:
+    the suite itself passed, so the run is BLOCKED_ENV and names the refusal."""
     plan = TestPlan(
         scenarios=[
             Scenario(id="S1", title="happy", steps=["run"], acceptance=["ok"], negative=False),
@@ -348,8 +350,80 @@ def test_riley_vetoes_when_pip_install_failed():
     }
     rev = review_results(plan, execution, config={"llm": {"provider": "none"}, "dry_run": True})
     assert rev is not None
+    assert rev.verdict == Verdict.BLOCKED_ENV.value
+    assert "refused unsafe requirement: git+https://example.com/repo.git" in rev.root_cause
+
+
+def test_riley_blocks_when_pip_install_fails_for_another_reason():
+    """An install failure that is not a policy refusal (here a timeout) is still
+    environmental, and keeps the install status as the exact cause."""
+    plan = TestPlan(
+        scenarios=[
+            Scenario(id="S1", title="happy", steps=["run"], acceptance=["ok"], negative=False),
+            Scenario(id="S2", title="negative", steps=["run"], acceptance=["fail"], negative=True),
+        ]
+    )
+    execution = {
+        "collected": 0,
+        "passed": 0,
+        "failed": 0,
+        "errors": 0,
+        "exit_code": 1,
+        "install_status": "pip install failed: timed out",
+        "stdout": "",
+        "stderr": "",
+    }
+    rev = review_results(plan, execution, config={"llm": {"provider": "none"}, "dry_run": True})
+    assert rev.verdict == Verdict.BLOCKED_ENV.value
+    assert "dependency installation failed: pip install failed: timed out" in rev.root_cause
+
+
+def test_riley_still_vetoes_a_real_failure_with_a_missing_dependency_present():
+    """failed > 0 outranks every environmental cause: a broken assertion next to
+    an import error is still an accusation against the project."""
+    plan = TestPlan(
+        scenarios=[
+            Scenario(id="S1", title="happy", steps=["run"], acceptance=["ok"], negative=False),
+            Scenario(id="S2", title="negative", steps=["run"], acceptance=["fail"], negative=True),
+        ]
+    )
+    execution = {
+        "collected": 2,
+        "passed": 1,
+        "failed": 1,
+        "errors": 1,
+        "exit_code": 1,
+        "install_status": "skipped",
+        "stdout": "FAILED tests/test_calculator.py::test_add - assert 5 == 0",
+        "stderr": "ModuleNotFoundError: No module named 'qa_also_missing_pkg'",
+    }
+    rev = review_results(plan, execution, config={"llm": {"provider": "none"}, "dry_run": True})
     assert rev.verdict == Verdict.VETO.value
-    assert "dependency installation failed" in rev.root_cause
+    assert "test_add" in rev.root_cause
+
+
+def test_riley_vetoes_an_unexplained_empty_collection():
+    """No tests and no environmental cause is still a technical veto: an empty
+    test tree must not be excused as an environment problem."""
+    plan = TestPlan(
+        scenarios=[
+            Scenario(id="S1", title="happy", steps=["run"], acceptance=["ok"], negative=False),
+            Scenario(id="S2", title="negative", steps=["run"], acceptance=["fail"], negative=True),
+        ]
+    )
+    execution = {
+        "collected": 0,
+        "passed": 0,
+        "failed": 0,
+        "errors": 0,
+        "exit_code": 5,
+        "install_status": "no dependency manifest",
+        "stdout": "no tests ran in 0.01s",
+        "stderr": "",
+    }
+    rev = review_results(plan, execution, config={"llm": {"provider": "none"}, "dry_run": True})
+    assert rev.verdict == Verdict.VETO.value
+    assert rev.root_cause == "Nova collected zero tests, so results cannot witness the plan"
 
 
 

@@ -1,0 +1,67 @@
+# Expected field-test results for the pins in benchmark/field_repos.yaml.
+#
+# Every cause below was read from a real run of this tree against those exact
+# commits (reports/field-test-20261102T072327Z.md plus the per-repo YAML under
+# reports/field-runs-20261102T072327Z/). The five BLOCKED_ENV rows are environment
+# preconditions, not repository defects: this tool runs offline and never builds
+# or installs the project under test, so a suite that needs an installed
+# distribution, a build artifact or an undeclared dev dependency cannot run.
+#
+# Fields:
+#   verdict        - exact final verdict (or accept_verdicts for a list)
+#   exit_code      - exact process exit code (0 CLEAR, 1 VETO/ESCALATE, 2 BLOCKED_ENV)
+#   cause          - substring of the reported root cause
+#   min_collected / min_passed / min_failed / min_skipped / min_errors
+#                  - floors observed on the reference interpreter; they catch a
+#                    suite that silently stops collecting or starts skipping
+expectations:
+  attrs:
+    verdict: BLOCKED_ENV
+    exit_code: 2
+    cause: "missing dependency: hypothesis"
+  click:
+    verdict: BLOCKED_ENV
+    exit_code: 2
+    cause: "missing package metadata: click"
+  httpx:
+    # The refused editable install is the cause the report names, ahead of the
+    # import errors it produced: install_status is "pip install failed: unsafe
+    # requirement: -e .[brotli,cli,http2,socks,zstd]" (observed in
+    # reports/field-test-20261102T082252Z.md), and every "No module named" line in
+    # the collection output is a symptom of that refusal.
+    verdict: BLOCKED_ENV
+    exit_code: 2
+    cause: "refused unsafe requirement: -e .[brotli,cli,http2,socks,zstd]"
+  humanize:
+    verdict: BLOCKED_ENV
+    exit_code: 2
+    cause: "generated module absent: humanize._version"
+  itsdangerous:
+    verdict: BLOCKED_ENV
+    exit_code: 2
+    cause: "missing dependency: freezegun"
+  more-itertools:
+    verdict: CLEAR
+    exit_code: 0
+    min_collected: 769
+    min_passed: 769
+  pluggy:
+    verdict: CLEAR
+    exit_code: 0
+    min_collected: 226
+    min_passed: 226
+  python-slugify:
+    verdict: CLEAR
+    exit_code: 0
+    min_collected: 133
+    min_passed: 133
+  python-tabulate:
+    verdict: CLEAR
+    exit_code: 0
+    min_collected: 383
+    min_passed: 323
+  tomli:
+    verdict: CLEAR
+    exit_code: 0
+    min_collected: 18
+    min_passed: 17

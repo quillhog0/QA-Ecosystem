@@ -53,6 +53,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Permit network for the isolated pytest process (off by default)",
     )
     parser.add_argument(
+        "--llm-network",
+        action="store_true",
+        help="Permit network only for the QA process's own LLM provider call; "
+        "the tested project's pytest run still stays offline (off by default)",
+    )
+    parser.add_argument(
         "--no-dry-run",
         action="store_true",
         help="Allow optional LLM calls when configured; still never deletes the live tree",
@@ -145,6 +151,9 @@ def main(argv: list[str] | None = None) -> int:
         config["dry_run"] = False
     if args.allow_network:
         config["allow_network"] = True
+    if args.llm_network:
+        config["llm"] = dict(config.get("llm") or {})
+        config["llm"]["allow_network"] = True
     if args.strict:
         config.setdefault("riley", {})
         config["riley"] = dict(config.get("riley") or {})

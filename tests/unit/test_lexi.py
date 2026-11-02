@@ -91,8 +91,30 @@ def test_lexi_prose_placeholder_is_not_high(tmp_path: Path):
 
 
 def test_lexi_promised_api_without_disclaimer_is_still_high(tmp_path: Path):
-    """Cause 4 control: a genuine promised API ("must return") with no
-    disclaimer or placeholder keeps its veto."""
+    """Cause 4 control, re-anchored for fix A: a genuine promised API still
+    vetoes, but only on code-shaped evidence. Here `divide` is enumerated
+    beside `add`, which really exists (the doc_drift shape), so the plain word
+    is anchored to an API surface rather than read as prose. Fix A deliberately
+    no longer vetoes a *lone* plain ``divide`` with a promise and no anchor."""
+    root = mini_project(
+        tmp_path / "proj",
+        with_divide=False,
+        docs="# API\n\nPublic API includes `add` and `divide`.\n\n`divide` must return a float.\n",
+    )
+    report = inspect(
+        docs_root=root / "docs",
+        project_root=root,
+        config={"llm": {"provider": "none"}, "dry_run": True},
+    )
+    div = [f for f in report.findings if f.path == "divide"]
+    assert div and div[0].severity == "high"
+    assert report.verdict == Verdict.VETO.value
+
+
+def test_lexi_lone_plain_prose_word_is_never_high(tmp_path: Path):
+    """Fix A: a single backticked plain word with an English promise, no call
+    form, no code shape and no resolvable sibling, is a warning at most - never
+    a veto - even though it reads like a promise."""
     root = mini_project(
         tmp_path / "proj",
         with_divide=False,
@@ -104,8 +126,9 @@ def test_lexi_promised_api_without_disclaimer_is_still_high(tmp_path: Path):
         config={"llm": {"provider": "none"}, "dry_run": True},
     )
     div = [f for f in report.findings if f.path == "divide"]
-    assert div and div[0].severity == "high"
-    assert report.verdict == Verdict.VETO.value
+    assert div, "the promise should still be reported"
+    assert all(f.severity != "high" for f in div)
+    assert report.verdict != Verdict.VETO.value
 
 
 def test_lexi_ignores_config_keys_and_allowlist(tmp_path: Path):
@@ -469,7 +492,69 @@ def test_lexi_reports_contradiction_when_execution_collects_zero(tmp_path: Path)
         config={"llm": {"provider": "none"}, "dry_run": True},
         execution={"collected": 0, "passed": 0, "failed": 0, "errors": 0, "exit_code": 0},
     )
-    assert any(f.kind == "contradiction" for f in report.findings)
+    contradictions = [f for f in report.findings if f.kind == "contradiction"]
+    assert len(contradictions) == 1
+    # Nothing explains the empty collection, so it stays above the veto line.
+    assert contradictions[0].severity == "high"
+    assert "environment blocked" not in contradictions[0].message
+
+
+def test_an_environmental_empty_collection_is_not_a_contradiction_veto(tmp_path: Path):
+    """A suite that could not run disagrees with nothing: keep the finding, but
+    below the veto line, and name the precondition."""
+    root = mini_project(tmp_path / "proj")
+    report = inspect(
+        docs_root=root / "docs",
+        project_root=root,
+        config={"llm": {"provider": "none"}, "dry_run": True},
+        execution={
+            "collected": 0,
+            "passed": 0,
+            "failed": 0,
+            "errors": 1,
+            "exit_code": 2,
+            "stderr": "E   ModuleNotFoundError: No module named 'qa_absent_dep'",
+        },
+    )
+    contradictions = [f for f in report.findings if f.kind == "contradiction"]
+    assert len(contradictions) == 1
+    assert contradictions[0].severity == "medium"
+    assert "environment blocked: missing dependency: qa_absent_dep" in contradictions[0].message
+    assert report.verdict == "CLEAR"
+    assert report.notes == "minor gaps only; not a veto"
+
+
+def test_an_unexplained_empty_collection_still_vetoes_drift(tmp_path: Path):
+    root = mini_project(tmp_path / "proj")
+    report = inspect(
+        docs_root=root / "docs",
+        project_root=root,
+        config={"llm": {"provider": "none"}, "dry_run": True},
+        execution={"collected": 0, "passed": 0, "failed": 0, "errors": 0, "exit_code": 5,
+                   "stdout": "no tests ran in 0.01s"},
+    )
+    assert [f.severity for f in report.findings if f.kind == "contradiction"] == ["high"]
+    assert report.verdict == "VETO"
+
+
+def test_a_failing_test_with_a_missing_dependency_keeps_the_contradiction_high(tmp_path: Path):
+    """classify_execution refuses to explain a run in which a test failed."""
+    root = mini_project(tmp_path / "proj")
+    report = inspect(
+        docs_root=root / "docs",
+        project_root=root,
+        config={"llm": {"provider": "none"}, "dry_run": True},
+        execution={
+            "collected": 0,
+            "passed": 0,
+            "failed": 1,
+            "errors": 1,
+            "exit_code": 1,
+            "stderr": "E   ModuleNotFoundError: No module named 'qa_absent_dep'",
+        },
+    )
+    assert [f.severity for f in report.findings if f.kind == "contradiction"] == ["high"]
+    assert report.verdict == "VETO"
 
 
 def test_requirement_line_name_returns_none_for_non_requirement_lines():

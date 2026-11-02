@@ -1,0 +1,53 @@
+# Field-test manifest: public repositories pinned to an exact commit.
+#
+# Every entry is cloned shallow at `sha` (see benchmark/field_test.py). The
+# clone is the only network step in the whole survey and it happens in the
+# harness, outside the QA run; each main.py invocation keeps allow_network=false
+# and never builds or installs the project under test.
+#
+# `docs` is the documentation file handed to main.py --docs. Repos without an
+# explicit entry fall back to README.md, then README.rst, then README.txt.
+#
+# To move a pin: clone/fetch the new commit, record `git rev-parse HEAD` here,
+# and refresh benchmark/field_expected.yaml from a real run.
+repos:
+  - name: attrs
+    url: https://github.com/python-attrs/attrs.git
+    sha: c8bb9bfaa2843e7844b5bb13bed4370b51feec4f
+    docs: README.md
+  - name: click
+    url: https://github.com/pallets/click.git
+    sha: 2247b35ea1c47c727d7a06e51fa280e12a863ff6
+    docs: README.md
+  - name: httpx
+    url: https://github.com/encode/httpx.git
+    sha: b5addb64f0161ff6bfe94c124ef76f6a1fba5254
+    docs: README.md
+  - name: humanize
+    url: https://github.com/python-humanize/humanize.git
+    sha: 6b817b963dbb091b9ad20a746cb6a26653a93b95
+    docs: README.md
+  - name: itsdangerous
+    url: https://github.com/pallets/itsdangerous.git
+    sha: 672971d66a2ef9f85151e53283113f33d642dabd
+    docs: README.md
+  - name: more-itertools
+    url: https://github.com/more-itertools/more-itertools.git
+    sha: 08dca284ba5446a026afdc34067b658f9da989eb
+    docs: README.rst
+  - name: pluggy
+    url: https://github.com/pytest-dev/pluggy.git
+    sha: 3fc9e561ea7e72a95549673d79ebdaf4a9fae829
+    docs: README.rst
+  - name: python-slugify
+    url: https://github.com/un33k/python-slugify.git
+    sha: 35aca63fc2672cba2c739ff6dff685a4f26a4f9a
+    docs: README.md
+  - name: python-tabulate
+    url: https://github.com/astanin/python-tabulate.git
+    sha: 268615a5c27dc40e5c22454c07b44d5c50410da0
+    docs: README.md
+  - name: tomli
+    url: https://github.com/hukkin/tomli.git
+    sha: 43a86ade8b795c6ef9b4ec53372a607cd1ed426f
+    docs: README.md

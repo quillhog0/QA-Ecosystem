@@ -13,6 +13,7 @@ from policies.sable import (
     _all_python_files,
     _arg_looks_tmp,
     _command_is_pytest_only,
+    _looks_like_live_root,
     install_runtime_guards,
 )
 
@@ -557,5 +558,51 @@ def test_sable_records_bare_remove_and_unlink_calls(tmp_path: Path):
     hits, _, _ = scan_tests_for_risks(iso)
     assert any("call remove" in h for h in hits)
     assert any("call unlink" in h for h in hits)
+
+
+def test_live_root_comparison_blocks_a_run_on_the_working_tree(tmp_path: Path):
+    """policies/sable.py:121 - the equality result is the only thing standing
+    between a run and the live tree, so it must be a real truthy value and the
+    pre-flight must refuse: a falsy None here would silently allow it."""
+    live = tmp_path / "live"
+    live.mkdir()
+    other = tmp_path / "iso"
+    other.mkdir()
+    assert _looks_like_live_root(live, live) is True
+    assert _looks_like_live_root(other, live) is False
+
+    decision = evaluate_preflight(
+        command=_pytest_cmd(live),
+        isolated_root=live,
+        live_root=live,
+        allow_network=False,
+        env={},
+        cwd=live,
+    )
+    assert decision.verdict == Verdict.BLOCK.value
+    assert decision.checks["not_live_tree"] is False
+    assert any("live working tree" in reason for reason in decision.blocked_reasons)
+
+
+def test_allow_entry_for_a_from_import_names_the_module_not_its_root(tmp_path: Path):
+    """policies/sable.py:451 - a `from <module> import ...` is recorded under the
+    module actually imported (`urllib.parse`), not its root (`urllib`), so an
+    allow-list entry cannot be stretched across different submodules."""
+    iso = tmp_path / "iso"
+    tests = iso / "tests"
+    tests.mkdir(parents=True)
+    (tests / "test_urls.py").write_text("from urllib.parse import quote\n", encoding="utf-8")
+
+    hits, _, _ = scan_tests_for_risks(iso)
+    assert any("from urllib.parse import" in h for h in hits)
+
+    allows = [{"path": "tests/test_urls.py", "call": "urllib.parse", "reason": "percent-encoding helper"}]
+    hits, allowed, _ = scan_tests_for_risks(iso, allows)
+    assert not hits
+    assert [item["call"] for item in allowed] == ["urllib.parse"]
+
+    root_only = [{"path": "tests/test_urls.py", "call": "urllib", "reason": "naming the root is not enough"}]
+    hits, _, _ = scan_tests_for_risks(iso, root_only)
+    assert any("urllib.parse" in h for h in hits)
 
 

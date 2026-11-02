@@ -123,26 +123,29 @@ class Vesper:
         )
         report.timings = {"isolation": round(_isolation_seconds, 3)}
 
+        blocked_reason = ""
         if failure_reason:
+            # A required sandbox that cannot start is an environment stop, not an
+            # accusation against the project. The cycle still runs Lexi, Aria,
+            # Riley and the Sable pre-flight (strictly, because sandboxed=False),
+            # so dangerous code is still VETOed; only execution is skipped.
+            # Staying on the normal path also releases the isolated copy, which
+            # the previous early return leaked.
+            blocked_reason = f"sandbox required but bwrap unavailable: {failure_reason}"
             append_result(
                 self.role_results,
                 RoleResult(
                     role=Role.VESPER.value,
                     stage=Stage.INIT.value,
-                    verdict=Verdict.VETO.value,
-                    summary=f"sandbox required but bwrap unavailable: {failure_reason}",
+                    verdict=Verdict.BLOCKED_ENV.value,
+                    summary=blocked_reason,
                     details={"sandbox": sandbox_status, "error": failure_reason},
                 ),
             )
-            report.verdict = Verdict.VETO.value
-            report.role_results = list(self.role_results)
-            report.finished_at = utc_now()
-            write_reports(report, base)
-            return report
 
         try:
             try:
-                self._loop(packet, isolation, work_dir, report)
+                self._loop(packet, isolation, work_dir, report, blocked_reason=blocked_reason)
             finally:
                 report.role_results = list(self.role_results)
                 report.finished_at = utc_now()
@@ -157,12 +160,14 @@ class Vesper:
         isolation: IsolationHandle,
         work_dir: Path,
         report: FinalReport,
+        blocked_reason: str = "",
     ) -> None:
         isolated = isolation.isolated_root
         docs = Path(packet.docs_root)
 
         # 1. Lexi drift check
         drift = None
+        drift_veto = False
         for attempt in range(1, self.max_stage_iterations + 1):
             packet = packet.next(
                 stage=Stage.DRIFT_CHECK.value,
@@ -190,10 +195,14 @@ class Vesper:
             report.drift = drift.to_dict()
             if drift.verdict != Verdict.VETO.value:
                 break
-            # Drift is not something this loop can patch; stop after first veto.
-            report.verdict = Verdict.VETO.value
-            report.escalation = ""
-            return
+            # A drift veto is an accusation, not a reason to stop looking. Lexi
+            # cannot patch documentation in this loop, so it vetoes once and the
+            # pipeline keeps going: the operator still gets Riley, Sable and Nova,
+            # and the report shows what the tests actually did. The veto itself is
+            # applied in the final hierarchy below, where it outranks an
+            # environmental stop and a clean run.
+            drift_veto = True
+            break
 
         assert drift is not None
 
@@ -253,6 +262,11 @@ class Vesper:
                 break
             gaps = review.gaps + review.required_changes
             if attempt >= self.max_stage_iterations:
+                if drift_veto:
+                    # The answer is already a veto from the drift stage; an
+                    # escalation would replace it with a different one. Keep the
+                    # accusation intact and let execution still be reported.
+                    break
                 report.verdict = Verdict.ESCALATE.value
                 report.escalation = ESCALATE_DOMAIN
                 return
@@ -342,6 +356,27 @@ class Vesper:
                 report.verdict = Verdict.VETO.value
                 return
 
+        if blocked_reason:
+            # Nothing may execute without the required sandbox. Every stage above
+            # already ran, so a dangerous project has been VETOed by now and an
+            # environment stop is only reported for a project that passed them.
+            # A drift veto held from stage 1 still outranks the environment stop:
+            # the accusation was already made, and losing it here would make the
+            # hierarchy depend on whether a sandbox happened to be available.
+            report.post_audit = {"root_cause": blocked_reason}
+            report.mutation = {
+                "status": "skipped",
+                "reason": (
+                    "drift veto: docs and code disagree"
+                    if drift_veto
+                    else "environment blocked before execution"
+                ),
+            }
+            report.verdict = (
+                Verdict.VETO.value if drift_veto else Verdict.BLOCKED_ENV.value
+            )
+            return
+
         sable.install_runtime_guards(work_dir)
         _make_sources_readonly(isolated)
         isolation.read_only = True
@@ -386,6 +421,12 @@ class Vesper:
                     f"failed={execution.failed} exit={execution.exit_code} "
                     f"duration={execution.duration_seconds}s install={execution.install_status} "
                     + (
+                        f"product_failed={execution.product_failed} "
+                        f"environment_failed={execution.environment_failed} "
+                        if execution.failures
+                        else ""
+                    )
+                    + (
                         "sandbox: unavailable (ran unsandboxed)"
                         if execution.sandbox_status == "unavailable"
                         else f"sandbox: {execution.sandbox_status} (ran unsandboxed)"
@@ -399,6 +440,9 @@ class Vesper:
                     "failed": execution.failed,
                     "skipped": execution.skipped,
                     "errors": execution.errors,
+                    "product_failed": execution.product_failed,
+                    "environment_failed": execution.environment_failed,
+                    "failures": execution.to_dict().get("failures") or [],
                     "exit_code": execution.exit_code,
                     "duration_seconds": execution.duration_seconds,
                     "command": execution.command,
@@ -480,18 +524,52 @@ class Vesper:
             "root_cause": root_cause,
         }
 
-        # Veto hierarchy: Sable > Riley > Lexi (Sable applied first)
+        # Veto hierarchy: Sable > Riley > Lexi (Sable applied first). An
+        # environmental stop may only soften the technical blocks that say "the
+        # tests did not run"; it never softens a real accusation, and Riley
+        # returns BLOCKED_ENV only when no test failed.
+        env_blocked = result_review.verdict == Verdict.BLOCKED_ENV.value
         if post_policy.verdict == Verdict.BLOCK.value:
-            report.mutation = {"status": "skipped", "reason": "baseline tests did not pass"}
-            report.verdict = Verdict.VETO.value
+            # Sable's post-execution block only says the baseline did not pass, so
+            # an environmental cause can soften it - except a command that is not
+            # pytest-only, which is a policy violation on its own.
+            blocked_by_env = env_blocked and post_policy.checks.get("pytest_only", False)
+            report.mutation = {
+                "status": "skipped",
+                "reason": (
+                    "environment blocked: the tests could not run"
+                    if blocked_by_env
+                    else "baseline tests did not pass"
+                ),
+            }
+            report.verdict = (
+                Verdict.BLOCKED_ENV.value if blocked_by_env else Verdict.VETO.value
+            )
             return
-        if nova_failed or result_review.verdict == Verdict.VETO.value:
+        if (nova_failed and not env_blocked) or result_review.verdict == Verdict.VETO.value:
             report.mutation = {"status": "skipped", "reason": "baseline tests did not pass"}
             report.verdict = Verdict.VETO.value
             return
         if post_drift.verdict == Verdict.VETO.value:
             report.mutation = {"status": "skipped", "reason": "baseline tests did not pass"}
             report.verdict = Verdict.VETO.value
+            return
+        if drift_veto:
+            # The stage-1 drift veto: same rank as the post-audit one, applied
+            # after Sable and Riley so a stronger accusation is never hidden, and
+            # before the environmental softening so a veto is never downgraded.
+            report.mutation = {
+                "status": "skipped",
+                "reason": "drift veto: docs and code disagree",
+            }
+            report.verdict = Verdict.VETO.value
+            return
+        if env_blocked:
+            report.mutation = {
+                "status": "skipped",
+                "reason": "environment blocked: the tests could not run",
+            }
+            report.verdict = Verdict.BLOCKED_ENV.value
             return
 
         mutation_cfg = dict(self.config.get("mutation") or {})

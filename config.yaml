@@ -31,6 +31,9 @@ llm:
   model: openai/gpt-4o-mini
   call_in_dry_run: false
   timeout_seconds: 45
+  # Lets only the QA process reach the provider. The tested project's pytest
+  # run stays offline; that is governed separately by top-level allow_network.
+  allow_network: false
   # base_url: http://127.0.0.1:11434/v1
 
 pytest:

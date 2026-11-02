@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import configparser
 import os
 import re
 import sys
 import time
+import tomllib
 from pathlib import Path
 from typing import Any
 
+from core.environment import annotate_failures
+from core.junit import parse_failures
 from core.packets import ExecutionResult
 
 COLLECTED_RE = re.compile(r"collected\s+(\d+)\s+item", re.IGNORECASE)
@@ -73,6 +77,88 @@ def sanitized_env(*, allow_network: bool) -> dict[str, str]:
     return env
 
 
+def _ini_testpaths(isolated_root: Path) -> list[str]:
+    """The project's own ``testpaths``, read from whichever ini pytest prefers.
+
+    pytest's ini precedence is honoured (``pytest.ini``, then ``pyproject.toml``,
+    then ``tox.ini``, then ``setup.cfg``) and the first file that declares the key
+    wins - including one that declares it empty, which means "no declared paths".
+    Nothing is executed and nothing outside the copy is read.
+    """
+    candidates = (
+        ("pytest.ini", "pytest", "testpaths"),
+        ("pyproject.toml", "tool.pytest.ini_options", "testpaths"),
+        ("tox.ini", "pytest", "testpaths"),
+        ("setup.cfg", "tool:pytest", "testpaths"),
+    )
+    for name, section, key in candidates:
+        path = isolated_root / name
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if name == "pyproject.toml":
+            try:
+                data = tomllib.loads(text)
+            except (OSError, ValueError):
+                continue
+            options = ((data or {}).get("tool") or {}).get("pytest") or {}
+            value = (options.get("ini_options") or {}).get(key)
+        else:
+            parser = configparser.ConfigParser()
+            try:
+                parser.read_string(text)
+            except configparser.Error:
+                continue
+            if not parser.has_section(section):
+                continue
+            value = parser.get(section, key, fallback=None)
+        if isinstance(value, str):
+            # ini files list them whitespace-separated across lines.
+            return [part for part in value.split() if part]
+        if isinstance(value, list):
+            return [str(part) for part in value if str(part).strip()]
+        if value is not None:
+            return []
+    return []
+
+
+def _collection_args(isolated_root: Path) -> list[str]:
+    """What pytest should collect, in the project's own words.
+
+    Passing the copy root as a positional argument is what pytest does when a
+    developer runs it from inside the checkout *without* a declared ``testpaths``,
+    but it silently overrides ``testpaths`` when the project has them: QA would
+    then judge the suite on files the project's own CI never runs (in practice:
+    stray root-level ``test_*.py`` scratch files). Reading the declared paths and
+    handing them over explicitly keeps QA and CI collecting the same tests, and
+    keeps rootdir, ``pythonpath`` and ini discovery anchored in the copy.
+    """
+    declared = _ini_testpaths(isolated_root)
+    if declared:
+        existing = [
+            str((isolated_root / entry).resolve())
+            for entry in declared
+            if (isolated_root / entry).exists()
+        ]
+        if existing:
+            return existing
+    return [str(isolated_root)]
+
+
+def junit_path_for(work_dir: Path) -> Path:
+    """Where the JUnit XML of one run lives: inside the sandbox-writable tmp tree.
+
+    ``work_dir`` itself is mounted read-only in the sandbox and only
+    ``pytest_cache``, ``pytest_tmp`` and ``home`` are writable, so the XML goes
+    under ``pytest_tmp`` - but *beside* the ``--basetemp`` directory, which pytest
+    wipes at session start.
+    """
+    return work_dir / "pytest_tmp" / "junit" / "report.xml"
+
+
 def build_pytest_command(
     isolated_root: Path,
     *,
@@ -80,6 +166,7 @@ def build_pytest_command(
     basetemp: Path,
     extra_args: list[str] | None = None,
     python: Path | None = None,
+    junit_path: Path | None = None,
 ) -> list[str]:
     cache_dir.mkdir(parents=True, exist_ok=True)
     basetemp.mkdir(parents=True, exist_ok=True)
@@ -87,14 +174,20 @@ def build_pytest_command(
         str(python) if python else sys.executable,
         "-m",
         "pytest",
-        str(isolated_root),
+        *_collection_args(isolated_root),
         "-v",
+        # ``-rfE`` prints one line per failure and per error at the end, whatever
+        # the length of the log above it, so a failure is never only visible in a
+        # truncated window of the run.
+        "-rfE",
         "--tb=short",
         "-o",
         f"cache_dir={cache_dir}",
         "--basetemp",
         str(basetemp / "run"),
     ]
+    if junit_path is not None:
+        cmd.extend(["--junitxml", str(junit_path)])
     if extra_args:
         cmd.extend(extra_args)
     return cmd
@@ -184,8 +277,21 @@ def run_pytest(
     cache_dir = work_dir / "pytest_cache"
     basetemp = work_dir / "pytest_tmp"
     pytest_log_path = work_dir / "pytest.log"
+    junit_path = junit_path_for(work_dir)
+    junit_path.parent.mkdir(parents=True, exist_ok=True)
+    # A stale XML would report another run's failures, so it is removed before
+    # this one starts. Only this exact path, inside this run's own work directory.
+    try:
+        junit_path.unlink(missing_ok=True)
+    except OSError:
+        pass
     command = build_pytest_command(
-        isolated_root, cache_dir=cache_dir, basetemp=basetemp, extra_args=extra_args, python=python
+        isolated_root,
+        cache_dir=cache_dir,
+        basetemp=basetemp,
+        extra_args=extra_args,
+        python=python,
+        junit_path=junit_path,
     )
     if (work_dir / "_sable_guard.py").is_file() and "_sable_guard" not in command:
         command.extend(["-p", "_sable_guard"])
@@ -232,12 +338,26 @@ def run_pytest(
         exit_code = 124
     duration = time.monotonic() - started
     collected, passed, failed, skipped, errors = _parse_counts(stdout + "\n" + stderr)
+    # Structured failures outrank the console log: a long verbose run hides its
+    # summary block from any clipped view, but every failure is in the XML.
+    failures = [failure.to_dict() for failure in parse_failures(junit_path)]
+    if failures:
+        product_failed, environment_failed = annotate_failures(
+            failures, project_root=isolated_root
+        )
+    else:
+        # Nothing proved any failure environmental, so every one of them counts
+        # against the project - the conservative default from Task 8b.
+        product_failed, environment_failed = failed, 0
     return ExecutionResult(
         collected=collected,
         passed=passed,
         failed=failed,
         skipped=skipped,
         errors=errors,
+        product_failed=product_failed,
+        environment_failed=environment_failed,
+        failures=failures,
         exit_code=exit_code,
         duration_seconds=round(duration, 3),
         stdout=stdout,

@@ -489,7 +489,7 @@ def test_sarif_early_veto_without_results_emits_vesper002() -> None:
     assert len(results) == 1
     assert results[0]["ruleId"] == "VESPER002"
     assert results[0]["level"] == "error"
-    assert results[0]["ruleIndex"] == len(sarif.RULE_CATALOG) - 1
+    assert results[0]["ruleIndex"] == sarif._RULE_INDEX["VESPER002"]
     assert "run vetoed before execution" in results[0]["message"]["text"]
     assert "bwrap unavailable" in results[0]["message"]["text"]
 
@@ -504,4 +504,77 @@ def test_sarif_vesper002_not_added_when_other_results_exist() -> None:
 def test_sarif_existing_rule_indexes_are_unchanged() -> None:
     ids = [entry["id"] for entry in sarif.RULE_CATALOG]
     assert ids.index("VESPER001") == 20
-    assert ids[-1] == "VESPER002"
+    assert ids.index("VESPER002") == 21
+    # New rules are appended, never inserted: VESPER003 is the environment stop.
+    assert ids[-1] == "VESPER003"
+
+
+def test_sarif_blocked_env_emits_vesper003_with_the_exact_cause() -> None:
+    report = _minimal_report(
+        verdict="BLOCKED_ENV",
+        post_audit={
+            "root_cause": "missing dependency: freezegun (not installable or not declared in requirements)"
+        },
+    )
+    rules = _results_by_rule(sarif.build_sarif(report))
+    assert list(rules) == ["VESPER003"]
+    result = rules["VESPER003"][0]
+    assert result["level"] == "warning"
+    assert result["ruleIndex"] == sarif._RULE_INDEX["VESPER003"]
+    assert "run blocked by the environment" in result["message"]["text"]
+    assert "missing dependency: freezegun" in result["message"]["text"]
+
+
+def test_sarif_blocked_env_without_post_audit_uses_the_role_summary() -> None:
+    report = _minimal_report(
+        verdict="BLOCKED_ENV",
+        role_results=[
+            {
+                "role": "vesper",
+                "verdict": "BLOCKED_ENV",
+                "summary": "sandbox required but bwrap unavailable: x",
+            }
+        ],
+    )
+    results = sarif.build_sarif(report)["runs"][0]["results"]
+    assert len(results) == 1
+    assert results[0]["ruleId"] == "VESPER003"
+    assert "bwrap unavailable" in results[0]["message"]["text"]
+    assert "run vetoed before execution" not in results[0]["message"]["text"]
+
+
+def test_sarif_blocked_env_keeps_other_findings_below_the_error_line() -> None:
+    report = _minimal_report(
+        verdict="BLOCKED_ENV",
+        post_audit={
+            "root_cause": "missing package metadata: click",
+            "riley": {"verdict": "BLOCKED_ENV", "gaps": ["collected tests == 0"]},
+        },
+    )
+    document = sarif.build_sarif(report)
+    rules = _results_by_rule(document)
+    assert "VESPER003" in rules
+    assert "VESPER002" not in rules
+    riley_results = [r for r in document["runs"][0]["results"] if r["ruleId"].startswith("RILEY")]
+    assert riley_results
+    assert all(r["level"] == "warning" for r in riley_results)
+
+
+def test_sarif_blocked_env_tolerates_unusable_cause_sources() -> None:
+    report = _minimal_report(
+        verdict="BLOCKED_ENV",
+        post_audit=["not", "a", "mapping"],
+        role_results=["junk", {"role": "vesper", "verdict": "BLOCKED_ENV", "summary": "   "}],
+    )
+    results = sarif.build_sarif(report)["runs"][0]["results"]
+    assert len(results) == 1
+    assert results[0]["ruleId"] == "VESPER003"
+    assert results[0]["message"]["text"] == "run blocked by the environment: the tests could not run"
+
+
+def test_sarif_clear_never_emits_vesper003() -> None:
+    report = _minimal_report(
+        verdict="CLEAR",
+        post_audit={"root_cause": "missing dependency: something"},
+    )
+    assert "VESPER003" not in _results_by_rule(sarif.build_sarif(report))

@@ -9,13 +9,31 @@ import pytest
 
 from core.orchestrator import Vesper
 from core.packets import Verdict
+from core.report import exit_code_for
 from core.sandbox import (
+    get_bwrap_path,
     get_sandbox_status,
     is_bwrap_available,
     resolve_sandbox_mode,
     wrap_command,
 )
 from tests.support import mini_project
+
+
+def test_get_bwrap_path_returns_the_resolved_binary(monkeypatch):
+    """core/sandbox.py:82 - the resolved path is handed to the wrapped command; a
+    None return would drop the sandbox without saying so."""
+    monkeypatch.setattr("sys.platform", "linux")
+    monkeypatch.setattr("core.sandbox.shutil.which", lambda name: f"/usr/bin/{name}")
+    assert get_bwrap_path() == "/usr/bin/bwrap"
+
+
+def test_get_bwrap_path_is_none_off_linux(monkeypatch):
+    """The platform check runs before the lookup, so a stray bwrap on macOS is
+    never offered to a caller that would fail at exec time."""
+    monkeypatch.setattr("sys.platform", "darwin")
+    monkeypatch.setattr("core.sandbox.shutil.which", lambda name: f"/usr/bin/{name}")
+    assert get_bwrap_path() is None
 
 
 def test_build_bwrap_command_without_network(tmp_path: Path):
@@ -206,7 +224,7 @@ def test_extra_ro_binds_rejects_home_and_root_and_ancestors(tmp_path: Path, monk
         wrap_command(["pytest"], isolated_root=iso, work_dir=work, python=Path("/usr/bin/python3"))
 
 
-def test_sandbox_mode_required_vetoes_when_bwrap_missing(tmp_path: Path):
+def test_sandbox_mode_required_blocks_when_bwrap_missing(tmp_path: Path):
     project = mini_project(tmp_path / "proj")
     reports = tmp_path / "reports"
     config = {
@@ -217,9 +235,16 @@ def test_sandbox_mode_required_vetoes_when_bwrap_missing(tmp_path: Path):
     with patch("core.sandbox.is_bwrap_available", return_value=False):
         report = Vesper(config).run(project, project / "docs")
 
-    assert report.verdict == Verdict.VETO.value
+    assert report.verdict == Verdict.BLOCKED_ENV.value
     assert report.sandbox == "unavailable"
     assert any("sandbox required" in r.summary for r in report.role_results)
+    # The cycle still ran the design and policy stages, and executed nothing.
+    assert any(r.role == "sable" and r.stage == "preflight" for r in report.role_results)
+    assert not any(r.role == "nova" for r in report.role_results)
+    assert report.post_audit["root_cause"].startswith("sandbox required but bwrap unavailable")
+    assert exit_code_for(report.verdict) == 2
+    # The isolated copy is released on the blocked path too (no leaked copy).
+    assert not Path(report.isolated_root).exists()
 
 
 def test_project_config_cannot_disable_sandbox(tmp_path: Path):
@@ -438,9 +463,11 @@ def test_bwrap_probe_failure_mode_required_fails_closed(tmp_path: Path, monkeypa
         "isolation_method": "copy",
     }
     report = Vesper(config).run(project, project / "docs")
-    assert report.verdict == Verdict.VETO.value
+    assert report.verdict == Verdict.BLOCKED_ENV.value
     assert report.sandbox == "unavailable (bwrap present but not usable: bwrap: Creating new namespace failed: Permission denied)"
     assert any("sandbox required but bwrap unavailable" in r.summary for r in report.role_results)
+    assert not any(r.role == "nova" for r in report.role_results)
+    assert exit_code_for(report.verdict) == 2
 
 
 def test_bwrap_probe_timeout_and_oserror_handling(monkeypatch: pytest.MonkeyPatch):

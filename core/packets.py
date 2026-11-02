@@ -15,6 +15,11 @@ class Verdict(str, Enum):
     VETO = "VETO"
     BLOCK = "BLOCK"
     ESCALATE = "ESCALATE"
+    # The environment stopped the run before the tests could witness anything
+    # (missing dependency, refused requirement, absent build artifact, required
+    # sandbox unavailable). Never a pass, and never an accusation: VETO outranks
+    # it, and it outranks CLEAR.
+    BLOCKED_ENV = "BLOCKED_ENV"
 
 
 class Role(str, Enum):
@@ -160,6 +165,9 @@ class ExecutionResult:
     failed: int = 0
     skipped: int = 0
     errors: int = 0
+    product_failed: int = 0
+    environment_failed: int = 0
+    failures: list[dict[str, Any]] = field(default_factory=list)
     exit_code: int = -1
     duration_seconds: float = 0.0
     stdout: str = ""
@@ -172,8 +180,12 @@ class ExecutionResult:
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
         # Keep report size bounded.
-        data["stdout"] = _clip(self.stdout, 20_000)
-        data["stderr"] = _clip(self.stderr, 8_000)
+        data["stdout"] = clip_log(self.stdout, 20_000)
+        data["stderr"] = clip_log(self.stderr, 8_000)
+        data["failures"] = _bounded_failures(self.failures)
+        omitted = max(0, len(self.failures) - MAX_FAILURES_KEPT)
+        if omitted:
+            data["failures_omitted"] = omitted
         return data
 
 
@@ -269,7 +281,43 @@ class FinalReport:
         return data
 
 
-def _clip(text: str, limit: int) -> str:
+def clip_log(text: str, limit: int) -> str:
+    """Keep the start *and* the end of a long log.
+
+    pytest puts its header and the collection line at the top and the
+    ``short test summary info`` block - one line per failure - at the bottom.
+    Clipping to the head alone used to discard exactly the part that names the
+    assertion, which is how a run with eleven failures reported "assertion
+    details were not parsed".
+    """
     if len(text) <= limit:
         return text
-    return text[:limit] + f"\n...[truncated {len(text) - limit} chars]"
+    head = max(1, limit * 2 // 3)
+    tail = max(1, limit - head)
+    removed = len(text) - head - tail
+    return (
+        text[:head]
+        + f"\n...[truncated {removed} chars; the tail of the log follows]\n"
+        + text[-tail:]
+    )
+
+
+MAX_FAILURES_KEPT = 100
+TRACEBACK_DETAIL_KEPT = 20
+
+
+def _bounded_failures(failures: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Every failed test stays listed; only the deep traceback is thinned out.
+
+    The name and the message are the promise of the failures section, so they are
+    kept for each entry. A suite with thousands of failures must not turn the
+    report into a traceback dump, so the long text is kept for the first entries
+    only and the overflow is counted in ``failures_omitted``.
+    """
+    kept: list[dict[str, Any]] = []
+    for index, failure in enumerate(failures[:MAX_FAILURES_KEPT]):
+        item = dict(failure)
+        if index >= TRACEBACK_DETAIL_KEPT and item.get("traceback"):
+            item["traceback"] = "...[traceback omitted for brevity; full text in pytest.log]"
+        kept.append(item)
+    return kept

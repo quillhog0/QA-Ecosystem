@@ -55,9 +55,14 @@ def test_short_returns_short_text_unchanged():
 
 
 def test_short_truncates_long_text():
-    out = _short("x" * 15, 10)
-    assert out.startswith("x" * 10)
-    assert "...[truncated 5 chars]" in out
+    # clip_log keeps BOTH ends: the head (2/3) and the tail (1/3), so the
+    # "short test summary info" block at the bottom of a pytest log survives.
+    out = _short("x" * 100, 30)
+    assert out.startswith("x" * 20)  # head = 30 * 2 // 3
+    assert out.endswith("x" * 10)    # tail = 30 - 20
+    assert "...[truncated 70 chars" in out
+    # The full text is untouched when it already fits.
+    assert _short("y" * 15, 100) == "y" * 15
 
 
 def test_render_markdown_keeps_short_execution_stdout():

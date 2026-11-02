@@ -154,7 +154,10 @@ def test_adapters_complete_and_status_network_and_provider_guards(monkeypatch):
             system_prompt="sys", user_payload={"a": 1}, config=openrouter_no_net_cfg
         )
     assert raw is None
-    assert status == "none"
+    # Task 9 fix H split the network switches: a remote provider (openrouter) is
+    # refused because *LLM* network is off, and the status now names that reason
+    # rather than the old generic "none".
+    assert status == "none: llm network disabled"
 
     local_no_net_cfg = {
         "dry_run": False,
@@ -443,4 +446,233 @@ def test_relaxations_granted_reads_warnings_and_sandbox_allows():
         )
         is False
     )
+
+
+# --- environment-blocked aggregation ----------------------------------------
+def _env_loop_inputs(tmp_path: Path, *, dangerous: bool = False):
+    """A mini project plus the packet/handle/report ``_loop`` needs."""
+    from core.isolation import IsolationHandle
+    from core.packets import FinalReport, HandoffPacket
+
+    project = mini_project(tmp_path / "proj", dangerous=dangerous)
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    handle = IsolationHandle(
+        live_root=project,
+        isolated_root=project,
+        method="copy",
+        read_only=False,
+        skipped_secrets=[],
+    )
+    packet = HandoffPacket(
+        run_id="r1",
+        stage="init",
+        from_role="vesper",
+        to_role="lexi",
+        project_root=str(project.parent),
+        docs_root=str(project / "docs"),
+        isolated_root=str(project),
+    )
+    report = FinalReport(run_id="r1", verdict=Verdict.PENDING.value)
+    # No sandbox: Sable evaluates strictly, so a dangerous project is BLOCKed.
+    report.sandbox = "off"
+    vesper = Vesper({"reports_dir": str(tmp_path / "reports"), "isolation_method": "copy"})
+    return vesper, packet, handle, work_dir, report
+
+
+def _blocked_execution(**overrides):
+    from core.packets import ExecutionResult
+
+    data = {
+        "collected": 0,
+        "passed": 0,
+        "failed": 0,
+        "errors": 1,
+        "exit_code": 2,
+        "stderr": "E   ModuleNotFoundError: No module named 'qa_absent_dep'",
+        "command": ["pytest"],
+        "install_status": "no dependency manifest",
+        "sandbox_status": "off",
+    }
+    data.update(overrides)
+    return ExecutionResult(**data)
+
+
+def _role(results, role: str, stage: str):
+    return [item for item in results if item.role == role and item.stage == stage]
+
+
+def test_a_missing_dependency_blocks_instead_of_vetoing(tmp_path: Path):
+    from core.report import exit_code_for
+
+    vesper, packet, handle, work_dir, report = _env_loop_inputs(tmp_path)
+    with patch("agents.nova.execute", return_value=_blocked_execution()):
+        vesper._loop(packet, handle, work_dir, report)
+
+    assert report.verdict == Verdict.BLOCKED_ENV.value
+    assert exit_code_for(report.verdict) == 2
+    assert report.post_audit["root_cause"].startswith("missing dependency: qa_absent_dep")
+    assert report.mutation == {
+        "status": "skipped",
+        "reason": "environment blocked: the tests could not run",
+    }
+    # Riley softens its technical block, Nova keeps the raw execution signal.
+    assert _role(vesper.role_results, "riley", "post_audit")[0].verdict == Verdict.BLOCKED_ENV.value
+    assert _role(vesper.role_results, "nova", "execute")[0].verdict == Verdict.VETO.value
+    # Lexi's zero-collection contradiction stays below the veto line.
+    lexi_post = _role(vesper.role_results, "lexi", "post_audit")[0]
+    assert lexi_post.verdict == Verdict.CLEAR.value
+    contradiction = [f for f in report.post_audit["lexi"]["findings"] if f["kind"] == "contradiction"]
+    assert contradiction[0]["severity"] == "medium"
+    assert "environment blocked: missing dependency: qa_absent_dep" in contradiction[0]["message"]
+
+
+def test_a_partial_collection_with_a_missing_dependency_also_blocks(tmp_path: Path):
+    """collected > 0 keeps Sable's post check CLEAR, so the non-zero pytest exit
+    is the only technical block - and it is environmental."""
+    vesper, packet, handle, work_dir, report = _env_loop_inputs(tmp_path)
+    execution = _blocked_execution(collected=66, passed=64, errors=2)
+    with patch("agents.nova.execute", return_value=execution):
+        vesper._loop(packet, handle, work_dir, report)
+
+    assert report.verdict == Verdict.BLOCKED_ENV.value
+    assert report.execution["collected"] == 66
+    assert _role(vesper.role_results, "sable", "execute")[0].verdict == Verdict.CLEAR.value
+    assert report.mutation["reason"] == "environment blocked: the tests could not run"
+
+
+def test_a_failing_test_keeps_the_veto_despite_a_missing_dependency(tmp_path: Path):
+    from core.report import exit_code_for
+
+    vesper, packet, handle, work_dir, report = _env_loop_inputs(tmp_path)
+    execution = _blocked_execution(
+        collected=2,
+        passed=1,
+        failed=1,
+        errors=1,
+        exit_code=1,
+        stdout="FAILED tests/test_calculator.py::test_add - assert 5 == 0",
+    )
+    with patch("agents.nova.execute", return_value=execution):
+        vesper._loop(packet, handle, work_dir, report)
+
+    assert report.verdict == Verdict.VETO.value
+    assert exit_code_for(report.verdict) == 1
+    assert report.post_audit["root_cause"].startswith("pytest failures: test_add")
+    assert _role(vesper.role_results, "riley", "post_audit")[0].verdict == Verdict.VETO.value
+
+
+def test_dangerous_code_plus_a_missing_dependency_is_a_veto(tmp_path: Path):
+    """Sable's pre-flight BLOCK outranks any environmental explanation, and the
+    suite is never executed."""
+    from core.report import exit_code_for
+
+    vesper, packet, handle, work_dir, report = _env_loop_inputs(tmp_path, dangerous=True)
+
+    def never_run(*args, **kwargs):
+        raise AssertionError("nova.execute must not run after a pre-flight BLOCK")
+
+    with patch("agents.nova.execute", side_effect=never_run):
+        vesper._loop(packet, handle, work_dir, report)
+
+    assert report.verdict == Verdict.VETO.value
+    assert exit_code_for(report.verdict) == 1
+    assert _role(vesper.role_results, "sable", "preflight")[0].verdict == Verdict.BLOCK.value
+    assert not _role(vesper.role_results, "nova", "execute")
+
+
+def test_a_non_pytest_command_keeps_the_veto_when_environment_blocked(tmp_path: Path):
+    """The downgrade only applies to Sable's "collected 0" block. A command that
+    is not pytest-only is a policy violation, not an environment problem."""
+    vesper, packet, handle, work_dir, report = _env_loop_inputs(tmp_path)
+    execution = _blocked_execution(command=["bash", "-c", "pytest"])
+    with patch("agents.nova.execute", return_value=execution):
+        vesper._loop(packet, handle, work_dir, report)
+
+    assert report.verdict == Verdict.VETO.value
+    post = _role(vesper.role_results, "sable", "execute")[0]
+    assert post.verdict == Verdict.BLOCK.value
+    assert post.details["checks"]["pytest_only"] is False
+    # A policy block is not an environment stop: the skip reason stays the baseline.
+    assert report.mutation["reason"] == "baseline tests did not pass"
+
+
+def test_an_unexplained_empty_collection_still_vetoes(tmp_path: Path):
+    vesper, packet, handle, work_dir, report = _env_loop_inputs(tmp_path)
+    execution = _blocked_execution(
+        errors=0, exit_code=5, stderr="", stdout="no tests ran in 0.01s"
+    )
+    with patch("agents.nova.execute", return_value=execution):
+        vesper._loop(packet, handle, work_dir, report)
+
+    assert report.verdict == Verdict.VETO.value
+    lexi_post = _role(vesper.role_results, "lexi", "post_audit")[0]
+    assert lexi_post.verdict == Verdict.VETO.value
+
+
+def test_a_healthy_run_stays_clear(tmp_path: Path):
+    from core.packets import ExecutionResult
+    from core.report import exit_code_for
+
+    vesper, packet, handle, work_dir, report = _env_loop_inputs(tmp_path)
+    ok = ExecutionResult(
+        collected=3, passed=3, exit_code=0, command=["pytest"], sandbox_status="off"
+    )
+    with patch("agents.nova.execute", return_value=ok):
+        vesper._loop(packet, handle, work_dir, report)
+
+    assert report.verdict == Verdict.CLEAR.value
+    assert exit_code_for(report.verdict) == 0
+    assert report.mutation == {"status": "skipped", "reason": "disabled"}
+
+
+def _required_sandbox_config(tmp_path: Path) -> dict:
+    return {
+        "dry_run": True,
+        "allow_network": False,
+        "reports_dir": str(tmp_path / "reports"),
+        "llm": {"provider": "none"},
+        "isolation_method": "copy",
+        "sandbox": {"mode": "required"},
+    }
+
+
+def test_a_required_sandbox_that_cannot_start_blocks_and_releases_the_copy(tmp_path: Path):
+    from core.report import exit_code_for
+
+    project = mini_project(tmp_path / "proj")
+
+    def never_run(*args, **kwargs):
+        raise AssertionError("nova.execute must not run without the required sandbox")
+
+    with patch("core.sandbox.get_sandbox_status", return_value=(False, "unavailable", "bwrap not found")), \
+         patch("agents.nova.execute", side_effect=never_run):
+        report = Vesper(_required_sandbox_config(tmp_path)).run(project, project / "docs")
+
+    assert report.verdict == Verdict.BLOCKED_ENV.value
+    assert exit_code_for(report.verdict) == 2
+    assert report.sandbox == "unavailable"
+    assert report.post_audit["root_cause"] == "sandbox required but bwrap unavailable: bwrap not found"
+    assert report.mutation == {
+        "status": "skipped",
+        "reason": "environment blocked before execution",
+    }
+    # The design stages still ran: only execution was skipped.
+    assert report.plan and report.drift
+    assert not Path(report.isolated_root).exists()
+    md = next(path for path in (tmp_path / "reports").rglob("*.md") if report.run_id in path.name)
+    assert "environment blocked" in md.read_text(encoding="utf-8")
+
+
+def test_a_required_sandbox_that_cannot_start_still_vetoes_dangerous_code(tmp_path: Path):
+    """Precedence is monotonic: VETO > BLOCKED_ENV > CLEAR."""
+    project = mini_project(tmp_path / "proj", dangerous=True)
+    with patch("core.sandbox.get_sandbox_status", return_value=(False, "unavailable", "bwrap not found")), \
+         patch("agents.nova.execute", side_effect=AssertionError("must not execute")):
+        report = Vesper(_required_sandbox_config(tmp_path)).run(project, project / "docs")
+
+    assert report.verdict == Verdict.VETO.value
+    assert not Path(report.isolated_root).exists()
+    preflight = [item for item in report.role_results if item.role == "sable" and item.stage == "preflight"]
+    assert preflight[0].verdict == Verdict.BLOCK.value
 

@@ -20,11 +20,13 @@ history:
 role_result:
   role: string
   stage: string
-  verdict: PENDING | CLEAR | VETO | BLOCK | ESCALATE
+  verdict: PENDING | CLEAR | VETO | BLOCK | ESCALATE | BLOCKED_ENV
   summary: string
   iteration: integer
   details: mapping
 
+# Final verdict precedence: VETO > BLOCKED_ENV > CLEAR. BLOCKED_ENV reports that
+# the environment stopped the run; it exits 2 and is never a pass.
 veto_hierarchy:
   - sable
   - riley

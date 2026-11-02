@@ -212,10 +212,21 @@ RULE_CATALOG: tuple[dict[str, str], ...] = (
         "short": "Run vetoed before execution",
         "full": (
             "The verdict is not CLEAR but no other rule produced a result, for "
-            "example because the run was vetoed before any role executed "
-            "(sandbox required but unavailable)."
+            "example because the run was vetoed before any role executed."
         ),
         "level": "error",
+    },
+    {
+        "id": "VESPER003",
+        "short": "Run blocked by the environment",
+        "full": (
+            "The tests could not run because of an environment precondition: a "
+            "missing test dependency, an unsafe requirement the policy refused, "
+            "missing distribution metadata, a module generated at build time, or "
+            "a required sandbox that was unavailable. No defect is claimed "
+            "against the project, and the run is still not a pass."
+        ),
+        "level": "warning",
     },
 )
 
@@ -532,6 +543,38 @@ def _add_vesper(results: list[dict[str, Any]], report: dict[str, Any]) -> None:
     )
 
 
+def _add_environment(results: list[dict[str, Any]], report: dict[str, Any]) -> None:
+    """One VESPER003 result carrying the exact environmental cause.
+
+    Emitted for BLOCKED_ENV whether or not other rules fired, so the reason is
+    always present. It is a warning, not an error: nothing is accused. The run
+    still fails through its exit code.
+    """
+    verdict = str(report.get("verdict") or "").upper()
+    if verdict != "BLOCKED_ENV":
+        return
+    cause = ""
+    post = report.get("post_audit")
+    if isinstance(post, dict):
+        cause = str(post.get("root_cause") or "").strip()
+    if not cause:
+        for entry in report.get("role_results") or []:
+            if isinstance(entry, dict) and str(entry.get("verdict") or "").upper() == verdict:
+                cause = str(entry.get("summary") or "").strip()
+                if cause:
+                    break
+    message = "run blocked by the environment: the tests could not run"
+    if cause:
+        message += f" ({cause})"
+    _append_result(
+        results,
+        rule_id="VESPER003",
+        level="warning",
+        message=message,
+        location_uri=None,
+    )
+
+
 def _add_early_veto(results: list[dict[str, Any]], report: dict[str, Any]) -> None:
     verdict = str(report.get("verdict") or "").upper()
     if results or not verdict or verdict == "CLEAR":
@@ -592,6 +635,7 @@ def build_sarif(report: Any) -> dict[str, Any]:
     _add_riley(results, data)
     _add_nova(results, data)
     _add_vesper(results, data)
+    _add_environment(results, data)
     _add_early_veto(results, data)
     driver = {
         "name": _TOOL_NAME,

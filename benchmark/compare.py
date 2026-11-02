@@ -24,6 +24,16 @@ SEEDED_DIR = ROOT / "benchmark" / "seeded"
 MAIN = ROOT / "main.py"
 RESULTS_MD = ROOT / "benchmark" / "results.md"
 
+# Sandbox mode forwarded to main.py for every run in the comparison. The table is
+# only meaningful together with this value: under an active Bubblewrap sandbox Sable
+# reports dangerous test operations as WARN instead of vetoing them.
+SANDBOX_MODE = "auto"
+SANDBOX_NOTE = (
+    "Dangerous operations in test files are WARN instead of VETO only while the "
+    "Bubblewrap sandbox confines execution to the isolated copy; with the sandbox "
+    "off they VETO."
+)
+
 
 def list_seeded_projects() -> list[Path]:
     projects = []
@@ -49,7 +59,13 @@ def parse_stdout(text: str) -> dict[str, str]:
     return out
 
 
-def run_qa_ecosystem(project_dir: Path, reports_dir: Path, *, strict: bool = False) -> dict[str, Any]:
+def run_qa_ecosystem(
+    project_dir: Path,
+    reports_dir: Path,
+    *,
+    strict: bool = False,
+    sandbox: str = SANDBOX_MODE,
+) -> dict[str, Any]:
     cmd = [
         sys.executable,
         str(MAIN),
@@ -59,6 +75,8 @@ def run_qa_ecosystem(project_dir: Path, reports_dir: Path, *, strict: bool = Fal
         str(project_dir / "docs"),
         "--reports-dir",
         str(reports_dir),
+        "--sandbox",
+        sandbox,
     ]
     if strict:
         cmd.append("--strict")
@@ -72,6 +90,7 @@ def run_qa_ecosystem(project_dir: Path, reports_dir: Path, *, strict: bool = Fal
     return {
         "verdict": verdict,
         "exit_code": proc.returncode,
+        "sandbox": str(report.get("sandbox") or ""),
         "report": report,
     }
 
@@ -111,7 +130,9 @@ def cleanup_uncommitted_git(project_dir: Path) -> None:
         code_file.write_text(spec["uncommitted_code"], encoding="utf-8")
 
 
-def compare_all(reports_dir: Path | None = None) -> tuple[list[dict[str, Any]], int, int, int]:
+def compare_all(
+    reports_dir: Path | None = None, sandbox: str = SANDBOX_MODE
+) -> tuple[list[dict[str, Any]], int, int, int]:
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     rep_dir = reports_dir if reports_dir else ROOT / "reports" / f"compare-{ts}"
     rep_dir.mkdir(parents=True, exist_ok=True)
@@ -132,14 +153,18 @@ def compare_all(reports_dir: Path | None = None) -> tuple[list[dict[str, Any]], 
 
         try:
             # 1. Default QA-Ecosystem
-            def_res = run_qa_ecosystem(proj, rep_dir / "default" / proj.name, strict=False)
+            def_res = run_qa_ecosystem(
+                proj, rep_dir / "default" / proj.name, strict=False, sandbox=sandbox
+            )
             def_verdict = def_res["verdict"]
             def_caught = def_verdict != "CLEAR"
             if def_caught:
                 default_caught_count += 1
 
             # 2. Strict QA-Ecosystem (riley.veto_on_uncovered_claims enabled via CLI/system)
-            strict_res = run_qa_ecosystem(proj, rep_dir / "strict" / proj.name, strict=True)
+            strict_res = run_qa_ecosystem(
+                proj, rep_dir / "strict" / proj.name, strict=True, sandbox=sandbox
+            )
             strict_verdict = strict_res["verdict"]
             strict_caught = strict_verdict != "CLEAR"
             if strict_caught:
@@ -156,6 +181,7 @@ def compare_all(reports_dir: Path | None = None) -> tuple[list[dict[str, Any]], 
                 "project": proj.name,
                 "category": category,
                 "default_verdict": def_verdict,
+                "default_sandbox": def_res["sandbox"],
                 "strict_verdict": strict_verdict,
                 "flat_verdict": flat_verdict,
                 "default_caught": def_caught,
@@ -174,14 +200,21 @@ def render_markdown(
     default_count: int,
     strict_count: int,
     flat_count: int,
+    *,
+    sandbox: str = SANDBOX_MODE,
 ) -> str:
     total = len(rows)
     def_pct = int(round((default_count / total) * 100)) if total else 0
     strict_pct = int(round((strict_count / total) * 100)) if total else 0
     flat_pct = int(round((flat_count / total) * 100)) if total else 0
+    states = sorted({str(r.get("default_sandbox") or "unknown") for r in rows})
 
     lines = [
         "# Comparison: QA-Ecosystem vs Flat Baseline",
+        "",
+        f"**Sandbox:** `--sandbox {sandbox}` (observed: {', '.join(states)})",
+        "",
+        f"**Note:** {SANDBOX_NOTE}",
         "",
         f"**Summary:** default {default_count}/{total} ({def_pct} %), strict (riley.veto_on_uncovered_claims enabled via --strict) {strict_count}/{total} ({strict_pct} %), flat {flat_count}/{total} ({flat_pct} %)",
         "",
@@ -203,14 +236,21 @@ def render_markdown(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run comparison on 24 seeded projects")
     parser.add_argument("--reports-dir", default="", help="Reports dir for QA-Ecosystem runs")
+    parser.add_argument(
+        "--sandbox",
+        choices=["auto", "required", "off"],
+        default=SANDBOX_MODE,
+        help="Sandbox mode forwarded to main.py for every QA-Ecosystem run",
+    )
     args = parser.parse_args(argv)
 
     rep_dir = Path(args.reports_dir) if args.reports_dir else None
-    rows, default_count, strict_count, flat_count = compare_all(rep_dir)
+    rows, default_count, strict_count, flat_count = compare_all(rep_dir, args.sandbox)
     total = len(rows)
 
-    md = render_markdown(rows, default_count, strict_count, flat_count)
+    md = render_markdown(rows, default_count, strict_count, flat_count, sandbox=args.sandbox)
     RESULTS_MD.write_text(md, encoding="utf-8")
+    print(f"sandbox={args.sandbox}")
     print(f"default {default_count}/{total}, strict (riley.veto_on_uncovered_claims enabled via --strict) {strict_count}/{total}, flat {flat_count}/{total}")
     print()
     print(md)

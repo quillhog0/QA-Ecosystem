@@ -1,6 +1,16 @@
 from __future__ import annotations
 
-from core.runner import sanitized_env
+from core.runner import _find_summary_line, sanitized_env
+
+
+def test_find_summary_line_returns_text_when_nothing_was_printed():
+    """core/runner.py:106 - the empty-output branch must be the empty string: the
+    caller writes this value into the report as the pytest summary line, and None
+    would surface as the literal text "None"."""
+    assert _find_summary_line("") == ""
+    assert _find_summary_line("\n   \n\t\n") == ""
+    assert _find_summary_line("collected 3 items") == "collected 3 items"
+    assert _find_summary_line("=== 3 passed in 0.12s ===") == "=== 3 passed in 0.12s ==="
 
 
 def test_sanitized_env_strips_secrets_and_sets_proxy(monkeypatch):

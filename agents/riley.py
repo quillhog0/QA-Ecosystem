@@ -1,21 +1,60 @@
 import ast
+import builtins
 from pathlib import Path
 import re
 from typing import Any
 
 from agents.adapters import complete_with_status, format_llm_error, load_prompt, parse_yaml_block
+from core.environment import EnvCause, classify_execution, product_failure_count
 from core.packets import RedTeamReview, TestPlan, Verdict
 
 FAILED_LINE_RE = re.compile(
     r"^FAILED\s+(?P<node>.+?)(?:\s+-\s+(?P<assertion>.*))?$",
     re.MULTILINE,
 )
+ERROR_LINE_RE = re.compile(
+    r"^ERROR\s+(?P<node>.+?)(?:\s+-\s+(?P<assertion>.*))?$",
+    re.MULTILINE,
+)
+# One line per failure in the report is the promise; a suite with thousands of
+# failures still needs a bound on how deep it goes.
+MAX_REPORTED_FAILURE_LINES = 40
 
 # pytest default collection: files named test_*.py or *_test.py.
 _PYTEST_COLLECTED_FILE_RE = re.compile(r"^(?:test_.*|.*_test)\.py$")
 
 
-def is_tautology_assert(stmt: ast.Assert) -> bool:
+def _observes_code(fn_node: ast.AST | None) -> bool:
+    """True when the test body calls something that can hand back a value.
+
+    ``assert x is not None`` is a real assertion whenever the test produced ``x``
+    by calling something: the call can return None and the check can fail. It is
+    vacuous when the body calls nothing at all - then the name can only be an
+    imported symbol or a literal, and the check merely proves an import worked.
+    Builtins and assert-style helpers do not count as producers, so
+    ``assert len(x) is not None`` or ``assert self.value is not None`` in a test
+    that never exercises the code is still vacuous.
+    """
+    if fn_node is None:
+        return True
+    for node in ast.walk(fn_node):
+        if not isinstance(node, ast.Call):
+            continue
+        callee = node.func
+        if isinstance(callee, ast.Attribute):
+            if callee.attr.startswith("assert"):
+                continue
+            return True
+        if isinstance(callee, ast.Name):
+            if callee.id.startswith("assert") or hasattr(builtins, callee.id):
+                continue
+            return True
+        # A computed callee (``f()()``, a subscript, a lambda) is real work.
+        return True
+    return False
+
+
+def is_tautology_assert(stmt: ast.Assert, *, fn_node: ast.AST | None = None) -> bool:
     test_node = stmt.test
     if isinstance(test_node, ast.Constant):
         if bool(test_node.value):
@@ -25,10 +64,13 @@ def is_tautology_assert(stmt: ast.Assert) -> bool:
             return True
     if isinstance(test_node, ast.Compare):
         if len(test_node.ops) == 1 and isinstance(test_node.ops[0], ast.IsNot):
-            if len(test_node.comparators) == 1 and isinstance(test_node.comparators[0], ast.Constant) and test_node.comparators[0].value is None:
-                return True
-            if isinstance(test_node.left, ast.Constant) and test_node.left.value is None:
-                return True
+            # A None-check only vacuums when nothing in the test could have
+            # produced the value; against a call result it is a live assertion.
+            if not _observes_code(fn_node):
+                if len(test_node.comparators) == 1 and isinstance(test_node.comparators[0], ast.Constant) and test_node.comparators[0].value is None:
+                    return True
+                if isinstance(test_node.left, ast.Constant) and test_node.left.value is None:
+                    return True
     if isinstance(test_node, ast.Call):
         func = test_node.func
         if isinstance(func, ast.Name) and func.id == "callable":
@@ -79,9 +121,9 @@ def has_swallowed_assertions(fn_node: ast.FunctionDef | ast.AsyncFunctionDef) ->
     return all(id(a) in guarded for a in asserts)
 
 
-def is_trivial_assert(stmt: ast.Assert) -> bool:
+def is_trivial_assert(stmt: ast.Assert, *, fn_node: ast.AST | None = None) -> bool:
     """Assertions that almost any value satisfies: x >= 0 on sizes, isinstance checks, x == x."""
-    if is_tautology_assert(stmt):
+    if is_tautology_assert(stmt, fn_node=fn_node):
         return True
     test_node = stmt.test
     if isinstance(test_node, ast.Call) and _call_name(test_node) in {"isinstance", "hasattr", "bool"}:
@@ -109,6 +151,29 @@ def _raises_context_present(fn_node: ast.AST) -> bool:
     )
 
 
+# Mock/spy assertion methods. They fail the test when the expected interaction
+# did not happen, so they carry the same weight as ``self.assertEqual``: a test
+# that only checks a double's calls is asserting on behaviour, not on nothing.
+_MOCK_ASSERTION_PREFIXES = (
+    "assert_called",
+    "assert_awaited",
+    "assert_any_call",
+    "assert_any_await",
+    "assert_has_calls",
+    "assert_not_called",
+)
+
+
+def _mock_assertion_present(fn_node: ast.AST) -> bool:
+    """``mock.send.assert_called_once_with(...)`` and the async/awaited variants."""
+    return any(
+        isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Attribute)
+        and n.func.attr.startswith(_MOCK_ASSERTION_PREFIXES)
+        for n in ast.walk(fn_node)
+    )
+
+
 def _unittest_assertion_present(fn_node: ast.AST) -> bool:
     """unittest-style assertions (self.assertEqual, self.assertRaises, self.fail)."""
     return any(
@@ -119,6 +184,11 @@ def _unittest_assertion_present(fn_node: ast.AST) -> bool:
         and (n.func.attr.startswith("assert") or n.func.attr == "fail")
         for n in ast.walk(fn_node)
     )
+
+
+def _assertion_call_present(fn_node: ast.AST) -> bool:
+    """Any call that fails the test when the expectation is wrong."""
+    return _unittest_assertion_present(fn_node) or _mock_assertion_present(fn_node)
 
 
 def has_meaningful_assertion(fn_node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
@@ -132,12 +202,12 @@ def has_meaningful_assertion(fn_node: ast.FunctionDef | ast.AsyncFunctionDef) ->
     filter, a helper body of ``assert True`` would lend its credibility to every
     assertion-free test that calls it.
     """
-    if _unittest_assertion_present(fn_node) or _raises_context_present(fn_node):
+    if _assertion_call_present(fn_node) or _raises_context_present(fn_node):
         return True
     asserts = [n for n in ast.walk(fn_node) if isinstance(n, ast.Assert)]
     if not asserts or has_swallowed_assertions(fn_node):
         return False
-    return any(not is_trivial_assert(a) for a in asserts)
+    return any(not is_trivial_assert(a, fn_node=fn_node) for a in asserts)
 
 
 def _module_assertion_helpers(tree: ast.Module) -> set[str]:
@@ -330,7 +400,7 @@ def is_weak_test_node(
 
     asserts = [n for n in ast.walk(fn_node) if isinstance(n, ast.Assert)]
     if not asserts:
-        if _unittest_assertion_present(fn_node):
+        if _assertion_call_present(fn_node):
             return False, "ok"
         # Assertion made through a helper defined in the test tree is still an
         # assertion; without this, suites that assert via assert_equal-style
@@ -340,11 +410,11 @@ def is_weak_test_node(
         ):
             return False, "ok"
         return True, "no assertions"
-    if all(is_tautology_assert(a) for a in asserts):
+    if all(is_tautology_assert(a, fn_node=fn_node) for a in asserts):
         return True, "tautology assertion"
     if has_swallowed_assertions(fn_node):
         return True, "assertion failures swallowed by try/except"
-    if all(is_trivial_assert(a) for a in asserts):
+    if all(is_trivial_assert(a, fn_node=fn_node) for a in asserts):
         return True, "only trivial assertions"
     return False, "ok"
 
@@ -478,7 +548,94 @@ def parse_failure_root_cause(stdout: str, stderr: str = "") -> str:
         module_name = match.group(1) if match else "unknown"
         return f"missing dependency: {module_name} (not installable or not declared in requirements)"
 
+    if "PackageNotFoundError: No package metadata was found for" in text:
+        match = re.search(
+            r"No package metadata was found for ([A-Za-z0-9_.\-]+)", text
+        )
+        return f"missing package metadata: {match.group(1) if match else 'unknown'}"
+
+    # Nothing failed with an assertion, but the run may still have named the
+    # collection or teardown problems that stopped it.
+    for match in ERROR_LINE_RE.finditer(text):
+        node = (match.group("node") or "").strip()
+        assertion = (match.group("assertion") or "").strip()
+        parts.append(f"error ({node}): {assertion}" if assertion else f"error ({node})")
+    if parts:
+        return "pytest errors: " + "; ".join(parts)
+
     return ""
+
+
+def _one_line(text: str, limit: int = 300) -> str:
+    """Collapse a pytest message to one readable line, keeping its tail."""
+    flat = " ".join(str(text or "").split())
+    if len(flat) <= limit:
+        return flat
+    return "..." + flat[-limit:]
+
+
+def failure_lines(execution: dict[str, Any]) -> list[str]:
+    """One line per failed test: what it was, and the message that explains it.
+
+    The structured failures from pytest's JUnit XML are the authority here; the
+    console summary is only a fallback for a run whose XML could not be read. This
+    is what makes "every failed test appears in the report" true even when the log
+    is far longer than any clip.
+    """
+    lines: list[str] = []
+    for failure in execution.get("failures") or []:
+        if not isinstance(failure, dict):
+            continue
+        node = str(failure.get("node") or "unknown test")
+        kind = "error" if str(failure.get("kind") or "") == "error" else "failure"
+        message = _one_line(failure.get("message") or "")
+        note = " [environment]" if str(failure.get("classification") or "") == "environment" else ""
+        lines.append(f"{kind} in {node}: {message}{note}" if message else f"{kind} in {node}{note}")
+    if lines:
+        return lines
+    text = f"{execution.get('stdout') or ''}\n{execution.get('stderr') or ''}"
+    for match in FAILED_LINE_RE.finditer(text):
+        node = (match.group("node") or "").strip() or "unknown test"
+        assertion = _one_line(match.group("assertion") or "")
+        lines.append(f"failure in {node}: {assertion}" if assertion else f"failure in {node}")
+    for match in ERROR_LINE_RE.finditer(text):
+        node = (match.group("node") or "").strip() or "unknown collection error"
+        assertion = _one_line(match.group("assertion") or "")
+        lines.append(f"error in {node}: {assertion}" if assertion else f"error in {node}")
+    return lines
+
+
+def environment_failure_cause(execution: dict[str, Any]) -> EnvCause | None:
+    """An EnvCause for a run whose only failures are environmental, else ``None``.
+
+    Every failure has already been proved one by one by ``annotate_failures``; this
+    turns that proof into the sentence the report shows. A run with even one
+    product failure gets ``None``, so the accusation stands.
+    """
+    failed = int(execution.get("failed") or 0)
+    product = product_failure_count(execution)
+    environment = int(execution.get("environment_failed") or 0)
+    if failed <= 0 or product > 0 or environment <= 0:
+        return None
+    names = [
+        str(failure.get("node") or "unknown test")
+        for failure in execution.get("failures") or []
+        if isinstance(failure, dict)
+        and str(failure.get("classification") or "") == "environment"
+    ][:MAX_REPORTED_FAILURE_LINES]
+    kinds = {
+        str(failure.get("environment_kind") or "")
+        for failure in execution.get("failures") or []
+        if isinstance(failure, dict)
+        and str(failure.get("classification") or "") == "environment"
+    }
+    detail = ", ".join(kinds) or "environment"
+    listed = "; ".join(names) if names else f"{environment} tests"
+    return EnvCause(
+        "environment_failures",
+        f"environment-blocked test failures ({detail}): {listed} "
+        f"({environment} of {failed} failures; they did not judge the project)",
+    )
 
 
 def review_results(
@@ -494,6 +651,12 @@ def review_results(
     exit_code = int(execution.get("exit_code") if execution.get("exit_code") is not None else -1)
     errors = int(execution.get("errors") or 0)
     install_status = str(execution.get("install_status") or "skipped")
+    # Two kinds of failure: the ones that accuse the project, and the ones the
+    # isolated environment caused by itself. Only the first are counted as
+    # product failures; both are listed, each with its own name and message.
+    product_failed = product_failure_count(execution)
+    environment_failed = int(execution.get("environment_failed") or 0)
+    detail_lines = failure_lines(execution)
 
     if collected <= 0:
         gaps.append("collected tests == 0")
@@ -501,6 +664,13 @@ def review_results(
         gaps.append(f"pytest exit code {exit_code}")
     if failed > 0:
         gaps.append(f"failed={failed}")
+    if environment_failed:
+        gaps.append(
+            f"environment-blocked failures={environment_failed} "
+            f"(product failures={product_failed})"
+        )
+    for line in detail_lines[:MAX_REPORTED_FAILURE_LINES]:
+        gaps.append(f"test detail: {line}")
     if errors:
         gaps.append(f"pytest collection/execution errors={errors}")
     if not plan.scenarios:
@@ -564,30 +734,50 @@ def review_results(
         str(execution.get("stdout") or ""),
         str(execution.get("stderr") or ""),
     )
+    if not failure_cause and detail_lines:
+        # The console summary may be clipped away in a long run; the structured
+        # failures are not, so they still name every failed test.
+        failure_cause = "pytest failures: " + "; ".join(
+            detail_lines[:MAX_REPORTED_FAILURE_LINES]
+        )
+    # An environmental stop is not an accusation: the tests never got the chance
+    # to witness the plan. The quality vetoes above still outrank it, and a real
+    # test failure always keeps the VETO (classify_execution returns None then).
+    env_cause = classify_execution(execution, project_root=project_root)
+    if env_cause is None:
+        # Failures inside a run that did execute: environmental only when every
+        # one of them was proved to be, one by one.
+        env_cause = environment_failure_cause(execution)
+    technical_verdict = Verdict.BLOCKED_ENV.value if env_cause else Verdict.VETO.value
+    blocked_note = "environment blocked: the tests could not run"
 
     if collected <= 0:
         return _maybe_llm(
             RedTeamReview(
-                verdict=Verdict.VETO.value,
+                verdict=technical_verdict,
                 gaps=gaps,
                 required_changes=[],
-                root_cause="Nova collected zero tests, so results cannot witness the plan",
-                notes="empty collection is a technical veto",
+                root_cause=(
+                    env_cause.cause
+                    if env_cause
+                    else "Nova collected zero tests, so results cannot witness the plan"
+                ),
+                notes=blocked_note if env_cause else "empty collection is a technical veto",
             ),
             {"phase": "results", "plan": plan.to_dict(), "execution": _small_exec(execution)},
             config,
         )
     if errors:
-        root = failure_cause or (
+        root = (env_cause.cause if env_cause else failure_cause) or (
             "pytest reported collection or runtime errors; results are not a clean verdict"
         )
         return _maybe_llm(
             RedTeamReview(
-                verdict=Verdict.VETO.value,
+                verdict=technical_verdict,
                 gaps=gaps,
                 required_changes=[],
                 root_cause=root,
-                notes="errors must be explained before CLEAR",
+                notes=blocked_note if env_cause else "errors must be explained before CLEAR",
             ),
             {"phase": "results", "plan": plan.to_dict(), "execution": _small_exec(execution)},
             config,
@@ -595,26 +785,31 @@ def review_results(
     if install_status.startswith("pip install failed"):
         return _maybe_llm(
             RedTeamReview(
-                verdict=Verdict.VETO.value,
+                verdict=technical_verdict,
                 gaps=gaps,
                 required_changes=[],
-                root_cause=f"dependency installation failed: {install_status}",
+                root_cause=(
+                    env_cause.cause
+                    if env_cause
+                    else f"dependency installation failed: {install_status}"
+                ),
                 notes="dependency installation failed",
             ),
             {"phase": "results", "plan": plan.to_dict(), "execution": _small_exec(execution)},
             config,
         )
     if exit_code != 0 or failed > 0:
-        root = failure_cause or (
-            f"pytest exit {exit_code}, failed={failed}; assertion details were not parsed"
+        root = (env_cause.cause if env_cause else failure_cause) or (
+            f"pytest exit {exit_code}, failed={failed}; no failure detail was "
+            "recorded - see pytest.log in the run directory"
         )
         return _maybe_llm(
             RedTeamReview(
-                verdict=Verdict.VETO.value,
+                verdict=technical_verdict,
                 gaps=gaps,
                 required_changes=[],
                 root_cause=root,
-                notes="failing tests are a technical veto",
+                notes=blocked_note if env_cause else "failing tests are a technical veto",
             ),
             {"phase": "results", "plan": plan.to_dict(), "execution": _small_exec(execution)},
             config,

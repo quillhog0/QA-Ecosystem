@@ -6,7 +6,7 @@ Version 0.3.3. See CHANGELOG.md.
 
 Part of the quillhog toolkit — [github.com/quillhog0](https://github.com/quillhog0) · [quillhog.xyz](https://quillhog.xyz) · X [@Quillhog0](https://x.com/Quillhog0).
 
-Deterministic QA control plane with six roles. Give it documentation plus a Python project; it walks a fixed test cycle in an **isolated copy** and returns a structured report with a verdict: `CLEAR`, `VETO`, or `ESCALATE`.
+Deterministic QA control plane with six roles. Give it documentation plus a Python project; it walks a fixed test cycle in an **isolated copy** and returns a structured report with a verdict: `CLEAR`, `BLOCKED_ENV`, `VETO`, or `ESCALATE`.
 
 It does not patch code, does not run against production, does not read secrets, and does not promise coverage. It answers one question: *do the docs, the code, and the tests actually agree, and does the suite prove what the docs claim?*
 
@@ -54,38 +54,40 @@ nova / execute: collected=3 passed=3 failed=0 exit=0 install=no dependency manif
 
 ## Does it beat a single agent?
 
-Comparison against a "flat agent" baseline that only runs `pytest` and returns `CLEAR` on exit 0 (see `benchmark/compare.py` and `benchmark/results.md`).
+Comparison against a "flat agent" baseline that only runs `pytest` and returns `CLEAR` on exit 0 (see `benchmark/compare.py` and `benchmark/results.md`). Anything other than `CLEAR` counts as caught. Both column sets below were measured on the same host in the same working tree, once with the sandbox active (`--sandbox auto`, observed `bwrap`) and once with `--sandbox off`; `benchmark/results.md` holds the generated table for the mode its run used.
 
-**Summary:** default 20/24 (83 %), strict (riley.veto_on_uncovered_claims enabled via --strict) 24/24 (100 %), flat 8/24 (33 %)
+Dangerous operations in test files are WARN instead of VETO only while the Bubblewrap sandbox confines execution to the isolated copy; with the sandbox off they VETO. This is why the four `dangerous_test` rows differ between the column sets.
 
-| project | bug category | default | strict | flat |
-|---|---|---|---|---|
-| seed_code_01_pricing_discount | untested_code_bug | CLEAR | VETO | CLEAR |
-| seed_code_02_auth_validation | untested_code_bug | CLEAR | VETO | CLEAR |
-| seed_code_03_ledger_balance | untested_code_bug | CLEAR | VETO | CLEAR |
-| seed_code_04_rate_limiter | untested_code_bug | CLEAR | VETO | CLEAR |
-| seed_danger_01_eval_call | dangerous_test | VETO | VETO | CLEAR |
-| seed_danger_02_os_system | dangerous_test | VETO | VETO | CLEAR |
-| seed_danger_03_dunder_import | dangerous_test | VETO | VETO | CLEAR |
-| seed_danger_04_conftest_exec | dangerous_test | VETO | VETO | CLEAR |
-| seed_dep_01_missing_client | missing_dep | VETO | VETO | VETO |
-| seed_dep_02_missing_parser | missing_dep | VETO | VETO | VETO |
-| seed_dep_03_missing_test_helper | missing_dep | VETO | VETO | VETO |
-| seed_dep_04_missing_crypto_lib | missing_dep | VETO | VETO | VETO |
-| seed_drift_01_removed_export | doc_drift | VETO | VETO | CLEAR |
-| seed_drift_02_renamed_endpoint | doc_drift | VETO | VETO | CLEAR |
-| seed_drift_03_missing_constant | doc_drift | VETO | VETO | CLEAR |
-| seed_drift_04_unimplemented_helper | doc_drift | VETO | VETO | CLEAR |
-| seed_tautology_01_math_div | tautology_test | VETO | VETO | CLEAR |
-| seed_tautology_02_str_strip | tautology_test | VETO | VETO | CLEAR |
-| seed_tautology_03_status_check | tautology_test | VETO | VETO | CLEAR |
-| seed_tautology_04_crypto_hash | tautology_test | VETO | VETO | CLEAR |
-| seed_uncommitted_01_subtraction | uncommitted_bug | VETO | VETO | VETO |
-| seed_uncommitted_02_off_by_one | uncommitted_bug | VETO | VETO | VETO |
-| seed_uncommitted_03_inverted_bool | uncommitted_bug | VETO | VETO | VETO |
-| seed_uncommitted_04_broken_multiplier | uncommitted_bug | VETO | VETO | VETO |
+| project | bug category | default (bwrap) | strict (bwrap) | default (off) | strict (off) | flat |
+|---|---|---|---|---|---|---|
+| seed_code_01_pricing_discount | untested_code_bug | CLEAR | VETO | CLEAR | VETO | CLEAR |
+| seed_code_02_auth_validation | untested_code_bug | CLEAR | VETO | CLEAR | VETO | CLEAR |
+| seed_code_03_ledger_balance | untested_code_bug | CLEAR | VETO | CLEAR | VETO | CLEAR |
+| seed_code_04_rate_limiter | untested_code_bug | CLEAR | VETO | CLEAR | VETO | CLEAR |
+| seed_danger_01_eval_call | dangerous_test | CLEAR | CLEAR | VETO | VETO | CLEAR |
+| seed_danger_02_os_system | dangerous_test | CLEAR | CLEAR | VETO | VETO | CLEAR |
+| seed_danger_03_dunder_import | dangerous_test | CLEAR | CLEAR | VETO | VETO | CLEAR |
+| seed_danger_04_conftest_exec | dangerous_test | CLEAR | CLEAR | VETO | VETO | CLEAR |
+| seed_dep_01_missing_client | missing_dep | BLOCKED_ENV | BLOCKED_ENV | BLOCKED_ENV | BLOCKED_ENV | VETO |
+| seed_dep_02_missing_parser | missing_dep | BLOCKED_ENV | BLOCKED_ENV | BLOCKED_ENV | BLOCKED_ENV | VETO |
+| seed_dep_03_missing_test_helper | missing_dep | BLOCKED_ENV | BLOCKED_ENV | BLOCKED_ENV | BLOCKED_ENV | VETO |
+| seed_dep_04_missing_crypto_lib | missing_dep | BLOCKED_ENV | BLOCKED_ENV | BLOCKED_ENV | BLOCKED_ENV | VETO |
+| seed_drift_01_removed_export | doc_drift | VETO | VETO | VETO | VETO | CLEAR |
+| seed_drift_02_renamed_endpoint | doc_drift | VETO | VETO | VETO | VETO | CLEAR |
+| seed_drift_03_missing_constant | doc_drift | VETO | VETO | VETO | VETO | CLEAR |
+| seed_drift_04_unimplemented_helper | doc_drift | VETO | VETO | VETO | VETO | CLEAR |
+| seed_tautology_01_math_div | tautology_test | VETO | VETO | VETO | VETO | CLEAR |
+| seed_tautology_02_str_strip | tautology_test | VETO | VETO | VETO | VETO | CLEAR |
+| seed_tautology_03_status_check | tautology_test | VETO | VETO | VETO | VETO | CLEAR |
+| seed_tautology_04_crypto_hash | tautology_test | VETO | VETO | VETO | VETO | CLEAR |
+| seed_uncommitted_01_subtraction | uncommitted_bug | VETO | VETO | VETO | VETO | VETO |
+| seed_uncommitted_02_off_by_one | uncommitted_bug | VETO | VETO | VETO | VETO | VETO |
+| seed_uncommitted_03_inverted_bool | uncommitted_bug | VETO | VETO | VETO | VETO | VETO |
+| seed_uncommitted_04_broken_multiplier | uncommitted_bug | VETO | VETO | VETO | VETO | VETO |
 
-**Result:** default 20/24, strict (riley.veto_on_uncovered_claims enabled via --strict) 24/24, flat 8/24.
+**Summary:** with `--sandbox auto` (bwrap active) default 16/24 (67 %), strict (riley.veto_on_uncovered_claims enabled via --strict) 20/24 (83 %), flat 8/24 (33 %). With `--sandbox off` default 20/24 (83 %), strict 24/24 (100 %), flat 8/24 (33 %).
+
+**Result:** sandbox auto - default 16/24, strict 20/24, flat 8/24; sandbox off - default 20/24, strict 24/24, flat 8/24.
 
 ## Isolation
 
@@ -107,7 +109,7 @@ Execution of the isolated pytest test suite is wrapped in a kernel-level sandbox
 - **Path validation:** `run_pytest` resolves `isolated_root` and `work_dir` once at the start and raises `ValueError` if either contains `os.pathsep`.
 - **Process lifecycle:** Runs with `--die-with-parent` to ensure child processes terminate with the runner.
 - **Defense-in-depth:** The existing Sable runtime guard (`-p _sable_guard`, `NO_NETWORK=1`) remains active as a second layer on a read-only mount.
-- **Configuration:** Set via `sandbox.mode = auto | required | off` (default `auto`) or CLI `--sandbox [auto|required|off]`. Unknown or misspelled modes raise `ValueError` (fail closed). When set to `required`, a missing `bwrap` binary yields an immediate `VETO`. When `auto` falls back on non-Linux or systems without `bwrap`, the report states `sandbox: unavailable (ran unsandboxed)` clearly. Tested projects can never modify sandbox configuration.
+- **Configuration:** Set via `sandbox.mode = auto | required | off` (default `auto`) or CLI `--sandbox [auto|required|off]`. Unknown or misspelled modes raise `ValueError` (fail closed). When set to `required`, a missing `bwrap` binary stops the run with `BLOCKED_ENV` (exit 2) before any test executes; a project that Sable or Riley already accuses still gets a `VETO`. When `auto` falls back on non-Linux or systems without `bwrap`, the report states `sandbox: unavailable (ran unsandboxed)` clearly. Tested projects can never modify sandbox configuration.
 
 ## Install
 
@@ -129,7 +131,29 @@ python main.py --project /path/to/project --docs /path/to/docs
 
 Writes `reports/<run_id>.md` and `reports/<run_id>.yaml` (or into `--reports-dir`).
 
-Process exit code: `0` = `CLEAR`, `1` = `VETO` or `ESCALATE`.
+### Verdicts and exit codes
+
+| verdict | exit code | meaning |
+|---|---|---|
+| `CLEAR` | 0 | Docs, code and tests agree, and the suite ran and witnessed the claims |
+| `BLOCKED_ENV` | 2 | An environment precondition stopped the run, so the tests never ran. Not a pass, and no defect is claimed against the project |
+| `VETO` | 1 | A finding that accuses the project: drift, a failing test, a weak test, a policy violation |
+| `ESCALATE` | 1 | The loop did not close within the iteration cap |
+
+Precedence is monotonic: **VETO > BLOCKED_ENV > CLEAR**. An environmental explanation never softens a finding against the project, and `BLOCKED_ENV` is never a pass. Every non-zero exit code fails a CI step.
+
+`core/environment.py` (`classify_execution`) decides what counts as environmental, and the report names the exact precondition:
+
+- a test dependency that cannot be imported: `missing dependency: <pkg>`;
+- a requirement Sable refused to install, such as an editable install of the project under test: `refused unsafe requirement: <line>`;
+- distribution metadata that only exists after an install: `missing package metadata: <dist>`;
+- a module the build backend writes into the package, absent from a source checkout: `generated module absent: <pkg._version>`;
+- any other dependency installation failure: `dependency installation failed: <status>`;
+- a required sandbox that cannot start: `sandbox required but bwrap unavailable: <reason>`.
+
+A failing test, an unexplained empty collection, a weak test and every Sable `BLOCK` keep the `VETO`. Nova's role result still records the raw execution signal; only the final verdict is environment-aware, and the mutation audit is skipped because there is no passing baseline to mutate. In SARIF the stop is `VESPER003` at level `warning`, so a blocked run is visible without being reported as a code defect.
+
+An import error counts as environmental only when the name is not the project's own. A top-level name backed by a package directory (`src/<name>/__init__.py` or `<name>/__init__.py`) or by a plain `<name>.py` module belongs to the project, and so does a dotted path that resolves to files inside the tree; both keep the `VETO`. An error the project raised deliberately keeps the `VETO` as well: the classifier reads the raising frame of the traceback, so a `conftest.py` that does `raise ModuleNotFoundError("No module named 'numpy'")` cannot fake an environment failure. A requirement the policy refused to install outranks the import errors it caused, because it explains them. The cause names what the manifests say about the missing distribution, `declared in the project manifest but not installed` or `not installable or not declared in requirements`, read from `requirements*.txt`, `[project.dependencies]`, every `[project.optional-dependencies]` group and `[dependency-groups]`. Where that evidence runs out, the `VETO` stands: an environment stop has to be provable, not merely plausible.
 
 ### Sample project bundled here
 
@@ -139,7 +163,7 @@ python main.py --project examples/sample-project --docs examples/sample-project/
 
 ## GitHub Action
 
-Add QA Ecosystem as a gate in any repository's workflow. The job fails when the verdict is VETO, and the report is written to the job summary.
+Add QA Ecosystem as a gate in any repository's workflow. The job fails when the verdict is anything but CLEAR (VETO, ESCALATE or BLOCKED_ENV), and the report is written to the job summary. A BLOCKED_ENV run also emits a workflow warning naming the environment precondition, so a blocked gate is distinguishable from a failing one.
 
 ```yaml
 - uses: actions/checkout@v4
@@ -182,6 +206,7 @@ Rule identifiers and their positions in the document's `tool.driver.rules` array
 | NOVA002 | Dependency installation failed before pytest ran | error |
 | VESPER001 | The loop did not close and the run escalated | error |
 | VESPER002 | Run vetoed before execution: verdict is not CLEAR and no other rule produced a result | error |
+| VESPER003 | Run blocked by the environment: the tests could not run, and the message names the precondition | warning |
 
 ## Tests and benchmark
 
@@ -205,7 +230,7 @@ Benchmark fixtures:
 | dangerous_test | BLOCK/VETO by Sable |
 | doc_drift | VETO by Lexi |
 | failing_test | VETO by Riley |
-| missing_dep | VETO, root cause `missing dependency: <pkg>` |
+| missing_dep | BLOCKED_ENV (exit 2), root cause `missing dependency: <pkg>` |
 | no_tests | VETO |
 | malicious_conftest | BLOCK/VETO by Sable |
 | own_conftest | CLEAR |
@@ -214,6 +239,27 @@ Benchmark fixtures:
 | uncommitted_bug | VETO by Nova/Riley |
 | weak_tests | VETO, surviving mutants drop score below threshold |
 | cheating_agent | VETO: skipped test, assertion swallowed by try/except, only trivial assertions |
+
+### Field test on public repositories
+
+`benchmark/field_test.py` runs the same cycle against real public projects pinned to exact commits, so a release can be checked for false VETOs outside the curated fixtures.
+
+```bash
+# reuse clones already on disk; nothing is fetched
+python benchmark/field_test.py --repos-dir ~/qa-field-test --offline
+
+# or let the harness fetch the pinned commits into reports/field-clones
+python benchmark/field_test.py
+```
+
+- `benchmark/field_repos.yaml` is the manifest: repo name, clone URL, pinned commit SHA, and an optional docs file (otherwise `README.md`, `README.rst` or `README.txt`). Every field is validated before anything runs: the name must match `^[A-Za-z0-9._-]+$` without `..`, the SHA must be a full 40-character lowercase commit hash, the URL must start with `https://` and the docs path must stay inside the clone. A manifest entry that could become a git option or a path outside the clone is rejected with a message instead of being executed.
+- **Network:** the shallow `git fetch --depth 1 origin <sha>` performed by the harness is the only step that touches the network, and it happens outside every QA cycle. Each `main.py` run keeps the default `config.yaml` (`dry_run=true`, `allow_network=false`, no mutation) and never builds or installs the project under test. `--offline` refuses to fetch anything; clones passed via `--repos-dir` are only read, never checked out or modified.
+- A clone whose HEAD is not the pinned SHA is never handed to `main.py`: the pin is verified before the run and the row is marked `ERROR`, so a wrong revision cannot be reported as a pass, a regression or a note.
+- `benchmark/field_expected.yaml` records the expected verdict, exit code, a root-cause substring and minimum collected/passed counts per repo. Every row is `OK` (matches expectation), `OBSERVED` (ran, no expectation recorded), `REGRESSION` (a measured verdict disagrees) or `ERROR` (nothing was measured: no clone, wrong commit, no docs), and the script exits 0 only when no row regressed and none errored.
+- Output: a markdown table (repo, sha, verdict, sandbox, collected/passed/failed, exit, expected, status, cause) plus per-repo details in `reports/field-test-<ts>.md`. The QA reports themselves land in `reports/field-runs-<ts>/<repo>/`.
+- `--only name1,name2` runs a subset, `--manifest` and `--expected` point at other files, and `--timeout` caps each run (default 900 seconds).
+
+Because the project under test is never installed, a suite that needs an installed distribution, a build-time module or an undeclared development dependency cannot run: those rows are `BLOCKED_ENV` naming the exact precondition, not `VETO`. Manifest parsing, clone policy, expectation evaluation and table rendering are unit-tested offline in `tests/unit/test_field_test.py`.
 
 ## Mutation testing
 
@@ -245,6 +291,7 @@ See `config.yaml`.
 - `mutation.max_mutants`: `30` (default), limit of mutants evaluated per run
 - `mutation.workers`: `min(4, CPU count)` (default, capped at 16), mutants evaluated in parallel, each in its own tree copy; results are identical to a sequential run
 - `llm.provider`: `none` (heuristics), `openrouter`, or `local`
+- `llm.allow_network` (default false): lets only the QA process reach a remote LLM provider; the tested project's tests keep the network off regardless of this switch
 - `nova.install_deps`, `nova.pip_timeout`: dependency install in the isolated venv
 - `lexi.doc_globs`, `lexi.ignore_identifiers`: which docs to read, which terms to ignore
 - `lexi.ignore_identifiers` is read only from the operator config, never from the config.yaml of the project under test
@@ -254,9 +301,9 @@ See `config.yaml`.
 - `mutation.seed` (default 42), `mutation.timeout_per_mutant` (default 30 seconds)
 - `riley.veto_on_uncovered_claims`: Riley vetoes when a documented claim has no covering test
 
-CLI: `--config PATH` loads an operator config other than `config.yaml`; `--no-dry-run` turns off dry-run so configured LLM calls can run.
+CLI: `--config PATH` loads an operator config other than `config.yaml`; `--no-dry-run` turns off dry-run so configured LLM calls can run; `--llm-network` sets `llm.allow_network` for one run, permitting only the QA process to reach the LLM provider while the sandboxed pytest stays offline.
 
-Sable and Nova never depend on a model. OpenRouter is used only when `OPENROUTER_API_KEY` is set, `llm.provider` is `openrouter`, dry-run LLM is allowed, and `--allow-network` is on. The key is never written into reports.
+Sable and Nova never depend on a model. OpenRouter is used only when `OPENROUTER_API_KEY` is set, `llm.provider` is `openrouter`, dry-run LLM is allowed, and the LLM network is permitted (`llm.allow_network` / `--llm-network`, or the broader `--allow-network`). Prompt and payload text are scrubbed of secret-shaped values before any call, and the key is never written into reports.
 
 ## Known limits
 
@@ -277,11 +324,11 @@ Sable and Nova never depend on a model. OpenRouter is used only when `OPENROUTER
 ```
 main.py              CLI entry point (--project/--docs, --self-test)
 config.yaml          safe defaults (dry_run, no network, llm.provider: none)
-core/                Vesper orchestrator, isolation, packets, pytest runner, deps, report, SARIF writer
+core/                Vesper orchestrator, isolation, packets, pytest runner, deps, report, SARIF writer, environment classification
 agents/              Lexi, Aria, Riley, Nova + LLM adapters and prompts
 policies/sable.py    Sable pre-flight policy (secrets, live tree, dangerous calls)
 schemas/             report and handoff packet formats
-benchmark/           fixtures + run_benchmark.py
+benchmark/           fixtures + run_benchmark.py + field_test.py on pinned public repos
 examples/            sample project used in the docs
 tests/               unit tests and fixture benchmark test
 ```
