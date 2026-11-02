@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Fixed
+- Lexi no longer escalates plain documentation words to high severity just because they sit next to an unrelated identifier (for example `json.dumps` in a helper script). Anchoring now requires the sibling to be a defined function or class in the project. Test-only names mentioned in docs are ignored.
+- Per-failure classification now treats `PackageNotFoundError` (missing distribution metadata in an isolated copy) and `sqlite3: unable to open database file` as environment, matching the whole-run classifier. Broader git-absent messages are also recognized.
+
+
 ### Added
 - `BLOCKED_ENV` verdict with exit code `2` for a run stopped by an environment precondition instead of a defect: a test dependency that cannot be imported, a requirement Sable refused to install, missing distribution metadata, a build-time module absent from the source tree, another dependency installation failure, or `sandbox.mode: required` while `bwrap` cannot start. `core/environment.py` classifies the cause and the report names it exactly. Precedence is monotonic (`VETO` > `BLOCKED_ENV` > `CLEAR`): a failing test, an unexplained empty collection, a weak test or a Sable `BLOCK` still vetoes, and `BLOCKED_ENV` is never a pass.
 - SARIF rule `VESPER003` (level `warning`) for an environment-blocked run. It is appended to `RULE_CATALOG`, so every existing rule index is unchanged.

@@ -381,7 +381,10 @@ def classify_execution(
 # The isolated copy is a file tree, never a repository checkout: ``.git`` is not
 # copied (core/isolation.py) so a test that shells out to git fails with git's own
 # words. That says something about the copy, not about the project.
-GIT_ABSENT_RE = re.compile(r"not a git repository", re.IGNORECASE)
+GIT_ABSENT_RE = re.compile(
+    r"(?:not a git repository|fatal: not a git repository|No such file or directory: ['.]git)",
+    re.IGNORECASE,
+)
 # ``FileNotFoundError: [Errno 2] No such file or directory: 'node'``. The sandbox
 # runs with an allowlisted PATH and a sandbox HOME, so a program the developer
 # keeps in ~/.local/bin or ~/.nvm is simply not visible, and a test that shells
@@ -474,6 +477,24 @@ def classify_failure(
         return EnvCause(
             "missing_dependency",
             f"missing dependency: {name} ({_missing_module_detail(name, project_root)})",
+        )
+    # Package metadata is absent in an isolated source copy that was never installed.
+    metadata = METADATA_ERROR_RE.search(text)
+    if metadata:
+        if _raised_by_project(text, metadata.start()):
+            return None
+        return EnvCause(
+            "missing_metadata",
+            f"missing package metadata: {metadata.group(1)} (the suite needs an installed "
+            "distribution; this run never builds or installs the project under test)",
+        )
+    # sqlite in the sandbox has no writable persistent database by design.
+    sqlite_pos = text.find("unable to open database file")
+    if sqlite_pos != -1 and not _raised_by_project(text, sqlite_pos):
+        return EnvCause(
+            "missing_writable_storage",
+            "sqlite cannot open a database file (the isolated copy has no writable "
+            "persistent storage for sqlite)",
         )
     return None
 

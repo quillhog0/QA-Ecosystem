@@ -786,9 +786,10 @@ def _string_identifiers(code_strings: set[str]) -> set[str]:
     return found
 
 
-def _collect_code_ast_terms(code_files: list[Path]) -> tuple[set[str], set[str]]:
+def _collect_code_ast_terms(code_files: list[Path]) -> tuple[set[str], set[str], set[str]]:
     all_identifiers: set[str] = set()
     function_names: set[str] = set()
+    class_names: set[str] = set()
     for path in code_files:
         try:
             tree = ast.parse(path.read_text(encoding="utf-8-sig", errors="replace"))
@@ -799,6 +800,7 @@ def _collect_code_ast_terms(code_files: list[Path]) -> tuple[set[str], set[str]]
                 function_names.add(node.name)
                 all_identifiers.add(node.name)
             elif isinstance(node, ast.ClassDef):
+                class_names.add(node.name)
                 all_identifiers.add(node.name)
             elif isinstance(node, ast.Name):
                 all_identifiers.add(node.id)
@@ -813,7 +815,7 @@ def _collect_code_ast_terms(code_files: list[Path]) -> tuple[set[str], set[str]]
                 # A function parameter name is part of the public shape of the
                 # project even when the body never rebinds it.
                 all_identifiers.add(node.arg)
-    return all_identifiers, function_names
+    return all_identifiers, function_names, class_names
 
 
 def _collect_code_strings(code_files: list[Path], project_root: Path) -> set[str]:
@@ -1008,7 +1010,7 @@ def _heuristic_drift(
 
     imported_names = _imported_names(project_root)
     code_text_content = _collect_code_text_content(project_root)
-    all_code_identifiers, function_names = _collect_code_ast_terms(code_files)
+    all_code_identifiers, function_names, class_names = _collect_code_ast_terms(code_files)
     code_strings = _collect_code_strings(code_files, project_root)
     # Identifiers that only ever appear inside a longer literal (SQL DDL, a
     # systemd unit, a connection string) are still real code evidence.
@@ -1030,10 +1032,16 @@ def _heuristic_drift(
             code_index[name] = rel
 
     test_text = ""
+    test_defined_names: set[str] = set()
     for path in test_files:
         try:
-            test_text += path.read_text(encoding="utf-8", errors="replace") + "\n"
-        except OSError:
+            content = path.read_text(encoding="utf-8", errors="replace")
+            test_text += content + "\n"
+            tree = ast.parse(content)
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    test_defined_names.add(node.name)
+        except (OSError, SyntaxError):
             continue
 
     # Backticked doc terms often name accounts, config keys or CLI values, so a
@@ -1058,17 +1066,13 @@ def _heuristic_drift(
     project_symbols_lower: set[str] = {name.lower() for name in project_symbol_names}
 
     def resolvable_symbol(name: str) -> bool:
-        # ``name`` arrives already reduced to a single identifier by _anchored,
-        # so this only asks whether that name exists in the project in any form.
+        # Only defined functions and classes count as anchors for an API list.
+        # Attribute accesses (json.dumps), keywords, args and string fragments
+        # do not — otherwise a plain docs word next to any identifier becomes
+        # a high-severity finding.
         if not name:
             return False
-        return bool(
-            name in project_symbol_names
-            or name.lower() in project_symbols_lower
-            or name in code_strings
-            or name in code_string_identifiers
-            or _pep503_name(name) in declared_packages
-        )
+        return name in function_names or name in class_names
 
     seen: set[str] = set()
     for ident in _backtick_functions(docs_root, doc_globs):
@@ -1096,6 +1100,10 @@ def _heuristic_drift(
         if ident in known_refs or ident.lower() in known_refs_lower:
             # A real branch name in the project's own repository is a known
             # term, not documentation drift.
+            continue
+        if ident in test_defined_names:
+            # A name defined only in tests (helper, fixture, test function)
+            # is not missing product code.
             continue
         if _is_code_term(ident, all_code_identifiers, function_names):
             continue
