@@ -286,6 +286,9 @@ class FinalReport:
     tested_tree: str = ""
     timings: dict[str, float] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
+    # Diff-mode bookkeeping: the computed scope, or the reason a full run was
+    # used instead. Empty for a normal full run.
+    diff: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)

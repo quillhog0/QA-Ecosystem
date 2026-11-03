@@ -60,7 +60,7 @@ def test_main_self_test_cleanup_ignores_already_removed_docs(tmp_path: Path):
         isolated_root=str(tmp_path / "iso"),
     )
 
-    def _run_and_remove_docs(_project: Path, _docs: Path) -> FinalReport:
+    def _run_and_remove_docs(_project: Path, _docs: Path, exceptions=None) -> FinalReport:
         fake_docs.rmdir()
         return fake_report
 

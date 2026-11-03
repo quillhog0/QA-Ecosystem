@@ -419,7 +419,10 @@ def is_weak_test_node(
     return False, "ok"
 
 
-def detect_weak_tests(project_root: Path | None) -> dict[str, str]:
+def detect_weak_tests(
+    project_root: Path | None,
+    only_paths: set[str] | None = None,
+) -> dict[str, str]:
     weak_tests: dict[str, str] = {}
     if not project_root or not project_root.is_dir():
         return weak_tests
@@ -434,6 +437,9 @@ def detect_weak_tests(project_root: Path | None) -> dict[str, str]:
         if not _PYTEST_COLLECTED_FILE_RE.match(path.name):
             continue
         rel = str(path.relative_to(project_root)).replace("\\", "/")
+        if only_paths is not None and rel not in only_paths:
+            # Diff mode: review only the tests that changed.
+            continue
         try:
             tree = ast.parse(path.read_text(encoding="utf-8-sig", errors="replace"))
         except (OSError, SyntaxError):
@@ -460,6 +466,7 @@ def review_plan(
     *,
     config: dict[str, Any],
     project_root: Path | None = None,
+    only_paths: set[str] | None = None,
 ) -> RedTeamReview:
     gaps: list[str] = []
     if not plan.scenarios:
@@ -475,7 +482,7 @@ def review_plan(
     if any("network" in " ".join(s.steps).lower() for s in plan.scenarios):
         gaps.append("plan steps appear to require network")
 
-    weak_tests = detect_weak_tests(project_root)
+    weak_tests = detect_weak_tests(project_root, only_paths=only_paths)
     claims_covered_by_weak: list[str] = []
     for s in plan.scenarios:
         if s.id.startswith("C") and s.covered_by:
@@ -644,6 +651,7 @@ def review_results(
     *,
     config: dict[str, Any],
     project_root: Path | None = None,
+    only_paths: set[str] | None = None,
 ) -> RedTeamReview:
     gaps: list[str] = []
     collected = int(execution.get("collected") or 0)
@@ -676,7 +684,7 @@ def review_results(
     if not plan.scenarios:
         gaps.append("no plan to compare against results")
 
-    weak_tests = detect_weak_tests(project_root)
+    weak_tests = detect_weak_tests(project_root, only_paths=only_paths)
     claims_covered_by_weak: list[str] = []
     for s in plan.scenarios:
         if s.id.startswith("C"):

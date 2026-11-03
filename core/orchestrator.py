@@ -57,13 +57,44 @@ class Vesper:
         self.dry_run = bool(config.get("dry_run", True))
         self.timeout = int((config.get("pytest") or {}).get("timeout_seconds") or 120)
         self.role_results: list[RoleResult] = []
+        self._scope: Any = None
+        self._diff_fallback: str = ""
 
-    def run(self, project: Path, docs: Path) -> FinalReport:
+    def _compute_diff_scope(self, project: Path, docs: Path) -> Any:
+        """Return a DiffScope for ``--diff``, or ``None`` for a full run.
+
+        A diff mode that cannot compute its scope (no git, bad ref, too many
+        files) never silently skips: it falls back to a full run and remembers
+        why, so the report can say so.
+        """
+        diff_cfg = self.config.get("diff") or {}
+        base_ref = str(diff_cfg.get("base_ref") or "").strip()
+        self._diff_fallback = ""
+        if not base_ref:
+            return None
+        from core.diffscope import DiffScopeError, compute_diff_scope
+
+        try:
+            return compute_diff_scope(
+                project.resolve(),
+                base_ref,
+                docs.resolve(),
+                max_files=int(diff_cfg.get("max_files") or 200),
+            )
+        except DiffScopeError as exc:
+            self._diff_fallback = (
+                f"diff scope unavailable ({exc}); running the full cycle"
+            )
+            return None
+
+    def run(self, project: Path, docs: Path, exceptions: list[Any] | None = None) -> FinalReport:
         from core.sandbox import get_sandbox_status, resolve_sandbox_mode
 
         # Validate operator config before any isolated copy exists, so an
         # invalid sandbox mode cannot leak a copy under the temp directory.
         resolve_sandbox_mode(self.config)
+        self.exceptions = list(exceptions or [])
+        self._scope = self._compute_diff_scope(project, docs)
         started = utc_now()
         run_id = new_run_id()
         base = Path(self.config.get("reports_dir") or "reports").resolve()
@@ -134,6 +165,29 @@ class Vesper:
             )
 
         blocked_reason = ""
+        if self._scope is not None:
+            report.diff = {"mode": "diff", **self._scope.to_dict()}
+        elif self.config.get("diff") and (self.config.get("diff") or {}).get("base_ref"):
+            report.diff = {
+                "mode": "full",
+                "reason": self._diff_fallback,
+                "base_ref": str((self.config.get("diff") or {}).get("base_ref")),
+            }
+            report.warnings.append(self._diff_fallback)
+        if self._scope is not None:
+            append_result(
+                self.role_results,
+                RoleResult(
+                    role=Role.VESPER.value,
+                    stage=Stage.INIT.value,
+                    verdict=Verdict.CLEAR.value,
+                    summary=(
+                        f"diff mode vs {self._scope.base_ref}: "
+                        f"{len(self._scope.changed)} changed file(s)"
+                    ),
+                    details=self._scope.to_dict(),
+                ),
+            )
         if failure_reason:
             # A required sandbox that cannot start is an environment stop, not an
             # accusation against the project. The cycle still runs Lexi, Aria,
@@ -161,7 +215,7 @@ class Vesper:
                 report.finished_at = utc_now()
                 write_reports(report, base)
                 findings_base = Path(self.config.get("findings_dir") or base).resolve()
-                write_findings(report, findings_base)
+                write_findings(report, findings_base, exceptions=getattr(self, "exceptions", None))
         finally:
             release_isolation(isolation, keep=bool(self.config.get("keep_isolated_copy", False)))
         return report
@@ -177,6 +231,14 @@ class Vesper:
         isolated = isolation.isolated_root
         docs = Path(packet.docs_root)
 
+        # Diff mode threads a per-role scope through every collector; a full run
+        # leaves all of these None so behaviour is byte-for-byte unchanged.
+        scope = getattr(self, "_scope", None)
+        docs_allowlist = set(scope.lexi_docs_allowlist) if scope is not None else None
+        changed_code = set(scope.changed_code) if scope is not None else None
+        only_paths = set(scope.riley_sable_paths) if scope is not None else None
+        nova_targets = list(scope.nova_test_targets) if scope is not None else None
+
         # 1. Lexi drift check
         drift = None
         drift_veto = False
@@ -191,6 +253,8 @@ class Vesper:
                 project_root=isolated,
                 config=self.config,
                 live_root=isolation.live_root,
+                docs_allowlist=docs_allowlist,
+                changed_code=changed_code,
             )
             append_result(
                 self.role_results,
@@ -256,7 +320,7 @@ class Vesper:
                 to_role=Role.RILEY.value,
                 payload=plan.to_dict(),
             )
-            review = riley.review_plan(plan, config=self.config, project_root=isolated)
+            review = riley.review_plan(plan, config=self.config, project_root=isolated, only_paths=only_paths)
             append_result(
                 self.role_results,
                 RoleResult(
@@ -286,7 +350,7 @@ class Vesper:
         assert plan is not None and review is not None
 
         # 4. Sable pre-flight
-        command = sable.default_command(isolated, work_dir)
+        command = sable.default_command(isolated, work_dir, test_targets=nova_targets)
         env = sanitized_env(allow_network=self.allow_network)
         env["HOME"] = str(work_dir / "home")
         packet = packet.next(
@@ -304,6 +368,7 @@ class Vesper:
             cwd=isolated,
             allow_in_tests=(self.config.get("sable") or {}).get("allow_in_tests"),
             sandboxed=report.sandbox == "bwrap",
+            only_paths=only_paths,
         )
         allowed_note = ""
         if policy.allowed:
@@ -414,6 +479,7 @@ class Vesper:
             allow_network=self.allow_network,
             timeout=self.timeout,
             config=self.config,
+            test_targets=nova_targets,
         )
         _execute_seconds = time.monotonic() - _execute_started
         report.timings["execute"] = round(_execute_seconds, 3)
@@ -498,7 +564,7 @@ class Vesper:
             to_role=Role.RILEY.value,
             payload=execution.to_dict(),
         )
-        result_review = riley.review_results(plan, execution.to_dict(), config=self.config, project_root=isolated)
+        result_review = riley.review_results(plan, execution.to_dict(), config=self.config, project_root=isolated, only_paths=only_paths)
         append_result(
             self.role_results,
             RoleResult(
@@ -516,6 +582,8 @@ class Vesper:
             config=self.config,
             execution=execution.to_dict(),
             live_root=isolation.live_root,
+            docs_allowlist=docs_allowlist,
+            changed_code=changed_code,
         )
         append_result(
             self.role_results,
@@ -594,7 +662,10 @@ class Vesper:
         mutation_cfg = dict(self.config.get("mutation") or {})
         mutation_enabled = bool(mutation_cfg.get("enabled", False))
 
-        if not mutation_enabled:
+        if self._scope is not None:
+            # Diff mode is a fast pre-push check: mutation testing is off.
+            report.mutation = {"status": "skipped", "reason": "diff mode"}
+        elif not mutation_enabled:
             report.mutation = {"status": "skipped", "reason": "disabled"}
         else:
             py_bin = None

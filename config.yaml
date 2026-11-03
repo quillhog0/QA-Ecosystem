@@ -39,6 +39,15 @@ llm:
 pytest:
   timeout_seconds: 120
 
+# Operator-owned exception policy (see docs/exceptions.md). Exceptions never
+# live in the project under test. By default the file is
+# exceptions/<project-name>.yaml under this repository; `file` overrides it and
+# `max_days` caps how far ahead an expiry may sit.
+exceptions:
+  # file: exceptions/my-project.yaml
+  dir: exceptions
+  max_days: 90
+
 sable:
   allow_in_tests:
     - path: tests/unit/test_isolation.py

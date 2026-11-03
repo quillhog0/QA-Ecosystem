@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.6 (2026-11-03)
+
+Verified with 702 unit tests passing (1 skipped), benchmark 15/15, field test 10/10 and a self-test mutation score of 1.00 (29 killed, 0 survived, verdict CLEAR).
+
+### Added
+- Exceptions: `exceptions/<project>.yaml` in the QA repo lets a human accept a finding by its stable `fingerprint`, with a required reason and an expiry of at most 90 days. Excepted findings become INFO, expired exceptions produce a WARN, invalid entries fail at startup, and P0 can be excepted only with `allow_p0: true` and is always listed at the top. See `docs/exceptions.md`.
+- Every finding in `findings.json` carries a stable `fingerprint`.
+- Diff mode: `--diff <base-ref>` scopes all agents to the changed files, turns mutation off and falls back to a full run (stated in the report) when the scope cannot be computed. Typical pre-push run takes seconds.
+
+### Changed
+- New tests cover isolation fallbacks, `.env` symlink removal and Nova failure verdicts.
+
 ## 0.3.5 (2026-11-03)
 
 Verified with 676 unit tests passing (1 skipped), benchmark 15/15, field test 10/10 and a self-test mutation score of 0.97 (29 killed, 1 survived, verdict CLEAR).

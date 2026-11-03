@@ -1289,6 +1289,76 @@ def _is_code_term(ident: str, all_identifiers: set[str], function_names: set[str
     return False
 
 
+def _path_suffix_match(target: str, candidates: set[str]) -> bool:
+    """True when ``target`` equals, or is a path-suffix/prefix of, a candidate.
+
+    Git reports repo-relative paths while Lexi's findings are docs-root-relative
+    (or project-root-relative), so the two only line up on their shared tail.
+    Matching is done component by component so ``api.md`` does not accidentally
+    match ``other/api.md`` unless the whole trailing path agrees.
+    """
+    if not target:
+        return False
+    t = str(target).replace("\\", "/").lstrip("./")
+    for cand in candidates:
+        c = str(cand).replace("\\", "/").lstrip("./")
+        if not c:
+            continue
+        if t == c or t.endswith("/" + c) or c.endswith("/" + t):
+            return True
+    return False
+
+
+def _in_lexi_scope(
+    finding: DriftFinding,
+    docs_allowlist: set[str],
+    changed_code: set[str],
+) -> bool:
+    """Whether a drift finding belongs to a diff scope.
+
+    A doc-anchored finding survives when its doc is in the allowlist (the changed
+    docs plus docs naming a symbol defined in the changed code). A code-anchored
+    ``missing_tests`` finding survives when its file changed. Structural findings
+    with no file anchor (no tests at all, a zero-collection contradiction) always
+    survive, because dropping them could hide a real signal.
+    """
+    if finding.docs_file:
+        return _path_suffix_match(finding.docs_file, docs_allowlist)
+    if finding.kind == "missing_tests":
+        anchor = finding.code_file or finding.path
+        if anchor in {"tests", "", None}:
+            return True
+        return _path_suffix_match(anchor, changed_code)
+    return True
+
+
+def _rescope_lexi(
+    report: DriftReport,
+    docs_allowlist: set[str] | None,
+    changed_code: set[str] | None,
+) -> DriftReport:
+    """Re-apply the diff scope after an LLM merge and recompute the verdict."""
+    if docs_allowlist is None and changed_code is None:
+        return report
+    kept = [
+        f
+        for f in report.findings
+        if _in_lexi_scope(f, docs_allowlist or set(), changed_code or set())
+    ]
+    if len(kept) == len(report.findings):
+        return report
+    report.findings = kept
+    high = [f for f in kept if f.severity == "high"]
+    report.verdict = Verdict.VETO.value if high else Verdict.CLEAR.value
+    if not kept:
+        report.notes = "no drift in the changed scope"
+    elif not high:
+        report.notes = "minor gaps only; not a veto"
+    else:
+        report.notes = "drift detected"
+    return report
+
+
 def _heuristic_drift(
     *,
     docs_root: Path,
@@ -1296,6 +1366,8 @@ def _heuristic_drift(
     config: dict[str, Any],
     execution: dict[str, Any] | None = None,
     live_root: Path | None = None,
+    docs_allowlist: set[str] | None = None,
+    changed_code: set[str] | None = None,
 ) -> DriftReport:
     code_files, test_files = split_code_and_tests(list_sources(project_root), project_root)
     tokens, _excerpt = doc_tokens(docs_root)
@@ -1528,6 +1600,20 @@ def _heuristic_drift(
                 )
             )
 
+    if docs_allowlist is not None or changed_code is not None:
+        # Diff mode: keep only findings inside the computed scope, then let the
+        # verdict reflect the surviving findings (a dropped high finding must not
+        # still veto).
+        findings = [
+            f
+            for f in findings
+            if _in_lexi_scope(
+                f,
+                docs_allowlist or set(),
+                changed_code or set(),
+            )
+        ]
+
     high = [f for f in findings if f.severity == "high"]
     verdict = Verdict.VETO.value if high else Verdict.CLEAR.value
     notes = "drift detected" if findings else "docs, code, and tests align at identifier level"
@@ -1588,6 +1674,8 @@ def inspect(
     config: dict[str, Any],
     execution: dict[str, Any] | None = None,
     live_root: Path | None = None,
+    docs_allowlist: set[str] | None = None,
+    changed_code: set[str] | None = None,
 ) -> DriftReport:
     report = _heuristic_drift(
         docs_root=docs_root,
@@ -1595,6 +1683,8 @@ def inspect(
         config=config,
         execution=execution,
         live_root=live_root,
+        docs_allowlist=docs_allowlist,
+        changed_code=changed_code,
     )
     payload = {
         "docs_files": report.docs_files[:80],
@@ -1617,11 +1707,11 @@ def inspect(
 
     report.llm_status = llm_status
     if not raw:
-        return report
+        return _rescope_lexi(report, docs_allowlist, changed_code)
     parsed = parse_yaml_block(raw)
     if not parsed:
         report.llm_status = "fallback: invalid YAML"
-        return report
+        return _rescope_lexi(report, docs_allowlist, changed_code)
     result = _from_llm(parsed, report)
     result.llm_status = "ok"
-    return result
+    return _rescope_lexi(result, docs_allowlist, changed_code)

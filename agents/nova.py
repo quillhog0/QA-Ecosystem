@@ -18,6 +18,7 @@ def execute(
     allow_network: bool,
     timeout: int = 120,
     config: dict[str, Any],
+    test_targets: list[str] | None = None,
 ) -> ExecutionResult:
     install_deps = bool((config.get("nova") or {}).get("install_deps", False))
     pip_timeout = int((config.get("nova") or {}).get("pip_timeout", 300))
@@ -36,6 +37,7 @@ def execute(
         timeout=timeout,
         python=python_executable,
         config=config,
+        test_targets=test_targets,
     )
     result.install_status = install_status
     return result

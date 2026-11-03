@@ -367,6 +367,7 @@ def scan_tests_for_risks(
     isolated_root: Path,
     allow_in_tests: Any = None,
     sandboxed: bool = False,
+    only_paths: set[str] | None = None,
 ) -> tuple[list[str], list[dict[str, str]], list[str]]:
     """Static AST pass over the isolated copy.
 
@@ -391,12 +392,17 @@ def scan_tests_for_risks(
     warnings: list[str] = []
     seen_allowed: set[tuple[str, str, str]] = set()
     for path in _all_python_files(isolated_root):
+        rel = str(path.relative_to(isolated_root)).replace("\\", "/")
+        if only_paths is not None and rel not in only_paths and path.name != "conftest.py":
+            # Diff mode: only the changed files are re-scanned, but every
+            # conftest.py stays in scope - it can change how tests elsewhere
+            # are collected, so skipping it would hide a real risk.
+            continue
         try:
             tree = ast.parse(path.read_text(encoding="utf-8-sig", errors="replace"))
         except (OSError, SyntaxError) as exc:
             hits.append(f"{path.name}: cannot parse ({exc})")
             continue
-        rel = str(path.relative_to(isolated_root)).replace("\\", "/")
         is_test = _is_test_file(path, isolated_root)
         role_tag = f" [in {'tests' if is_test else 'source'}]"
 
@@ -530,6 +536,7 @@ def evaluate_preflight(
     cwd: Path | None = None,
     allow_in_tests: Any = None,
     sandboxed: bool = False,
+    only_paths: set[str] | None = None,
 ) -> PolicyDecision:
     """Return CLEAR or BLOCK. Hierarchy: Sable outranks other roles."""
     checks: dict[str, bool] = {}
@@ -566,7 +573,7 @@ def evaluate_preflight(
     blocked.extend(path_hits)
 
     ast_hits, allowed, ast_warnings = scan_tests_for_risks(
-        isolated_root, allow_in_tests=allow_in_tests, sandboxed=sandboxed
+        isolated_root, allow_in_tests=allow_in_tests, sandboxed=sandboxed, only_paths=only_paths
     )
     checks["tests_ast_clean"] = len(ast_hits) == 0
     if ast_hits:
@@ -614,10 +621,15 @@ def evaluate_post_execution(*, collected: int, command: list[str]) -> PolicyDeci
     )
 
 
-def default_command(isolated_root: Path, work_dir: Path) -> list[str]:
+def default_command(
+    isolated_root: Path,
+    work_dir: Path,
+    test_targets: list[str] | None = None,
+) -> list[str]:
     return build_pytest_command(
         isolated_root,
         cache_dir=work_dir / "pytest_cache",
         basetemp=work_dir / "pytest_tmp",
         extra_args=["-p", "_sable_guard"],
+        test_targets=test_targets,
     )

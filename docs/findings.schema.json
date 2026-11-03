@@ -17,6 +17,11 @@
         "total": {"type": "integer"}
       }
     },
+    "warnings": {"type": "array", "items": {"type": "string"}},
+    "excepted_p0": {
+      "type": "array",
+      "items": {"type": "object"}
+    },
     "findings": {
       "type": "array",
       "items": {
@@ -28,6 +33,7 @@
           "line",
           "priority",
           "type",
+          "fingerprint",
           "customer_impact",
           "evidence",
           "proposed_red_test",
@@ -42,10 +48,12 @@
           "code_line": {"type": ["integer", "null"]},
           "priority": {"type": "string", "enum": ["P0", "P1", "P2", "P3"]},
           "type": {"type": "string", "enum": ["drift", "claim", "weak_test", "policy", "test_failure", "environment"]},
+          "fingerprint": {"type": "string"},
           "customer_impact": {"type": "string"},
           "evidence": {"type": "string"},
           "proposed_red_test": {"type": "string"},
-          "verdict_effect": {"type": "string", "enum": ["VETO", "WARN", "INFO"]}
+          "verdict_effect": {"type": "string", "enum": ["VETO", "WARN", "INFO"]},
+          "excepted": {"type": ["string", "null"]}
         }
       }
     }

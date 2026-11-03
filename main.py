@@ -7,6 +7,7 @@ import argparse
 import shutil
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -112,6 +113,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default="",
         help="Write a SARIF 2.1.0 document describing the run's findings to this path",
     )
+    parser.add_argument(
+        "--diff",
+        default="",
+        metavar="BASE_REF",
+        help="Fast pre-push mode: scope the run to files changed since BASE_REF "
+        "(e.g. origin/master or HEAD~5). Mutation testing is off; if the scope "
+        "cannot be computed the full cycle runs instead.",
+    )
     return parser.parse_args(argv)
 
 
@@ -191,6 +200,9 @@ def main(argv: list[str] | None = None) -> int:
         config.setdefault("reports_dir", str(here / "reports"))
     if args.findings_dir:
         config["findings_dir"] = args.findings_dir
+    if args.diff:
+        config["diff"] = dict(config.get("diff") or {})
+        config["diff"]["base_ref"] = args.diff
     if args.self_test:
         # Copy the working tree, not HEAD, so uncommitted tests are included.
         config["isolation_method"] = "copy"
@@ -198,16 +210,30 @@ def main(argv: list[str] | None = None) -> int:
         config["pytest"] = dict(config.get("pytest") or {})
         config["pytest"].setdefault("timeout_seconds", 180)
 
+    # Load operator exceptions at startup. An invalid entry is a hard config
+    # error (never a silent ignore), so a typo cannot quietly disable a guard.
+    from core.exceptions import ExceptionsConfigError, load_exceptions
+
+    project_name = project.resolve().name
+    try:
+        exception_entries = load_exceptions(config, project_name)
+    except ExceptionsConfigError as exc:
+        print(f"exceptions config error: {exc}", file=sys.stderr)
+        return 1
+
+    started_monotonic = time.monotonic()
     try:
         vesper = Vesper(config)
-        report = vesper.run(project, docs)
+        report = vesper.run(project, docs, exceptions=exception_entries)
     finally:
         # Docs bundle is synthetic; never delete the live tree.
         if docs_cleanup is not None:
             shutil.rmtree(docs_cleanup, ignore_errors=True)
+    elapsed_seconds = time.monotonic() - started_monotonic
 
     reports_dir = Path(config["reports_dir"])
     print(f"verdict={report.verdict}")
+    print(f"elapsed={elapsed_seconds:.1f}s")
     if report.escalation:
         print(report.escalation)
     print(f"sandbox={report.sandbox}")

@@ -14,7 +14,8 @@ class _FakeVesper:
     def __init__(self, config: dict) -> None:
         _FakeVesper.captured = config
 
-    def run(self, project: Path, docs: Path) -> SimpleNamespace:
+    def run(self, project: Path, docs: Path, exceptions=None) -> SimpleNamespace:
+        _FakeVesper.exceptions = exceptions
         return SimpleNamespace(
             verdict="CLEAR",
             escalation=None,
@@ -22,6 +23,7 @@ class _FakeVesper:
             mutation=None,
             run_id="test-run",
             isolated_root="",
+            warnings=[],
         )
 
 
@@ -128,3 +130,29 @@ def test_mutation_flags_keep_existing_mutation_settings(
     mutation = _FakeVesper.captured["mutation"]
     assert mutation[preserved_key] == preserved_value
     assert mutation[set_key] == set_value
+
+
+def test_diff_flag_is_absent_by_default():
+    parsed = main.parse_args(["--project", "p", "--docs", "d"])
+    assert parsed.diff == ""
+
+
+def test_diff_flag_sets_config_diff(tmp_path: Path, monkeypatch):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("dry_run: true\n", encoding="utf-8")
+    docs = tmp_path / "docs.md"
+    docs.write_text("# Docs\n", encoding="utf-8")
+    _FakeVesper.captured = {}
+    monkeypatch.setattr(main, "Vesper", _FakeVesper)
+
+    code = main.main(
+        [
+            "--project", str(tmp_path),
+            "--docs", str(docs),
+            "--config", str(cfg),
+            "--reports-dir", str(tmp_path / "reports"),
+            "--diff", "origin/master",
+        ]
+    )
+    assert code == 0
+    assert _FakeVesper.captured["diff"]["base_ref"] == "origin/master"

@@ -1,0 +1,36 @@
+# Operator-owned exception template (copy to exceptions/<project-name>.yaml).
+#
+# Exceptions NEVER live inside the project under test: a tested project must not
+# be able to add or widen its own exceptions, exactly as it cannot change the
+# effective config. This file lives in the QA repository (or an operator config
+# directory) and is matched by the project's directory name.
+#
+# Each entry silences one known finding for a bounded time:
+#   match     - a finding fingerprint, agent:type:file:term, with no line number,
+#               so it survives small edits. Copy it straight from the
+#               "fingerprint" field in findings.json.
+#   reason    - required, non-empty. Why this finding is accepted for now.
+#   expires   - required ISO date, at most max_days (default 90) days ahead.
+#   added_by  - free text (who approved it).
+#   allow_p0  - optional; only this lets a P0 finding be excepted, and every
+#               excepted P0 is listed at the top of findings.md.
+#
+# A matching, unexpired exception turns the finding into INFO with
+# "excepted: <reason>". An expired exception does nothing and prints a WARN
+# "exception expired: <match>". A missing reason or expiry is a startup config
+# error, not a silent ignore.
+exceptions:
+  - match: "lexi:drift:docs/api.md:transfer"
+    reason: "Contract redesign lands next sprint; drift is known and tracked in OPS-1234."
+    expires: 2026-12-31
+    added_by: "qa-oncall"
+  - match: "riley:weak_test:tests/test_login.py::test_ok"
+    reason: "Rewrite scheduled; the assertion gap is already covered by an e2e test."
+    expires: 2026-12-15
+    added_by: "lexi-review"
+  # A P0 needs an explicit allow_p0 and always surfaces at the top of the report.
+  # - match: "sable:policy:-:network_denied"
+  #   reason: "Feature flag is off in this tenant; re-audit before GA."
+  #   expires: 2026-11-30
+  #   added_by: "security"
+  #   allow_p0: true

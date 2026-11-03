@@ -33,6 +33,24 @@ def test_handoff_next_preserves_run_id_and_sets_roles():
     assert nxt.history[0]["stage"] == Stage.INIT.value
 
 
+def test_handoff_defaults_are_safe_off():
+    """allow_network and dry_run default to the safe values.
+
+    The isolation guarantee rests on the packet not opting into network or a
+    live write by accident, so a flipped default must be caught here.
+    """
+    packet = HandoffPacket(
+        run_id="run-1",
+        stage=Stage.INIT.value,
+        from_role="vesper",
+        to_role="lexi",
+        project_root="/proj",
+        docs_root="/docs",
+    )
+    assert packet.allow_network is False
+    assert packet.dry_run is True
+
+
 def test_handoff_yaml_roundtrip():
     packet = HandoffPacket(
         run_id="run-yaml",

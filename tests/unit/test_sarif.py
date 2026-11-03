@@ -398,7 +398,7 @@ class _FakeVesper:
     def __init__(self, config: dict) -> None:  # noqa: ARG002
         return None
 
-    def run(self, project: Path, docs: Path) -> _FakeReport:  # noqa: ARG002
+    def run(self, project: Path, docs: Path, exceptions=None) -> _FakeReport:  # noqa: ARG002
         return _FakeReport(_minimal_report(escalation="ESCALATE: DOMAIN_EXPERT"))
 
 

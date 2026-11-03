@@ -96,6 +96,27 @@ def verdict_effect_for(priority: str, evidence: str) -> str:
     return "WARN"
 
 
+def fingerprint_for(agent: str, ftype: str, file: str | None, term: str | None) -> str:
+    """A stable identity for one finding, deliberately without a line number.
+
+    ``agent:type:file:term`` is what a maintainer copies into the exceptions
+    file (see ``docs/exceptions.md``). Line numbers are excluded so the match
+    survives small edits that shift a line; a missing part is ``-``.
+    """
+    return f"{agent}:{ftype}:{file or '-'}:{term or '-'}"
+
+
+def _stable_term(text: str) -> str:
+    """Collapse free text to a short, edit-tolerant term token for a fingerprint.
+
+    Lower-cased, non-alphanumerics folded to single underscores, and any run of
+    digits dropped so renumbered scenarios do not silently break a match.
+    """
+    collapsed = re.sub(r"[^0-9a-zA-Z]+", "_", str(text or "")).strip("_").lower()
+    collapsed = re.sub(r"_\d+(?:_|$)", "_", collapsed)
+    return collapsed[:80].strip("_")
+
+
 def _node_location(node: str, traceback: str = "") -> tuple[str | None, int | None]:
     """``(file, line)`` for a pytest nodeid plus its traceback, or (None, None)."""
     node = str(node or "")
@@ -147,6 +168,7 @@ class _FindingBuilder:
         line: int | None = None,
         code_file: str | None = None,
         code_line: int | None = None,
+        term: str | None = None,
     ) -> None:
         key = (agent, ftype, file, line, _one_line(evidence))
         if key in self._seen:
@@ -162,6 +184,7 @@ class _FindingBuilder:
                 "code_line": code_line,
                 "priority": priority,
                 "type": ftype,
+                "fingerprint": fingerprint_for(agent, ftype, file, term),
                 "customer_impact": impact,
                 "evidence": _one_line(evidence),
                 "proposed_red_test": red_test,
@@ -217,6 +240,7 @@ def _collect_lexi(builder: _FindingBuilder, drift: dict[str, Any] | None) -> Non
                 file=file,
                 code_file=code_file,
                 code_line=code_line,
+                term=ident,
             )
             continue
         docs_file = finding.get("docs_file") or None
@@ -243,6 +267,7 @@ def _collect_lexi(builder: _FindingBuilder, drift: dict[str, Any] | None) -> Non
             line=docs_line,
             code_file=code_file,
             code_line=code_line,
+            term=ident,
         )
 
 
@@ -265,6 +290,7 @@ def _collect_aria(builder: _FindingBuilder, plan: dict[str, Any] | None) -> None
                 f"Add `test_claim_{sid.lower()}` that exercises “{str(acceptance[0])}” "
                 "and asserts the documented outcome; it fails today."
             ),
+            term=sid,
         )
 
 
@@ -284,6 +310,7 @@ def _collect_riley(builder: _FindingBuilder, review: dict[str, Any] | None, agen
                 evidence=gap,
                 red_test="Rewrite the test to assert the concrete outcome and confirm it goes red when the behaviour breaks.",
                 file=file_name,
+                term=node,
             )
             continue
         if _CLAIM_WEAK_FRAGMENT in gap or gap.startswith(_CLAIM_UNCOVERED_PREFIXES):
@@ -294,6 +321,7 @@ def _collect_riley(builder: _FindingBuilder, review: dict[str, Any] | None, agen
                 impact="A documented claim is not proven by a strong test, so it may be false.",
                 evidence=gap,
                 red_test="Add or strengthen a test that proves the claim and fails when the behaviour regresses.",
+                term=_stable_term(gap),
             )
             continue
         if gap.startswith(RILEY_SKIPPED_PREFIXES):
@@ -305,6 +333,7 @@ def _collect_riley(builder: _FindingBuilder, review: dict[str, Any] | None, agen
             impact="The test plan has a quality gap, so planned behaviour is not fully verified.",
             evidence=gap,
             red_test="Close the plan gap with a concrete failing-then-passing scenario before trusting the suite.",
+            term=_stable_term(gap),
         )
 
 
@@ -356,6 +385,7 @@ def _collect_sable(builder: _FindingBuilder, policy: dict[str, Any] | None) -> N
                     f"tree and asserts `{check_key}` passes; it fails today."
                 ),
                 file=_extract_policy_file(evidence) if check_key == "tests_ast_clean" else None,
+                term=check_key,
             )
         for warning in phase.get("warnings") or []:
             builder.add(
@@ -365,6 +395,7 @@ def _collect_sable(builder: _FindingBuilder, policy: dict[str, Any] | None) -> N
                 impact="A dangerous operation is only tolerated because the sandbox contains it; worth reviewing.",
                 evidence=str(warning),
                 red_test="None; informational note about a sandbox-conditional relaxation.",
+                term=_stable_term(str(warning)),
             )
 
 
@@ -404,6 +435,7 @@ def _collect_nova(builder: _FindingBuilder, execution: dict[str, Any] | None) ->
                 red_test=f"Restore the precondition ({str(failure.get('environment_kind') or 'environment capability')}) and rerun `{node}`; not a product red test.",
                 file=file_name,
                 line=line,
+                term=node,
             )
             emitted_failure = True
             continue
@@ -418,6 +450,7 @@ def _collect_nova(builder: _FindingBuilder, execution: dict[str, Any] | None) ->
             red_test=f"`{node}` is red today; keep it as the regression test.",
             file=file_name,
             line=line,
+            term=node,
         )
         emitted_failure = True
     failed = _as_int(execution.get("failed"))
@@ -433,6 +466,7 @@ def _collect_nova(builder: _FindingBuilder, execution: dict[str, Any] | None) ->
             impact=impact,
             evidence=f"pytest exit={execution.get('exit_code')} failed={failed} errors={errors}",
             red_test="Rerun pytest and keep the first failing test red as the regression test.",
+            term="__aggregate_failures__",
         )
     install_status = str(execution.get("install_status") or "")
     if install_status.startswith("pip install failed"):
@@ -443,6 +477,7 @@ def _collect_nova(builder: _FindingBuilder, execution: dict[str, Any] | None) ->
             impact="Declared dependencies could not be installed here, so the suite never ran.",
             evidence=install_status,
             red_test="Restore the dependency set and rerun the suite; not a product red test.",
+            term="__pip_install_failed__",
         )
 
 
@@ -468,6 +503,7 @@ def _collect_blocked_env(builder: _FindingBuilder, report: dict[str, Any]) -> No
             impact="The run was blocked before tests could judge the product, so nothing is proven either way.",
             evidence=cause,
             red_test="Restore the environment precondition and rerun; not a product red test.",
+            term="__blocked_env__",
         )
 
 
@@ -508,16 +544,83 @@ def count_by_priority(findings: list[dict[str, Any]]) -> dict[str, int]:
     return counts
 
 
-def build_document(report: dict[str, Any]) -> dict[str, Any]:
-    findings = build_findings(report)
+def apply_exceptions(
+    findings: list[dict[str, Any]],
+    entries: list[Any] | None,
+    today: Any,
+) -> dict[str, Any]:
+    """Downgrade findings covered by an unexpired operator exception.
+
+    ``entries`` are :class:`core.exceptions.ExceptionEntry` objects (duck-typed:
+    ``match``, ``expires`` a ``date``, ``reason`` and ``allow_p0``). A matching,
+    unexpired exception turns the finding into a P3 / INFO note carrying
+    ``excepted: <reason>``; a P0 is only excepted when the entry sets
+    ``allow_p0``. Expired entries do nothing but are reported so the operator
+    renews or removes them. The control-plane verdict is never touched here -
+    this only re-labels the projected findings.
+    """
+    entries = entries or []
+    warnings: list[str] = []
+    active: dict[str, Any] = {}
+    for entry in entries:
+        expires = getattr(entry, "expires", None)
+        if expires is not None and expires < today:
+            warnings.append(f"exception expired: {entry.match}")
+            continue
+        # Latest write wins for a duplicated fingerprint.
+        active[entry.match] = entry
+
+    excepted_p0: list[dict[str, Any]] = []
+    for finding in findings:
+        entry = active.get(finding.get("fingerprint") or "")
+        if entry is None:
+            continue
+        if finding["priority"] == "P0" and not getattr(entry, "allow_p0", False):
+            # A P0 is never silently excepted: without allow_p0 the finding stands.
+            continue
+        was_p0 = finding["priority"] == "P0"
+        finding["priority"] = "P3"
+        finding["verdict_effect"] = "INFO"
+        finding["excepted"] = entry.reason
+        if was_p0:
+            excepted_p0.append(
+                {
+                    "id": finding["id"],
+                    "fingerprint": finding["fingerprint"],
+                    "reason": entry.reason,
+                    "expires": entry.expires.isoformat() if getattr(entry, "expires", None) else "",
+                    "added_by": getattr(entry, "added_by", "") or "",
+                }
+            )
     return {
+        "findings": findings,
+        "warnings": sorted(set(warnings)),
+        "excepted_p0": excepted_p0,
+    }
+
+
+def build_document(
+    report: dict[str, Any],
+    exceptions: list[Any] | None = None,
+    today: Any = None,
+) -> dict[str, Any]:
+    findings = build_findings(report)
+    document: dict[str, Any] = {
         "schema_version": "1",
         "run_id": str(report.get("run_id") or ""),
         "verdict": str(report.get("verdict") or ""),
         "generated_at": str(report.get("finished_at") or ""),
-        "counts": count_by_priority(findings),
-        "findings": findings,
     }
+    if exceptions:
+        from datetime import date as _date
+
+        today = today or _date.today()
+        applied = apply_exceptions(findings, exceptions, today)
+        document["warnings"] = applied["warnings"]
+        document["excepted_p0"] = applied["excepted_p0"]
+    document["counts"] = count_by_priority(findings)
+    document["findings"] = findings
+    return document
 
 
 def _finding_md_line(finding: dict[str, Any]) -> str:
@@ -528,9 +631,12 @@ def _finding_md_line(finding: dict[str, Any]) -> str:
             location += f":{finding['line']}"
         location += "`"
     impact = _one_line(finding.get("customer_impact"), 120)
+    tail = ""
+    if finding.get("excepted"):
+        tail = f" [excepted: {_one_line(finding['excepted'], 60)}]"
     return (
         f"- [{finding['id']}] {finding['priority']} {finding['type']} "
-        f"{finding['agent']} {location}: {impact} ({finding['verdict_effect']})"
+        f"{finding['agent']} {location}: {impact} ({finding['verdict_effect']}){tail}"
     )
 
 
@@ -544,6 +650,23 @@ def render_markdown(document: dict[str, Any]) -> str:
         f"- run verdict: **{document.get('verdict') or '?'}**",
         f"- findings: {counts.get('total', len(findings))} total",
         "",
+    ]
+    excepted_p0 = document.get("excepted_p0") or []
+    if excepted_p0:
+        lines.append("## Excepted P0 findings (top of report)")
+        for item in excepted_p0:
+            reason = _one_line(item.get("reason"), 100)
+            lines.append(
+                f"- [{item.get('id')}] `{item.get('fingerprint')}`: excepted: {reason} "
+                f"(expires {item.get('expires')}, added_by {item.get('added_by') or '-'})"
+            )
+        lines.append("")
+    warnings = document.get("warnings") or []
+    if warnings:
+        for warning in warnings:
+            lines.append(f"- WARN {warning}")
+        lines.append("")
+    lines += [
         "| priority | count |",
         "|---|---|",
     ]
@@ -608,13 +731,19 @@ def load_schema(schema_path: Path | str | None = None) -> dict[str, Any]:
     return json.loads(Path(schema_path or SCHEMA_PATH).read_text(encoding="utf-8"))
 
 
-def write_findings(report: Any, findings_dir: Path | str) -> tuple[Path, Path]:
+def write_findings(
+    report: Any,
+    findings_dir: Path | str,
+    exceptions: list[Any] | None = None,
+    today: Any = None,
+) -> tuple[Path, Path]:
     """Write the run's findings under ``<findings_dir>/<run_id>/`` and mirror
     them into ``<findings_dir>/latest/`` so an IDE can pin one stable path.
 
     Returns the per-run ``(findings.json, findings.md)`` paths. The ``latest``
     copy is byte-identical to the per-run pair; the copy is not a separate
-    report and always reflects the most recent write.
+    report and always reflects the most recent write. ``exceptions`` (operator
+    exception entries) and ``today`` are forwarded to :func:`build_document`.
     """
     if isinstance(report, dict):
         data = report
@@ -623,7 +752,7 @@ def write_findings(report: Any, findings_dir: Path | str) -> tuple[Path, Path]:
         if not callable(to_dict):
             raise TypeError("findings builder expects a mapping or an object with to_dict()")
         data = to_dict()
-    document = build_document(data)
+    document = build_document(data, exceptions=exceptions, today=today)
     base = Path(findings_dir)
     run_id = str(document.get("run_id") or "")
     run_dir = base / run_id if run_id else base

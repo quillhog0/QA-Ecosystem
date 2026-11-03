@@ -36,6 +36,19 @@ def render_markdown(report: FinalReport) -> str:
         lines.append(f"- **tested_tree:** {report.tested_tree}")
     if report.escalation:
         lines.append(f"- **escalation:** `{report.escalation}`")
+    if report.diff:
+        mode = str(report.diff.get("mode") or "")
+        base = str(report.diff.get("base_ref") or "")
+        if mode == "diff":
+            n = len(report.diff.get("changed") or [])
+            lines.append(
+                f"- **diff mode:** scoped to {n} changed file(s) vs `{base}`; mutation off"
+            )
+        else:
+            lines.append(
+                f"- **diff mode:** fell back to a full run (base `{base}`): "
+                f"{report.diff.get('reason', 'scope unavailable')}"
+            )
     for warning in report.warnings:
         lines.append(f"- **warning:** {warning}")
     lines += ["", "## Role results", ""]

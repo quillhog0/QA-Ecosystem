@@ -148,6 +148,18 @@ def _collection_args(isolated_root: Path) -> list[str]:
     return [str(isolated_root)]
 
 
+def _posix_target(target: str) -> str:
+    """A copy-relative test target, normalised to posix and stripped of a lead ./.
+
+    Leading slashes and drive separators are dropped so a target from ``git``
+    (always repo-relative) resolves inside the isolated copy when joined to it.
+    """
+    text = str(target).replace("\\", "/").strip()
+    while text.startswith("./"):
+        text = text[2:]
+    return text.lstrip("/")
+
+
 def junit_path_for(work_dir: Path) -> Path:
     """Where the JUnit XML of one run lives: inside the sandbox-writable tmp tree.
 
@@ -167,14 +179,28 @@ def build_pytest_command(
     extra_args: list[str] | None = None,
     python: Path | None = None,
     junit_path: Path | None = None,
+    test_targets: list[str] | None = None,
 ) -> list[str]:
     cache_dir.mkdir(parents=True, exist_ok=True)
     basetemp.mkdir(parents=True, exist_ok=True)
+    if test_targets:
+        # Diff mode: collect only the tests related to the changed files. The
+        # targets are copy-relative paths resolved to the isolated copy so they
+        # stay inside the sandbox, never the live tree.
+        collection = [
+            str((isolated_root / _posix_target(target)).resolve())
+            for target in test_targets
+            if (isolated_root / _posix_target(target)).exists()
+        ]
+        if not collection:
+            collection = [str(isolated_root)]
+    else:
+        collection = _collection_args(isolated_root)
     cmd = [
         str(python) if python else sys.executable,
         "-m",
         "pytest",
-        *_collection_args(isolated_root),
+        *collection,
         "-v",
         # ``-rfE`` prints one line per failure and per error at the end, whatever
         # the length of the log above it, so a failure is never only visible in a
@@ -249,6 +275,7 @@ def run_pytest(
     extra_args: list[str] | None = None,
     python: Path | None = None,
     config: dict[str, Any] | None = None,
+    test_targets: list[str] | None = None,
 ) -> ExecutionResult:
     """Execute pytest against the isolated tree. Does not modify the live project."""
     import subprocess
@@ -292,6 +319,7 @@ def run_pytest(
         extra_args=extra_args,
         python=python,
         junit_path=junit_path,
+        test_targets=test_targets,
     )
     if (work_dir / "_sable_guard.py").is_file() and "_sable_guard" not in command:
         command.extend(["-p", "_sable_guard"])
