@@ -1,0 +1,53 @@
+{
+  "type": "object",
+  "required": ["schema_version", "run_id", "verdict", "generated_at", "counts", "findings"],
+  "properties": {
+    "schema_version": {"type": "string", "enum": ["1"]},
+    "run_id": {"type": "string"},
+    "verdict": {"type": "string", "enum": ["CLEAR", "VETO", "BLOCKED_ENV"]},
+    "generated_at": {"type": "string"},
+    "counts": {
+      "type": "object",
+      "required": ["P0", "P1", "P2", "P3", "total"],
+      "properties": {
+        "P0": {"type": "integer"},
+        "P1": {"type": "integer"},
+        "P2": {"type": "integer"},
+        "P3": {"type": "integer"},
+        "total": {"type": "integer"}
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "agent",
+          "file",
+          "line",
+          "priority",
+          "type",
+          "customer_impact",
+          "evidence",
+          "proposed_red_test",
+          "verdict_effect"
+        ],
+        "properties": {
+          "id": {"type": "string"},
+          "agent": {"type": "string", "enum": ["lexi", "aria", "riley", "sable", "nova"]},
+          "file": {"type": ["string", "null"]},
+          "line": {"type": ["integer", "null"]},
+          "code_file": {"type": ["string", "null"]},
+          "code_line": {"type": ["integer", "null"]},
+          "priority": {"type": "string", "enum": ["P0", "P1", "P2", "P3"]},
+          "type": {"type": "string", "enum": ["drift", "claim", "weak_test", "policy", "test_failure", "environment"]},
+          "customer_impact": {"type": "string"},
+          "evidence": {"type": "string"},
+          "proposed_red_test": {"type": "string"},
+          "verdict_effect": {"type": "string", "enum": ["VETO", "WARN", "INFO"]}
+        }
+      }
+    }
+  }
+}

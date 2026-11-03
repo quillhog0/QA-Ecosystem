@@ -373,11 +373,11 @@ def test_clean_symlinks_removes_link_pointing_to_in_copy_secret(tmp_path: Path):
     (dest / ".env").write_text("SECRET=x\n", encoding="utf-8")
     os.symlink(".env", dest / "notes.txt")  # link name is benign; target is secret
 
-    skipped: list[str] = []
+    skipped: list[dict] = []
     _clean_symlinks_and_secrets(dest, skipped)
 
     assert not (dest / "notes.txt").exists()
-    assert "notes.txt" in skipped
+    assert any(rec["path"] == "notes.txt" for rec in skipped)
 
 
 def test_copy_tree_refuses_existing_destination(tmp_path: Path):

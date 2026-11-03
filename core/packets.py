@@ -72,6 +72,17 @@ class DriftFinding:
     path: str
     message: str
     severity: str = "medium"
+    # Where the docs actually say it: the primary doc file (relative, POSIX)
+    # and the line inside it, so an IDE can jump from the finding to the
+    # sentence that promises the name. None when no mention carried a location.
+    docs_file: str | None = None
+    docs_line: int | None = None
+    # Nearest real code candidate, when the tool knows one: e.g. the source
+    # file backing a ``missing_tests`` finding. Null for a ``missing_code``
+    # finding by construction - the whole point of that kind is that no code
+    # stands behind the docs promise.
+    code_file: str | None = None
+    code_line: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -274,6 +285,7 @@ class FinalReport:
     finished_at: str = ""
     tested_tree: str = ""
     timings: dict[str, float] = field(default_factory=dict)
+    warnings: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)

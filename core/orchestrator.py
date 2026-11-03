@@ -25,6 +25,7 @@ from core.packets import (
     new_run_id,
     utc_now,
 )
+from core.findings import write_findings
 from core.report import append_result, write_reports
 from core.runner import sanitized_env
 from policies import sable
@@ -121,6 +122,16 @@ class Vesper:
             tested_tree=isolation.tested_tree,
         )
         report.timings = {"isolation": round(_isolation_seconds, 3)}
+        warn_skipped = [rec for rec in isolation.skipped if not rec["reason"].startswith("secret")]
+        if warn_skipped:
+            # A path the copy could not carry is never a silent drop: the
+            # operator must see which files are missing from the isolated tree.
+            report.warnings.append(
+                "isolation skipped "
+                + str(len(warn_skipped))
+                + " path(s): "
+                + "; ".join(f"{rec['path']} [{rec['reason']}]" for rec in warn_skipped)
+            )
 
         blocked_reason = ""
         if failure_reason:
@@ -149,6 +160,8 @@ class Vesper:
                 report.role_results = list(self.role_results)
                 report.finished_at = utc_now()
                 write_reports(report, base)
+                findings_base = Path(self.config.get("findings_dir") or base).resolve()
+                write_findings(report, findings_base)
         finally:
             release_isolation(isolation, keep=bool(self.config.get("keep_isolated_copy", False)))
         return report

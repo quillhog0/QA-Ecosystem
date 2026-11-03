@@ -1,0 +1,642 @@
+"""IDE-ready findings projection of a finished QA run.
+
+Every run writes ``findings.json`` (machine readable, validated by the schema
+in ``docs/findings.schema.json``) and a short ``findings.md`` (about 40 lines:
+a per-priority count table plus the top findings) next to the existing
+Markdown and YAML reports. This module only *projects* what the roles already
+decided - it never changes a verdict, and it imports no agent code, so the
+pipeline stays the single authority on CLEAR / VETO / BLOCKED_ENV.
+
+The priority ladder and the type mapping are documented in
+``docs/findings-priority.md``; the projection is deterministic: the same
+report dictionary always produces byte-identical findings documents.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import shutil
+from pathlib import Path, PurePosixPath
+from typing import Any
+
+PRIORITY_LEVELS = ("P0", "P1", "P2", "P3")
+FINDING_TYPES = ("drift", "claim", "weak_test", "policy", "test_failure", "environment")
+FINDING_AGENTS = ("lexi", "aria", "riley", "sable", "nova")
+VERDICT_EFFECTS = ("VETO", "WARN", "INFO")
+
+MAX_EVIDENCE_CHARS = 200
+MD_MAX_LINES = 40
+MD_TOP_COUNT = 10
+
+SCHEMA_PATH = Path(__file__).resolve().parent.parent / "docs" / "findings.schema.json"
+
+# A failing product test whose name or message touches money, secrets or the
+# sandbox is a data-loss / security class defect (see docs/findings-priority.md).
+_MONEY_SECURITY_TERMS = (
+    "payment", "refund", "charge", "payout", "withdraw", "deposit",
+    "secret", "credential", "password", "api_key", "private_key",
+    "sandbox", "escape", "data_loss", "corrupt", "wipe", "exfil",
+)
+
+# Sable checks that protect money, secrets or the sandbox boundary are P0;
+# the remaining policy gates are P1 when they block the run.
+_POLICY_P0_CHECKS = frozenset(
+    {"no_secret_env", "no_secret_files", "not_live_tree", "target_inside_isolated",
+     "tests_ast_clean", "network_denied"}
+)
+_POLICY_P1_CHECKS = frozenset({"pytest_only", "isolated_exists"})
+
+_NODE_FILE_RE = re.compile(r"^(?P<file>[^:\s]+\.py)::")
+# ``tests/test_x.py:27: in test_y`` or ``File "…/test_x.py", line 27``
+_TB_LINE_RE = re.compile(r"(?:^|\s)(?P<file>[\w./\-]+\.py):(?P<line>\d+):")
+_TB_FILE_LINE_RE = re.compile(r'File "(?P<file>[^"]+\.py)", line (?P<line>\d+)')
+_PY_PATH_RE = re.compile(r"(?P<file>(?:[\w./-]+/)?[\w.-]+\.py)")
+
+_WEAK_TEST_PREFIX = "weak test: "
+_CLAIM_WEAK_FRAGMENT = "covered only by weak test"
+_CLAIM_UNCOVERED_PREFIXES = ("claim not covered by tests:", "uncovered claims:")
+# Riley gaps that restate a Nova failure or a Lexi signal verbatim; projecting
+# them again would only duplicate findings that already carry better evidence.
+RILEY_SKIPPED_PREFIXES = (
+    "test detail: ",
+    "failed=",
+    "pytest exit code ",
+    "pytest collection/execution errors",
+    "environment-blocked failures=",
+)
+
+
+def _one_line(text: Any, limit: int = MAX_EVIDENCE_CHARS) -> str:
+    """Collapse whitespace and clip: a short, single-line evidence excerpt."""
+    collapsed = " ".join(str(text or "").split())
+    if len(collapsed) <= limit:
+        return collapsed
+    return collapsed[: limit - 3] + "..."
+
+
+def _as_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def verdict_effect_for(priority: str, evidence: str) -> str:
+    """The verdict rule: only P0/P1 with non-empty evidence may cause a VETO.
+
+    Everything else reports WARN (still actionable) or INFO (a note). The
+    control-plane verdict itself is decided by the roles, not here; this field
+    tells an IDE whether the single finding would justify blocking a merge.
+    """
+    if priority in ("P0", "P1") and (evidence or "").strip():
+        return "VETO"
+    if priority == "P3":
+        return "INFO"
+    return "WARN"
+
+
+def _node_location(node: str, traceback: str = "") -> tuple[str | None, int | None]:
+    """``(file, line)`` for a pytest nodeid plus its traceback, or (None, None)."""
+    node = str(node or "")
+    file_name: str | None = None
+    match = _NODE_FILE_RE.match(node)
+    if match:
+        file_name = match.group("file")
+    elif node.endswith(".py"):
+        file_name = node
+    line: int | None = None
+    text = f"{traceback}\n{node}"
+    for regex in (_TB_LINE_RE, _TB_FILE_LINE_RE):
+        for found in regex.finditer(text):
+            candidate = found.group("file")
+            if file_name and candidate.endswith(file_name) or candidate == file_name:
+                line = _as_int(found.group("line")) or None
+                break
+        if line is not None:
+            break
+    if line is None:
+        for regex in (_TB_LINE_RE, _TB_FILE_LINE_RE):
+            for found in regex.finditer(text):
+                line = _as_int(found.group("line")) or None
+                if not file_name:
+                    file_name = found.group("file")
+                break
+            if line is not None:
+                break
+    return file_name, line
+
+
+class _FindingBuilder:
+    """Collects raw findings, deduplicates, sorts and assigns stable ids."""
+
+    def __init__(self) -> None:
+        self._items: list[dict[str, Any]] = []
+        self._seen: set[tuple[Any, ...]] = set()
+
+    def add(
+        self,
+        *,
+        agent: str,
+        ftype: str,
+        priority: str,
+        impact: str,
+        evidence: str,
+        red_test: str,
+        file: str | None = None,
+        line: int | None = None,
+        code_file: str | None = None,
+        code_line: int | None = None,
+    ) -> None:
+        key = (agent, ftype, file, line, _one_line(evidence))
+        if key in self._seen:
+            return
+        self._seen.add(key)
+        self._items.append(
+            {
+                "id": "",
+                "agent": agent,
+                "file": file,
+                "line": line,
+                "code_file": code_file,
+                "code_line": code_line,
+                "priority": priority,
+                "type": ftype,
+                "customer_impact": impact,
+                "evidence": _one_line(evidence),
+                "proposed_red_test": red_test,
+                "verdict_effect": verdict_effect_for(priority, evidence),
+                # sort order, replaced on finalise
+                "_p": PRIORITY_LEVELS.index(priority),
+                "_s": len(self._items),
+            }
+        )
+
+    def finalise(self) -> list[dict[str, Any]]:
+        self._items.sort(key=lambda f: (f["_p"], f["agent"], f["file"] or "", f["line"] or 0, f["_s"]))
+        out: list[dict[str, Any]] = []
+        for index, item in enumerate(self._items, start=1):
+            finding = {k: v for k, v in item.items() if not k.startswith("_")}
+            finding["id"] = f"F-{index:03d}"
+            # id first: it is the anchor every consumer quotes
+            ordered = {"id": finding.pop("id")}
+            ordered.update(finding)
+            out.append(ordered)
+        return out
+
+
+def _drift_priority(severity: str) -> str:
+    s = (severity or "").lower()
+    if s == "high":
+        return "P1"
+    if s == "medium":
+        return "P2"
+    return "P3"
+
+
+def _collect_lexi(builder: _FindingBuilder, drift: dict[str, Any] | None) -> None:
+    for finding in (drift or {}).get("findings") or []:
+        if not isinstance(finding, dict):
+            continue
+        kind = str(finding.get("kind") or "")
+        ident = str(finding.get("path") or "")
+        message = str(finding.get("message") or "")
+        severity = str(finding.get("severity") or "medium")
+        priority = _drift_priority(severity)
+        if kind == "missing_tests":
+            file = ident if ident.endswith(".py") or "/" in ident else None
+            code_file = finding.get("code_file") or None
+            code_line = finding.get("code_line") or None
+            builder.add(
+                agent="lexi",
+                ftype="weak_test",
+                priority=priority,
+                impact="Nothing exercises this code, so a regression could ship silently.",
+                evidence=message,
+                red_test="Add a pytest that calls the public surface and asserts its documented result; it is missing today.",
+                file=file,
+                code_file=code_file,
+                code_line=code_line,
+            )
+            continue
+        docs_file = finding.get("docs_file") or None
+        docs_line = finding.get("docs_line") or None
+        code_file = finding.get("code_file") or None
+        code_line = finding.get("code_line") or None
+        if kind == "domain_term":
+            impact = f"The docs talk about `{ident}` but no callable stands behind it, so readers are misled."
+            red_test = f"None needed for a low note; align the docs wording for `{ident}` with the code."
+        elif kind == "contradiction":
+            impact = "Executed behaviour contradicts what the docs promise, so the docs cannot be trusted."
+            red_test = "Keep the failing behaviour test named in the evidence red until the docs and code agree."
+        else:
+            impact = f"The docs promise `{ident}`, but code following that contract cannot be found, so integrators hit errors."
+            red_test = f"Write a pytest that imports the module the docs name and asserts `{ident}` exists; it fails today."
+        builder.add(
+            agent="lexi",
+            ftype="drift",
+            priority=priority,
+            impact=impact,
+            evidence=message,
+            red_test=red_test,
+            file=docs_file,
+            line=docs_line,
+            code_file=code_file,
+            code_line=code_line,
+        )
+
+
+def _collect_aria(builder: _FindingBuilder, plan: dict[str, Any] | None) -> None:
+    for scenario in (plan or {}).get("scenarios") or []:
+        if not isinstance(scenario, dict):
+            continue
+        sid = str(scenario.get("id") or "")
+        if not sid.startswith("C") or scenario.get("covered_by"):
+            continue
+        title = str(scenario.get("title") or sid)
+        acceptance = scenario.get("acceptance") or ["the documented outcome holds"]
+        builder.add(
+            agent="aria",
+            ftype="claim",
+            priority="P2",
+            impact=f"A documented claim is unproven: “{title}” has no covering test.",
+            evidence=title,
+            red_test=(
+                f"Add `test_claim_{sid.lower()}` that exercises “{str(acceptance[0])}” "
+                "and asserts the documented outcome; it fails today."
+            ),
+        )
+
+
+def _collect_riley(builder: _FindingBuilder, review: dict[str, Any] | None, agent: str = "riley") -> None:
+    for gap in (review or {}).get("gaps") or []:
+        if not isinstance(gap, str) or not gap.strip():
+            continue
+        if gap.startswith(_WEAK_TEST_PREFIX):
+            rest = gap[len(_WEAK_TEST_PREFIX):].strip()
+            node = rest.split(" ", 1)[0]
+            file_name, _ = _node_location(node)
+            builder.add(
+                agent=agent,
+                ftype="weak_test",
+                priority="P2",
+                impact="A test passes without checking behaviour, so it can hide a real bug.",
+                evidence=gap,
+                red_test="Rewrite the test to assert the concrete outcome and confirm it goes red when the behaviour breaks.",
+                file=file_name,
+            )
+            continue
+        if _CLAIM_WEAK_FRAGMENT in gap or gap.startswith(_CLAIM_UNCOVERED_PREFIXES):
+            builder.add(
+                agent=agent,
+                ftype="claim",
+                priority="P2",
+                impact="A documented claim is not proven by a strong test, so it may be false.",
+                evidence=gap,
+                red_test="Add or strengthen a test that proves the claim and fails when the behaviour regresses.",
+            )
+            continue
+        if gap.startswith(RILEY_SKIPPED_PREFIXES):
+            continue
+        builder.add(
+            agent=agent,
+            ftype="weak_test",
+            priority="P2",
+            impact="The test plan has a quality gap, so planned behaviour is not fully verified.",
+            evidence=gap,
+            red_test="Close the plan gap with a concrete failing-then-passing scenario before trusting the suite.",
+        )
+
+
+def _extract_policy_file(reason: str) -> str | None:
+    found = _PY_PATH_RE.search(reason or "")
+    if not found:
+        return None
+    raw = found.group("file")
+    if raw.startswith("/") or ".." in raw:
+        return None
+    return raw
+
+
+def _collect_sable(builder: _FindingBuilder, policy: dict[str, Any] | None) -> None:
+    if not isinstance(policy, dict):
+        return
+    phases: list[tuple[str, dict[str, Any]]] = []
+    if "checks" in policy and "blocked_reasons" in policy:
+        phases.append(("preflight", policy))
+    else:
+        for key in ("preflight", "post"):
+            entry = policy.get(key)
+            if isinstance(entry, dict):
+                phases.append((key, entry))
+    for phase_name, phase in phases:
+        checks = phase.get("checks") or {}
+        blocked = "; ".join(str(r) for r in (phase.get("blocked_reasons") or []) if r)
+        for check_key, passed in (checks if isinstance(checks, dict) else {}).items():
+            if passed is not False:
+                continue
+            if check_key in _POLICY_P0_CHECKS:
+                priority = "P0"
+                impact = "The project can expose secrets, move money or escape its sandbox, so data or safety is at risk."
+            elif check_key in _POLICY_P1_CHECKS:
+                priority = "P1"
+                impact = "A policy gate failed, so the run cannot safely proceed against this code."
+            else:
+                priority = "P2"
+                impact = "A policy check did not pass; the run result is weaker than it claims."
+            evidence = blocked or f"policy check failed: {check_key} ({phase_name})"
+            builder.add(
+                agent="sable",
+                ftype="policy",
+                priority=priority,
+                impact=impact,
+                evidence=evidence,
+                red_test=(
+                    "Add a pre-flight regression test that runs the policy predicate over the "
+                    f"tree and asserts `{check_key}` passes; it fails today."
+                ),
+                file=_extract_policy_file(evidence) if check_key == "tests_ast_clean" else None,
+            )
+        for warning in phase.get("warnings") or []:
+            builder.add(
+                agent="sable",
+                ftype="policy",
+                priority="P3",
+                impact="A dangerous operation is only tolerated because the sandbox contains it; worth reviewing.",
+                evidence=str(warning),
+                red_test="None; informational note about a sandbox-conditional relaxation.",
+            )
+
+
+def _product_impact(node: str, message: str) -> tuple[str, str]:
+    text = f"{node} {message}".lower()
+    if any(term in text for term in _MONEY_SECURITY_TERMS):
+        return (
+            "A money, secret or safety path is broken, so data, funds or credentials are at risk.",
+            "P0",
+        )
+    return (
+        "A behaviour the product promises does not work: a test that should pass is red today.",
+        "P1",
+    )
+
+
+def _collect_nova(builder: _FindingBuilder, execution: dict[str, Any] | None) -> None:
+    if not isinstance(execution, dict) or not execution:
+        return
+    failures = execution.get("failures") or []
+    emitted_failure = False
+    for failure in failures if isinstance(failures, list) else []:
+        if not isinstance(failure, dict):
+            continue
+        node = str(failure.get("node") or "unknown test")
+        message = str(failure.get("message") or "")
+        traceback = str(failure.get("traceback") or "")
+        file_name, line = _node_location(node, traceback)
+        if str(failure.get("classification") or "product") == "environment":
+            cause = str(failure.get("environment_cause") or message)
+            builder.add(
+                agent="nova",
+                ftype="environment",
+                priority="P2",
+                impact="The check could not run on this machine, so it proves nothing about the product either way.",
+                evidence=cause or message,
+                red_test=f"Restore the precondition ({str(failure.get('environment_kind') or 'environment capability')}) and rerun `{node}`; not a product red test.",
+                file=file_name,
+                line=line,
+            )
+            emitted_failure = True
+            continue
+        impact, priority = _product_impact(node, message)
+        evidence = " ".join((message or traceback or node).split())
+        builder.add(
+            agent="nova",
+            ftype="test_failure",
+            priority=priority,
+            impact=impact,
+            evidence=evidence,
+            red_test=f"`{node}` is red today; keep it as the regression test.",
+            file=file_name,
+            line=line,
+        )
+        emitted_failure = True
+    failed = _as_int(execution.get("failed"))
+    errors = _as_int(execution.get("errors"))
+    if failed and not emitted_failure:
+        # Failures existed but no structured entry survived (clipped log): one
+        # aggregate finding keeps the veto-eligible signal visible.
+        impact, priority = _product_impact("", str(execution.get("stdout") or ""))
+        builder.add(
+            agent="nova",
+            ftype="test_failure",
+            priority=priority,
+            impact=impact,
+            evidence=f"pytest exit={execution.get('exit_code')} failed={failed} errors={errors}",
+            red_test="Rerun pytest and keep the first failing test red as the regression test.",
+        )
+    install_status = str(execution.get("install_status") or "")
+    if install_status.startswith("pip install failed"):
+        builder.add(
+            agent="nova",
+            ftype="environment",
+            priority="P2",
+            impact="Declared dependencies could not be installed here, so the suite never ran.",
+            evidence=install_status,
+            red_test="Restore the dependency set and rerun the suite; not a product red test.",
+        )
+
+
+def _collect_blocked_env(builder: _FindingBuilder, report: dict[str, Any]) -> None:
+    """A BLOCKED_ENV run with no failure entries still needs one visible cause."""
+    if str(report.get("verdict") or "") != "BLOCKED_ENV":
+        return
+    execution = report.get("execution")
+    if isinstance(execution, dict) and (execution.get("failures") or []):
+        return
+    cause = str(((report.get("post_audit") or {}).get("root_cause")) or "").strip()
+    if not cause:
+        for entry in report.get("role_results") or []:
+            if isinstance(entry, dict) and str(entry.get("verdict") or "") == "BLOCKED_ENV":
+                cause = str(entry.get("summary") or "").strip()
+                if cause:
+                    break
+    if cause:
+        builder.add(
+            agent="nova",
+            ftype="environment",
+            priority="P2",
+            impact="The run was blocked before tests could judge the product, so nothing is proven either way.",
+            evidence=cause,
+            red_test="Restore the environment precondition and rerun; not a product red test.",
+        )
+
+
+def build_findings(report: dict[str, Any]) -> list[dict[str, Any]]:
+    """Project a finished report dictionary into the findings list.
+
+    Deterministic: identical input yields identical output, ids included.
+    """
+    builder = _FindingBuilder()
+    _collect_lexi(builder, report.get("drift"))
+    post = report.get("post_audit") if isinstance(report.get("post_audit"), dict) else {}
+    # The post-audit Lexi pass re-scans the same docs and adds contradictions;
+    # prefer it, falling back to the pre-execution drift block when absent.
+    if isinstance(post.get("lexi"), dict):
+        _collect_lexi(builder, post.get("lexi"))
+    _collect_aria(builder, report.get("plan"))
+    if isinstance(post.get("riley"), dict):
+        _collect_riley(builder, post.get("riley"))
+    for entry in report.get("role_results") or []:
+        if (
+            isinstance(entry, dict)
+            and entry.get("role") == "riley"
+            and entry.get("stage") == "adversarial_plan"
+            and isinstance(entry.get("details"), dict)
+        ):
+            _collect_riley(builder, entry["details"])
+    _collect_sable(builder, report.get("policy"))
+    _collect_nova(builder, report.get("execution"))
+    _collect_blocked_env(builder, report)
+    return builder.finalise()
+
+
+def count_by_priority(findings: list[dict[str, Any]]) -> dict[str, int]:
+    counts = {level: 0 for level in PRIORITY_LEVELS}
+    for finding in findings:
+        counts[finding["priority"]] = counts.get(finding["priority"], 0) + 1
+    counts["total"] = len(findings)
+    return counts
+
+
+def build_document(report: dict[str, Any]) -> dict[str, Any]:
+    findings = build_findings(report)
+    return {
+        "schema_version": "1",
+        "run_id": str(report.get("run_id") or ""),
+        "verdict": str(report.get("verdict") or ""),
+        "generated_at": str(report.get("finished_at") or ""),
+        "counts": count_by_priority(findings),
+        "findings": findings,
+    }
+
+
+def _finding_md_line(finding: dict[str, Any]) -> str:
+    location = "-"
+    if finding.get("file"):
+        location = f"`{finding['file']}"
+        if finding.get("line"):
+            location += f":{finding['line']}"
+        location += "`"
+    impact = _one_line(finding.get("customer_impact"), 120)
+    return (
+        f"- [{finding['id']}] {finding['priority']} {finding['type']} "
+        f"{finding['agent']} {location}: {impact} ({finding['verdict_effect']})"
+    )
+
+
+def render_markdown(document: dict[str, Any]) -> str:
+    """The short human index: counts table + top findings, capped at ~40 lines."""
+    counts = document.get("counts") or {}
+    findings = document.get("findings") or []
+    lines = [
+        f"# Findings - run {document.get('run_id') or '?'}",
+        "",
+        f"- run verdict: **{document.get('verdict') or '?'}**",
+        f"- findings: {counts.get('total', len(findings))} total",
+        "",
+        "| priority | count |",
+        "|---|---|",
+    ]
+    for level in PRIORITY_LEVELS:
+        lines.append(f"| {level} | {counts.get(level, 0)} |")
+    lines.append("")
+    if not findings:
+        lines.append("No findings.")
+        return "\n".join(lines) + "\n"
+    top = findings[:MD_TOP_COUNT]
+    lines.append(f"## Top {len(top)} findings")
+    for finding in top:
+        lines.append(_finding_md_line(finding))
+    if len(findings) > len(top):
+        lines.append(f"- …{len(findings) - len(top)} more in findings.json")
+    if len(lines) > MD_MAX_LINES:
+        # Absolute bound: keep the header + table, truncate the list.
+        lines = lines[: MD_MAX_LINES - 1] + ["- …remaining findings in findings.json"]
+    return "\n".join(lines) + "\n"
+
+
+# --- minimal JSON Schema subset validator -----------------------------------
+# Supports exactly the keywords the findings schema uses: type (string or
+# list), required, properties, items, enum. No dependencies, offline-safe.
+_TYPE_CHECKS = {
+    "object": lambda v: isinstance(v, dict),
+    "array": lambda v: isinstance(v, list),
+    "string": lambda v: isinstance(v, str),
+    "integer": lambda v: isinstance(v, int) and not isinstance(v, bool),
+    "number": lambda v: isinstance(v, (int, float)) and not isinstance(v, bool),
+    "boolean": lambda v: isinstance(v, bool),
+    "null": lambda v: v is None,
+}
+
+
+def validate_schema(value: Any, schema: dict[str, Any], path: str = "$", errors: list[str] | None = None) -> list[str]:
+    """Return a list of ``path: message`` errors; empty means the document fits."""
+    if errors is None:
+        errors = []
+    declared = schema.get("type")
+    if declared is not None:
+        types = declared if isinstance(declared, list) else [declared]
+        if not any(_TYPE_CHECKS.get(t, lambda v: True)(value) for t in types):
+            errors.append(f"{path}: expected type {types}, got {type(value).__name__}")
+            return errors
+    if "enum" in schema and value not in schema["enum"]:
+        errors.append(f"{path}: {value!r} is not one of {schema['enum']}")
+    if isinstance(value, dict):
+        for key in schema.get("required") or []:
+            if key not in value:
+                errors.append(f"{path}: missing required '{key}'")
+        for key, sub in (schema.get("properties") or {}).items():
+            if key in value and isinstance(sub, dict):
+                validate_schema(value[key], sub, f"{path}.{key}", errors)
+    if isinstance(value, list) and isinstance(schema.get("items"), dict):
+        for index, entry in enumerate(value):
+            validate_schema(entry, schema["items"], f"{path}[{index}]", errors)
+    return errors
+
+
+def load_schema(schema_path: Path | str | None = None) -> dict[str, Any]:
+    return json.loads(Path(schema_path or SCHEMA_PATH).read_text(encoding="utf-8"))
+
+
+def write_findings(report: Any, findings_dir: Path | str) -> tuple[Path, Path]:
+    """Write the run's findings under ``<findings_dir>/<run_id>/`` and mirror
+    them into ``<findings_dir>/latest/`` so an IDE can pin one stable path.
+
+    Returns the per-run ``(findings.json, findings.md)`` paths. The ``latest``
+    copy is byte-identical to the per-run pair; the copy is not a separate
+    report and always reflects the most recent write.
+    """
+    if isinstance(report, dict):
+        data = report
+    else:
+        to_dict = getattr(report, "to_dict", None)
+        if not callable(to_dict):
+            raise TypeError("findings builder expects a mapping or an object with to_dict()")
+        data = to_dict()
+    document = build_document(data)
+    base = Path(findings_dir)
+    run_id = str(document.get("run_id") or "")
+    run_dir = base / run_id if run_id else base
+    run_dir.mkdir(parents=True, exist_ok=True)
+    json_bytes = json.dumps(document, indent=2, ensure_ascii=False) + "\n"
+    md_text = render_markdown(document)
+    json_path = run_dir / "findings.json"
+    md_path = run_dir / "findings.md"
+    json_path.write_text(json_bytes, encoding="utf-8")
+    md_path.write_text(md_text, encoding="utf-8")
+    if run_id:
+        latest_dir = base / "latest"
+        latest_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(json_path, latest_dir / "findings.json")
+        shutil.copyfile(md_path, latest_dir / "findings.md")
+    return json_path, md_path

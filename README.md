@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/quillhog0/QA-Ecosystem/actions/workflows/ci.yml/badge.svg)](https://github.com/quillhog0/QA-Ecosystem/actions/workflows/ci.yml)
 
-Version 0.3.4. See CHANGELOG.md.
+Version 0.3.5. See CHANGELOG.md.
 
 Part of the quillhog toolkit — [github.com/quillhog0](https://github.com/quillhog0) · [quillhog.xyz](https://quillhog.xyz) · X [@Quillhog0](https://x.com/Quillhog0).
 
@@ -130,6 +130,17 @@ python main.py --project /path/to/project --docs /path/to/docs
 ```
 
 Writes `reports/<run_id>.md` and `reports/<run_id>.yaml` (or into `--reports-dir`).
+
+Every run also writes an IDE-ready findings pair under `<findings-dir>/<run_id>/`:
+`findings.json` (schema `docs/findings.schema.json`, fields `id`, `agent`, `file`, `line`,
+`code_file`, `code_line`, `priority`, `type`, `customer_impact`, `evidence`,
+`proposed_red_test`, `verdict_effect`) plus a short `findings.md` (count table and top
+findings). The same two files are mirrored into `<findings-dir>/latest/` so an IDE can
+pin one stable path. `file`/`line` is the docs anchor of a drift finding (or the primary
+code/test location for other kinds); `code_file`/`code_line` is the nearest real code
+candidate when the tool can name one, otherwise null. The report is a pure projection -
+it never changes a verdict. Use `--findings-dir` to write them elsewhere; default is the
+reports directory. The mapping is documented in `docs/findings-priority.md`.
 
 ### Verdicts and exit codes
 
@@ -274,7 +285,7 @@ An optional adversarial test quality audit evaluated by **Riley** after baseline
 
 Running mutation testing on QA Ecosystem itself (`python main.py --self-test --mutation`, evaluating 30 deterministic mutants) yields:
 
-- **Score:** **90.0%** at release 0.3.4 (27 killed, 3 survived, out of 30 sampled mutants; errors and timeouts are excluded from the score). Release 0.3.3 scored 93.1%. The mutant sample is deterministic (seed 42) but shifts as the code changes, so the figure varies between releases; re-run the command to measure the current tree.
+- **Score:** **96.7%** at release 0.3.5 (29 killed, 1 survived, out of 30 sampled mutants; errors and timeouts are excluded from the score). Release 0.3.4 scored 90.0%. The mutant sample is deterministic (seed 42) but shifts as the code changes, so the figure varies between releases; re-run the command to measure the current tree.
 - **Note:** earlier builds counted a mutant as killed when the test run crashed before any test executed (for example when the sandbox could not start the project venv). That bug is fixed and covered by tests, so this score only counts real test failures.
 - **Surviving mutants at 0.3.3:** agents/aria.py:48 (`>` -> `>=`) and core/sandbox.py:248 (`and` -> `or`). Both are equivalent mutants: at aria.py:48 the single-part match re-adds a token that is already added and then deduplicated, so the output is unchanged; at sandbox.py:248 a path equal to the isolated copy or work directory is already skipped by the following `relative_to` checks, so the sandbox arguments are identical.
 

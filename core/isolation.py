@@ -7,7 +7,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 SKIP_DIR_NAMES = {
@@ -40,6 +40,11 @@ class IsolationHandle:
     skipped_secrets: list[str]
     git_worktree: bool = False
     tested_tree: str = ""
+    # Every path the copy could not or did not carry, each with the reason it
+    # was skipped: ``{"path": <rel>, "reason": <secret|symlink-failed|copy-failed
+    # |symlink-removed|missing>}``. Secrets are a deliberate skip; a copy or
+    # symlink failure is a warning the operator must see, never a silent drop.
+    skipped: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -48,6 +53,7 @@ class IsolationHandle:
             "method": self.method,
             "read_only": self.read_only,
             "skipped_secrets": self.skipped_secrets,
+            "skipped": self.skipped,
             "git_worktree": self.git_worktree,
             "tested_tree": self.tested_tree,
         }
@@ -110,8 +116,63 @@ def _get_tested_tree_info(root: Path) -> str:
     return "working (copy)"
 
 
-def _copy_git_working_tree(src: Path, dst: Path) -> list[str]:
-    skipped: list[str] = []
+def _record_skip(skipped: list[dict], path: object, reason: str) -> None:
+    rel = str(path)
+    if not any(rec["path"] == rel for rec in skipped):
+        skipped.append({"path": rel, "reason": reason})
+
+
+def _expand_untracked_dir(src: Path, rel_dir: Path) -> list[str]:
+    """Files under a collapsed untracked directory, as paths relative to ``src``.
+
+    ``git ls-files -co`` reports a fully untracked directory - most often a
+    nested git repository - as a single ``dir/`` entry rather than its files, so
+    a plain ``copy2`` on it would fail and the whole tree would silently vanish.
+    Listing the directory through git (which ``git -C`` resolves to the nested
+    repository when there is one) honours its own ``.gitignore`` and returns
+    tracked plus untracked content; a filesystem walk is the fallback for a
+    subtree git will not describe. Vendored and generated directories are pruned
+    on every path so a dependency's files are never copied.
+    """
+    target = src / rel_dir
+    files: list[str] = []
+    proc = subprocess.run(
+        ["git", "-C", str(target), "ls-files", "-co", "--exclude-standard", "-z"],
+        capture_output=True,
+        check=False,
+    )
+    if proc.returncode == 0 and proc.stdout.strip(b"\0"):
+        for item in proc.stdout.split(b"\0"):
+            if not item:
+                continue
+            try:
+                sub = item.decode("utf-8")
+            except UnicodeDecodeError:
+                sub = item.decode("utf-8", errors="replace")
+            sub = sub.rstrip("/")
+            if not sub:
+                continue
+            rel = rel_dir / sub
+            if any(part in SKIP_DIR_NAMES for part in rel.parts):
+                continue
+            child = src / rel
+            if sub.endswith("/") or child.is_dir():
+                files.extend(_expand_untracked_dir(src, rel))
+                continue
+            files.append(str(rel))
+        return files
+    for path in sorted(target.rglob("*")):
+        if path.is_symlink() or not path.is_file():
+            continue
+        rel = path.relative_to(src)
+        if any(part in SKIP_DIR_NAMES for part in rel.parts):
+            continue
+        files.append(str(rel))
+    return files
+
+
+def _copy_git_working_tree(src: Path, dst: Path) -> list[dict]:
+    skipped: list[dict] = []
     proc = subprocess.run(
         ["git", "-C", str(src), "ls-files", "-co", "--exclude-standard", "-z"],
         capture_output=True,
@@ -121,6 +182,8 @@ def _copy_git_working_tree(src: Path, dst: Path) -> list[str]:
         return _copy_tree(src, dst)
 
     dst.mkdir(parents=True, exist_ok=True)
+    seen: set[str] = set()
+    order: list[str] = []
     for entry in proc.stdout.split(b"\0"):
         if not entry:
             continue
@@ -128,14 +191,31 @@ def _copy_git_working_tree(src: Path, dst: Path) -> list[str]:
             rel_str = entry.decode("utf-8")
         except UnicodeDecodeError:
             rel_str = entry.decode("utf-8", errors="replace")
+        rel_path = src / rel_str
+        # A collapsed untracked directory (trailing slash, or a real directory
+        # that git refused to descend into) is expanded file by file so its
+        # contents are copied instead of raising on a directory copy2.
+        if rel_str.endswith("/") or (rel_path.is_dir() and not rel_path.is_symlink()):
+            for sub in _expand_untracked_dir(src, Path(rel_str.rstrip("/"))):
+                if sub not in seen:
+                    seen.add(sub)
+                    order.append(sub)
+            continue
+        key = str(Path(rel_str))
+        if key not in seen:
+            seen.add(key)
+            order.append(key)
+
+    for rel_str in order:
         rel_path = Path(rel_str)
         if any(part in SKIP_DIR_NAMES for part in rel_path.parts):
             continue
         src_file = src / rel_path
         if not src_file.exists() and not src_file.is_symlink():
+            _record_skip(skipped, rel_path, "missing")
             continue
         if is_secret_path(src_file):
-            skipped.append(str(rel_path))
+            _record_skip(skipped, rel_path, "secret")
             continue
         dst_file = dst / rel_path
         dst_file.parent.mkdir(parents=True, exist_ok=True)
@@ -143,19 +223,19 @@ def _copy_git_working_tree(src: Path, dst: Path) -> list[str]:
             try:
                 target = os.readlink(src_file)
                 os.symlink(target, dst_file)
-            except OSError:
-                pass
+            except OSError as exc:
+                _record_skip(skipped, rel_path, f"symlink-failed: {exc}")
         else:
             try:
                 shutil.copy2(src_file, dst_file, follow_symlinks=False)
-            except OSError:
-                pass
+            except OSError as exc:
+                _record_skip(skipped, rel_path, f"copy-failed: {exc}")
 
     _clean_symlinks_and_secrets(dst, skipped)
     return skipped
 
 
-def _clean_symlinks_and_secrets(dest: Path, skipped: list[str]) -> None:
+def _clean_symlinks_and_secrets(dest: Path, skipped: list[dict]) -> None:
     dest_resolved = dest.resolve()
     for path in list(dest.rglob("*")):
         if path.is_symlink():
@@ -172,19 +252,17 @@ def _clean_symlinks_and_secrets(dest: Path, skipped: list[str]) -> None:
                 should_remove = True
             if should_remove:
                 rel = str(path.relative_to(dest))
-                if rel not in skipped:
-                    skipped.append(rel)
+                _record_skip(skipped, rel, "symlink-removed")
                 path.unlink()
         elif path.is_file() and is_secret_path(path):
             rel = str(path.relative_to(dest))
-            if rel not in skipped:
-                skipped.append(rel)
+            _record_skip(skipped, rel, "secret")
             path.chmod(stat.S_IWUSR | stat.S_IRUSR)
             path.unlink()
 
 
-def _copy_tree(src: Path, dst: Path) -> list[str]:
-    skipped: list[str] = []
+def _copy_tree(src: Path, dst: Path) -> list[dict]:
+    skipped: list[dict] = []
 
     def ignore(directory: str, names: list[str]) -> set[str]:
         ignored: set[str] = set()
@@ -196,10 +274,23 @@ def _copy_tree(src: Path, dst: Path) -> list[str]:
                 continue
             if is_secret_path(child):
                 ignored.add(name)
-                skipped.append(str(child.relative_to(src)))
+                _record_skip(skipped, child.relative_to(src), "secret")
         return ignored
 
-    shutil.copytree(src, dst, ignore=ignore, dirs_exist_ok=False, symlinks=True)
+    try:
+        shutil.copytree(src, dst, ignore=ignore, dirs_exist_ok=False, symlinks=True)
+    except shutil.Error as exc:
+        # copytree collects per-file failures instead of aborting: record each
+        # one so the operator sees why a file is missing from the isolated copy.
+        details = exc.args[1] if len(exc.args) > 1 else []
+        for item in details or []:
+            failed_src = item[0]
+            why = item[2]
+            try:
+                rel = str(Path(failed_src).relative_to(src))
+            except ValueError:
+                rel = str(failed_src)
+            _record_skip(skipped, rel, f"copy-failed: {why}")
     _clean_symlinks_and_secrets(dst, skipped)
     return skipped
 
@@ -263,14 +354,16 @@ def create_isolation(
     if read_only:
         _make_sources_readonly(dest)
 
+    secrets = [rec["path"] for rec in skipped if rec["reason"].startswith("secret")]
     return IsolationHandle(
         live_root=live_root,
         isolated_root=dest,
         method=method,
         read_only=read_only,
-        skipped_secrets=skipped,
+        skipped_secrets=secrets,
         git_worktree=git_worktree,
         tested_tree=tested_tree,
+        skipped=list(skipped),
     )
 
 
@@ -365,6 +458,11 @@ def archive_note(handle: IsolationHandle, log_dir: Path) -> Path:
     ]
     if handle.skipped_secrets:
         lines.extend(f"  - {item}" for item in handle.skipped_secrets)
+    else:
+        lines.append("  - (none)")
+    lines.append("skipped:")
+    if handle.skipped:
+        lines.extend(f"  - {rec['path']} [{rec['reason']}]" for rec in handle.skipped)
     else:
         lines.append("  - (none)")
     note.write_text("\n".join(lines) + "\n", encoding="utf-8")

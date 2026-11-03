@@ -36,6 +36,8 @@ def render_markdown(report: FinalReport) -> str:
         lines.append(f"- **tested_tree:** {report.tested_tree}")
     if report.escalation:
         lines.append(f"- **escalation:** `{report.escalation}`")
+    for warning in report.warnings:
+        lines.append(f"- **warning:** {warning}")
     lines += ["", "## Role results", ""]
     for item in report.role_results:
         lines.append(f"### {item.role} / {item.stage} (iter {item.iteration})")

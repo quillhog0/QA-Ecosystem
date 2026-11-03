@@ -69,6 +69,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Override reports directory",
     )
     parser.add_argument(
+        "--findings-dir",
+        default="",
+        help="Where findings.json/findings.md are written (default: same as --reports-dir)",
+    )
+    parser.add_argument(
         "--strict",
         action="store_true",
         help="Enable strict verification (riley.veto_on_uncovered_claims=true)",
@@ -184,6 +189,8 @@ def main(argv: list[str] | None = None) -> int:
         config["reports_dir"] = args.reports_dir
     else:
         config.setdefault("reports_dir", str(here / "reports"))
+    if args.findings_dir:
+        config["findings_dir"] = args.findings_dir
     if args.self_test:
         # Copy the working tree, not HEAD, so uncommitted tests are included.
         config["isolation_method"] = "copy"
@@ -204,9 +211,14 @@ def main(argv: list[str] | None = None) -> int:
     if report.escalation:
         print(report.escalation)
     print(f"sandbox={report.sandbox}")
+    for warning in getattr(report, "warnings", []) or []:
+        print(f"WARN {warning}")
     if report.mutation and report.mutation.get("status") == "completed":
         print(f"mutation_score={report.mutation.get('score', 0.0):.2f}")
     print(f"report={reports_dir / (report.run_id + '.md')}")
+    findings_base = Path(config.get("findings_dir") or reports_dir)
+    print(f"findings={findings_base / report.run_id / 'findings.md'}")
+    print(f"findings_latest={findings_base / 'latest' / 'findings.md'}")
     print(f"isolated_root={report.isolated_root}")
     if args.sarif:
         try:

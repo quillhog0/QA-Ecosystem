@@ -17,10 +17,11 @@ import yaml
 
 from agents.adapters import complete_with_status, format_llm_error, load_prompt, parse_yaml_block
 from agents.inventory import (
+    CODE_SKIP,
     DOC_GLOBS,
     doc_tokens,
     list_docs,
-    list_python,
+    list_sources,
     public_names,
     relative_strings,
     split_code_and_tests,
@@ -122,10 +123,11 @@ def _imported_names(project_root: Path) -> set[str]:
 def _collect_code_text_content(project_root: Path) -> str:
     content = []
     for path in project_root.rglob("*.py"):
-        if any(
-            part in path.parts
-            for part in [".venv", "venv", ".git", "node_modules", "__pycache__"]
-        ):
+        try:
+            rel_parts = path.relative_to(project_root).parts[:-1]
+        except ValueError:
+            rel_parts = path.parts[:-1]
+        if any(part in CODE_SKIP for part in rel_parts):
             continue
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
@@ -199,36 +201,83 @@ _OTHER_SOURCE_EXT = {
     ".kt", ".swift", ".c", ".h", ".cc", ".cpp", ".hpp", ".pyi",
 }
 _CONFIG_EXT = {".yaml", ".yml", ".json", ".toml", ".ini", ".cfg"}
-_SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__", "docs", "dist", "build"}
+# Vendored / generated / tool-owned directories never count as code evidence.
+# The set is inherited from the inventory (the same rule the doc scan uses),
+# plus ``docs`` itself - a doc file cannot prove a docs promise about code.
+_SKIP_DIRS = CODE_SKIP | {"docs"}
 
 
-def _other_sources_text(project_root: Path, limit_bytes: int = 5_000_000) -> str:
-    """Text of non-doc project files (other languages, config, tests)."""
-    chunks: list[str] = []
-    total = 0
-    for path in sorted(project_root.rglob("*")):
-        if any(part in _SKIP_DIRS for part in path.relative_to(project_root).parts[:-1]):
-            continue
-        if path.suffix.lower() not in _OTHER_SOURCE_EXT or not path.is_file():
-            continue
-        if path.suffix.lower() in _CONFIG_EXT and "workflows" not in path.parts:
-            # Config files of the project under test are not evidence: a key
-            # only counts if code actually reads it (see _collect_code_strings).
-            # CI pipeline definitions (a ``workflows/`` directory, the universal
-            # GitHub Actions / GitLab CI layout) are the exception: a workflow
-            # file *is* the executable that declares its own job inputs, so a doc
-            # naming such an input is describing real code, not missing code.
+def _iter_other_sources(
+    project_root: Path,
+    limit_bytes: int = 5_000_000,
+    extra_roots: list[Path] | None = None,
+) -> list[tuple[str, str]]:
+    """``(rel_path, text)`` for every non-doc project file scanned.
+
+    The isolated copy is the primary and only code evidence: the isolation step
+    expands untracked directories file by file, and anything it could not carry
+    is a reported skip (isolation.skipped + WARN), not something Lexi re-reads
+    from the live root. ``extra_roots`` stays available for callers that must
+    widen the scan deliberately. Vendored / generated directories are skipped
+    on every path so a bundled dependency's identifier cannot silence a real
+    drift.
+    """
+    roots: list[Path] = []
+    seen_roots: set[Path] = set()
+    for candidate in [project_root, *(extra_roots or [])]:
+        if candidate is None:
             continue
         try:
-            size = path.stat().st_size
-            if size > 1_000_000 or total + size > limit_bytes:
-                continue
-            text = path.read_text(encoding="utf-8", errors="replace")
-            chunks.append(text)
-            total += size
+            resolved = Path(candidate).resolve()
         except OSError:
             continue
-    return "\n".join(chunks)
+        if not resolved.exists() or resolved in seen_roots:
+            continue
+        seen_roots.add(resolved)
+        roots.append(resolved)
+    collected: list[tuple[str, str]] = []
+    total = 0
+    seen_rel: set[str] = set()
+    for root in roots:
+        for path in sorted(root.rglob("*")):
+            if not path.is_file():
+                continue
+            rel = path.relative_to(root)
+            if any(part in _SKIP_DIRS for part in rel.parts[:-1]):
+                continue
+            if path.suffix.lower() not in _OTHER_SOURCE_EXT:
+                continue
+            if path.suffix.lower() in _CONFIG_EXT and "workflows" not in path.parts:
+                # Config files of the project under test are not evidence: a key
+                # only counts if code actually reads it (see _collect_code_strings).
+                # CI pipeline definitions (a ``workflows/`` directory, the universal
+                # GitHub Actions / GitLab CI layout) are the exception: a workflow
+                # file *is* the executable that declares its own job inputs, so a doc
+                # naming such an input is describing real code, not missing code.
+                continue
+            key = rel.as_posix()
+            if key in seen_rel:
+                continue
+            try:
+                size = path.stat().st_size
+                if size > 1_000_000 or total + size > limit_bytes:
+                    continue
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            seen_rel.add(key)
+            collected.append((key, text))
+            total += size
+    return collected
+
+
+def _other_sources_text(
+    project_root: Path,
+    limit_bytes: int = 5_000_000,
+    extra_roots: list[Path] | None = None,
+) -> str:
+    """Text of non-doc project files (other languages, config, tests)."""
+    return "\n".join(text for _rel, text in _iter_other_sources(project_root, limit_bytes, extra_roots))
 
 
 def _code_shaped(ident: str) -> bool:
@@ -350,6 +399,7 @@ class _Mention:
         "line", "heading", "intro", "is_list_item", "in_paren",
         "gap_before", "gap_after", "prev_term", "next_term", "clause_terms",
         "in_blockquote", "definition", "narrated", "historical",
+        "doc_file", "doc_line",
     )
 
     def __init__(
@@ -368,6 +418,8 @@ class _Mention:
         definition: bool = False,
         narrated: bool = False,
         historical: bool = False,
+        doc_file: str = "",
+        doc_line: int = 0,
     ) -> None:
         self.line = line
         self.heading = heading
@@ -383,6 +435,8 @@ class _Mention:
         self.definition = definition
         self.narrated = narrated
         self.historical = historical
+        self.doc_file = doc_file
+        self.doc_line = doc_line
 
     def enumerated(self) -> bool:
         """Part of a run of backticked terms separated only by punctuation.
@@ -450,7 +504,17 @@ def _looks_like_rule_heading(heading: str) -> bool:
 
 
 def _strip_fences(text: str) -> str:
-    return FENCE_RE.sub("", text)
+    """Blank out fenced code blocks while keeping the line numbering intact.
+
+    A mention's line is an IDE anchor into the real file, so replacing a fence
+    with newlines (one per removed line) is deliberate: prose scan sees no
+    code, but ``splitlines()`` indices still match the file on disk.
+    """
+
+    def _blank(match: re.Match) -> str:
+        return "\n" * match.group(0).count("\n")
+
+    return FENCE_RE.sub(_blank, text)
 
 
 _GLOSSARY_TAIL_RE = re.compile(r"^\s*(?:\([^)]*\))?\s*:")
@@ -529,6 +593,37 @@ def _is_historical_doc(path: Path, docs_root: Path) -> bool:
     return False
 
 
+def _relative_doc_path(path: Path, docs_root: Path) -> str:
+    """POSIX path of a doc file relative to the docs root (its name if outside)."""
+    try:
+        if docs_root.is_file():
+            return path.name
+        return path.resolve().relative_to(docs_root.resolve()).as_posix()
+    except (ValueError, OSError):
+        return path.name
+
+
+def _mention_location(
+    ident: str, mentions: dict[str, list[_Mention]] | None
+) -> tuple[str | None, int | None]:
+    """Where the docs make their main promise about ``ident``, for IDE anchors.
+
+    A live promise line (not a historical record, not a source-cited narration)
+    is the sentence an operator must fix, so it wins; any located mention is
+    the fallback. ``None`` pair only when no mention carried a location.
+    """
+    found = (mentions or {}).get(ident) or []
+    fallback: tuple[str | None, int | None] = (None, None)
+    for mention in found:
+        if not mention.doc_file:
+            continue
+        if not (mention.historical or mention.narrated):
+            return mention.doc_file, mention.doc_line or None
+        if fallback[0] is None:
+            fallback = (mention.doc_file, mention.doc_line or None)
+    return fallback
+
+
 def _doc_mentions(docs_root: Path, doc_globs: tuple[str, ...]) -> dict[str, list[_Mention]]:
     """Every backticked term in the docs, with the structure of each mention.
 
@@ -546,9 +641,10 @@ def _doc_mentions(docs_root: Path, doc_globs: tuple[str, ...]) -> dict[str, list
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
+        doc_file = _relative_doc_path(path, docs_root)
         heading = ""
         previous: list[str] = []
-        for raw_line in _strip_fences(text).splitlines():
+        for lineno, raw_line in enumerate(_strip_fences(text).splitlines(), start=1):
             line = raw_line.rstrip()
             if not line.strip():
                 previous = []
@@ -596,6 +692,8 @@ def _doc_mentions(docs_root: Path, doc_globs: tuple[str, ...]) -> dict[str, list
                         definition=is_definition,
                         narrated=bool(_SOURCE_CITATION_RE.search(line)),
                         historical=_is_historical_doc(path, docs_root),
+                        doc_file=doc_file,
+                        doc_line=lineno,
                     )
                 )
             previous = [line]
@@ -855,6 +953,57 @@ def _mentions_ident(sentence: str, ident: str) -> bool:
     return bool(re.search(rf"(?<![A-Za-z0-9_])`?{esc}`?(?![A-Za-z0-9_])", sentence))
 
 
+# A heading that frames what follows as an open question, a plan, or an idea -
+# not a promise the project makes today. Matching is substring-based on the
+# lowercase heading text, so "## Future work", "### Ideas" and "Open questions"
+# all qualify while "API Surface" or "Usage" never do. Non-English stems follow
+# the same multilingual convention as _NEGATION_STEMS: "otaz" catches the Czech
+# words for "question(s)", "frage" the German "Fragen".
+_SPECULATIVE_HEADINGS = (
+    "open question",
+    "question",
+    "otaz",
+    "frage",
+    "todo",
+    "next step",
+    "future",
+    "idea",
+    "proposal",
+)
+# A conditional or future modal in the mentioning sentence: "we could add `x`",
+# "`x` might land", "until / once `x` exists" all describe a possible tomorrow,
+# not the present contract, so the term carries no present promise.
+_SPECULATIVE_MODAL_RE = re.compile(
+    r"\b(?:could|might|once|until|would(?:\s+also)?|we\s+can\s+also|plan(?:s|ned)?|want(?:ed)?\s+to)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_speculative_mention(m: "_Mention") -> bool:
+    """True when the mention sits in clearly speculative prose.
+
+    Either the surrounding section is an open-questions / roadmap / ideas
+    heading, or the sentence itself hedges with a conditional or future modal.
+    A term that only ever appears like this is not a present API promise.
+    """
+    heading = _fold(m.heading or "")
+    if any(stem in heading for stem in _SPECULATIVE_HEADINGS):
+        return True
+    # Strip the backticked term itself before testing the sentence, so a name
+    # like ``once_runner`` cannot trigger the modal on its own.
+    line = BACKTICK_RE.sub(" ", m.line or "")
+    return bool(_SPECULATIVE_MODAL_RE.search(line))
+
+
+def _all_speculative(found: list["_Mention"]) -> bool:
+    """Every mention of the term is speculative prose, so it is not a promise.
+
+    One present-tense mention anywhere keeps the term a real claim; only when
+    all of them are questions or plans does the finding lose its edge.
+    """
+    return bool(found) and all(_is_speculative_mention(m) for m in found)
+
+
 def _missing_code_severity(
     ident: str,
     *,
@@ -871,10 +1020,18 @@ def _missing_code_severity(
     in the project - which is how an API list reads. Everything else is a
     warning at most, in every language: a plain word, a term that only ever
     appears as an item of a vocabulary list, a parenthetical gloss, a negated or
-    forbidden mention, or a prose placeholder.
+    forbidden mention, or a prose placeholder. A term that only ever appears
+    under an open-questions / future heading, or inside a conditional or future
+    modal sentence, is speculation rather than a present promise and is capped
+    at low even in strict mode.
     """
     found = mentions.get(ident) or []
     if found and all(m.historical for m in found):
+        return "low"
+    if found and _all_speculative(found):
+        # Questions and plans are not promises: the cap holds even when the
+        # name is code-shaped or written in call form, because the prose around
+        # it never commits to the symbol existing today.
         return "low"
     if strict or ident in _CALL_FORM:
         return "high"
@@ -1140,8 +1297,7 @@ def _heuristic_drift(
     execution: dict[str, Any] | None = None,
     live_root: Path | None = None,
 ) -> DriftReport:
-    py_files = list_python(project_root)
-    code_files, test_files = split_code_and_tests(py_files, project_root)
+    code_files, test_files = split_code_and_tests(list_sources(project_root), project_root)
     tokens, _excerpt = doc_tokens(docs_root)
     findings: list[DriftFinding] = []
     doc_globs = tuple((config.get("lexi") or {}).get("doc_globs") or DOC_GLOBS)
@@ -1190,6 +1346,7 @@ def _heuristic_drift(
     # missing name is a warning by default and a veto only in strict mode.
     strict_missing = bool((config.get("lexi") or {}).get("veto_on_missing_code", False))
     _CALL_FORM.clear()
+    other_bundle: list[tuple[str, str]] | None = None
     other_text: str | None = None
     # A missing name is a warning by default. It may only escalate on code-shaped
     # evidence: a call form (`divide()`), a name written the way code names are
@@ -1262,8 +1419,15 @@ def _heuristic_drift(
             # pyproject.toml ``[project]`` / ``optional-dependencies``) — that
             # is not drift either.
             continue
-        if other_text is None:
-            other_text = _other_sources_text(project_root)
+        if other_bundle is None:
+            # The isolated copy is the only code evidence: the isolation step
+            # now expands untracked directories file by file (see
+            # core.isolation), so a source tree missing from the copy is a
+            # reported skip (isolation.skipped + WARN), not something Lexi may
+            # silently re-read from the live root. Vendored / generated
+            # directories stay excluded (see _iter_other_sources).
+            other_bundle = _iter_other_sources(project_root)
+            other_text = "\n".join(text for _rel, text in other_bundle)
         if re.search(rf"(?<![A-Za-z0-9_]){re.escape(ident)}(?![A-Za-z0-9_])", other_text):
             continue
         if mentions is None:
@@ -1280,16 +1444,20 @@ def _heuristic_drift(
             # missing project code.
             continue
         if ident in code_text_content:
+            doc_file, doc_line = _mention_location(ident, mentions)
             findings.append(
                 DriftFinding(
                     kind="domain_term",
                     path=ident,
                     message=f"docs mention `{ident}` but it appears only in comments/docstrings, not as code",
                     severity="low",
+                    docs_file=doc_file,
+                    docs_line=doc_line,
                 )
             )
             continue
         prose = _prose_only(ident, mentions)
+        doc_file, doc_line = _mention_location(ident, mentions)
         findings.append(
             DriftFinding(
                 kind="missing_code",
@@ -1306,6 +1474,8 @@ def _heuristic_drift(
                     docs_plain=docs_plain,
                     resolvable=resolvable_symbol,
                 ),
+                docs_file=doc_file,
+                docs_line=doc_line,
             )
         )
 
@@ -1335,6 +1505,7 @@ def _heuristic_drift(
                     path=public[0][1],
                     message="public names exist in code but tests never reference them",
                     severity="medium",
+                    code_file=public[0][1],
                 )
             )
 

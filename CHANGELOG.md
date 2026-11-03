@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.3.5 (2026-11-03)
+
+Verified with 676 unit tests passing (1 skipped), benchmark 15/15, field test 10/10 and a self-test mutation score of 0.97 (29 killed, 1 survived, verdict CLEAR).
+
+### Added
+- IDE findings report: every run writes `findings.json` and `findings.md` with P0-P3 priorities, `file:line` locations, customer impact and a proposed RED test for each finding. Output goes to a per-run directory plus a `latest/` copy; `--findings-dir` chooses the location. The format is described by `docs/findings.schema.json` and the priorities by `docs/findings-priority.md`.
+- Lexi indexes TypeScript and JavaScript symbols, so drift checks cover TS/JS projects.
+
+### Changed
+- Only P0/P1 findings backed by evidence can produce a `VETO`.
+- Vendored and generated directories and backup docs are skipped during scanning.
+- Open-question and speculative prose sections are capped at low severity.
+
+### Fixed
+- The isolated copy now expands untracked nested repositories and reports skipped files as `WARN` instead of silently swallowing copy errors.
+
 ## 0.3.4 (2026-11-02)
 
 Verified with 585 unit tests passing (1 skipped), benchmark 15/15, field test 10/10 and a self-test mutation score of 0.90 (27 killed, 3 survived, verdict CLEAR).
