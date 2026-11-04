@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.1 (2026-11-04)
+
+### Fixed
+- Lexi docs-vs-code false positives found in field runs on two TypeScript/Python projects:
+  - Git commit hashes (7-40 lowercase hex characters containing a digit, e.g. `ae5a684`) are never treated as code symbols, in backticked names and in call forms.
+  - Environment-variable candidates in docs come only from an explicit env context: `process.env.X`, `os.environ[...]` / `os.environ.get(...)` / `getenv(...)`, `$X` / `${X}`, `export X=`, keys of a committed `.env.example` / `.env.sample` / `.env.template`, or explicit "env var X" / "X environment variable" wording. Plain uppercase words (`UPDATE`, `SIGTERM`, `USDC`, `FIFO`, `MERGED`, ...) are no longer env findings.
+  - `undocumented_secret` no longer fires for a secret that the root README documents when the docs root is a sub-directory such as `docs/`: root `README*` files and env template keys are now part of the documented-name search, which matches whole names in any form (code block assignment, table cell, backticks).
+  - QA certificates (`QA-CERTIFICATE*`), plans (`PLAN-*`) and any document under a `fixtures/` directory are excluded from doc-vs-code claims (`list_claim_docs`); other scanners still see them through `list_docs`.
+  - A documented name that exists in a repository JSON/CSV data file (for example a test fixture) is capped at low severity instead of a P1 `missing_code` veto. Config files and manifests (YAML, `package.json`, `tsconfig*.json`) still do not count as evidence.
+
+### Added
+- Benchmark fixtures `py_lexi_factory_fp` and `ts_lexi_factory_fp` and unit tests `tests/unit/test_task14_lexi_factory_fp.py`.
+
 ## 0.4.0 (2026-11-04)
 
 ### Added

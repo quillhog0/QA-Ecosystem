@@ -11,7 +11,7 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
-from agents.inventory import list_docs, list_sources, public_names
+from agents.inventory import CODE_SKIP, list_claim_docs, list_sources, public_names
 from core.packets import DriftFinding
 
 # Known common non-env uppercase tokens
@@ -68,6 +68,110 @@ EXTERNAL_TOOLS = frozenset({
     "bumpversion", "flit", "twine", "wheel", "hatch", "pdm", "poetry", "uv", "ruff", "black", "flake8", "mypy",
     "pyright", "codecov", "towncrier", "cogapp", "pytest-benchmark", "pytest-codspeed",
 })
+
+_COMMIT_HASH_RE = re.compile(r"[0-9a-f]{7,40}")
+
+
+def is_commit_hash(token: str) -> bool:
+    """True for a git commit hash (7-40 lowercase hex chars with a digit).
+
+    The digit requirement keeps real hex-only words (``facade``, ``deadbeef``
+    style names are still code-shaped elsewhere) from being swallowed; every
+    abbreviated or full hash git prints carries at least one digit in practice.
+    """
+    return bool(_COMMIT_HASH_RE.fullmatch(token)) and any(ch.isdigit() for ch in token)
+
+
+# Repository data files: a name they contain is real project content. Config
+# files (YAML/TOML/INI, manifests, lockfiles) are deliberately not data: a key
+# only counts there if code reads it.
+_DATA_FILE_EXT = frozenset({".json", ".jsonl", ".ndjson", ".csv"})
+_NON_DATA_JSON = frozenset({
+    "package.json", "package-lock.json", "tsconfig.json", "jsconfig.json",
+    "composer.json", "composer.lock", ".eslintrc.json", "deno.json",
+})
+
+
+def _data_file_text(project_root: Path, limit_bytes: int = 5_000_000) -> str:
+    """Concatenated text of the project's data files (JSON fixtures, seeds)."""
+    chunks: list[str] = []
+    total = 0
+    root = Path(project_root)
+    if not root.is_dir():
+        return ""
+    for path in sorted(root.rglob("*")):
+        if not path.is_file() or path.suffix.lower() not in _DATA_FILE_EXT:
+            continue
+        if path.name.lower() in _NON_DATA_JSON or path.name.lower().startswith("tsconfig"):
+            continue
+        rel = path.relative_to(root)
+        if any(part in CODE_SKIP or part.startswith(".") for part in rel.parts):
+            continue
+        try:
+            size = path.stat().st_size
+            if size > 1_000_000 or total + size > limit_bytes:
+                continue
+            chunks.append(path.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            continue
+        total += size
+    return "\n".join(chunks)
+
+
+# Env-var candidates in docs come only from an explicit env context.
+_ENV_NAME = r"([A-Z][A-Z0-9_]{1,})"
+_DOC_ENV_PATTERNS = (
+    re.compile(r"process\.env(?:\.|\[\s*['\"])" + _ENV_NAME),
+    re.compile(r"os\.environ(?:\[|\.get\()\s*['\"]" + _ENV_NAME),
+    re.compile(r"\bgetenv\(\s*['\"]" + _ENV_NAME),
+    re.compile(r"\$\{?" + _ENV_NAME + r"\b"),
+    re.compile(r"\bexport\s+" + _ENV_NAME + r"="),
+    re.compile(r"\benv(?:ironment)?[ -]var(?:iable)?s?\s+`?" + _ENV_NAME + r"\b", re.IGNORECASE),
+    re.compile(r"`?\b" + _ENV_NAME + r"\b`?\s+env(?:ironment)?[ -]var(?:iable)?\b", re.IGNORECASE),
+)
+_ENV_EXAMPLE_NAMES = (".env.example", ".env.sample", ".env.template", "env.example")
+_ENV_EXAMPLE_KEY_RE = re.compile(r"^\s*(?:export\s+)?([A-Z][A-Z0-9_]*)\s*=", re.MULTILINE)
+
+
+def doc_env_candidates(line: str) -> list[str]:
+    """Env-var names a docs line names in an env context (in order, unique)."""
+    found: list[str] = []
+    for pattern in _DOC_ENV_PATTERNS:
+        for m in pattern.finditer(line):
+            name = m.group(1)
+            if not name.isupper() or name in found:
+                continue
+            found.append(name)
+    return found
+
+
+def env_example_keys(project_root: Path) -> dict[str, tuple[str, int]]:
+    """Keys declared in a committed env template (never the real ``.env``)."""
+    keys: dict[str, tuple[str, int]] = {}
+    for name in _ENV_EXAMPLE_NAMES:
+        path = Path(project_root) / name
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for lineno, line in enumerate(text.splitlines(), start=1):
+            m = _ENV_EXAMPLE_KEY_RE.match(line)
+            if m and m.group(1) not in keys:
+                keys[m.group(1)] = (name, lineno)
+    return keys
+
+
+def _root_readmes(project_root: Path) -> list[Path]:
+    """README-style files at the project root (may live outside docs_root)."""
+    root = Path(project_root)
+    if not root.is_dir():
+        return []
+    return sorted(
+        p for p in root.iterdir()
+        if p.is_file() and p.name.lower().startswith("readme") and p.suffix.lower() in (".md", ".rst", ".txt", "")
+    )
 
 
 def _is_doc_code_example_ident(ident: str, doc_text: str) -> bool:
@@ -153,7 +257,7 @@ def check_cli_claims(docs_root: Path, project_root: Path) -> list[DriftFinding]:
         r"(?:^\s*[$>]\s*|`)([a-zA-Z0-9_-]+)\s+([a-zA-Z0-9_-]+)?\s*([^`\n]*)"
     )
 
-    for doc_path in list_docs(docs_root):
+    for doc_path in list_claim_docs(docs_root):
         if not any(doc_path.name.lower().startswith(pfx) for pfx in ("readme", "install")):
             continue
         if _is_historical_doc(doc_path, docs_root):
@@ -258,7 +362,7 @@ def check_call_form_claims(docs_root: Path, project_root: Path) -> list[DriftFin
     # Pattern: obj.method_name(...) - identifiers must start with a letter or underscore
     call_form_re = re.compile(r"\b([a-zA-Z_][a-zA-Z0-9_]*)\.([a-zA-Z_][a-zA-Z0-9_]*)\s*\(")
 
-    for doc_path in list_docs(docs_root):
+    for doc_path in list_claim_docs(docs_root):
         if not any(doc_path.name.lower().startswith(pfx) for pfx in ("readme", "install")):
             continue
         if _is_historical_doc(doc_path, docs_root):
@@ -279,6 +383,8 @@ def check_call_form_claims(docs_root: Path, project_root: Path) -> list[DriftFin
                 if method_name.startswith("_"):
                     continue
                 if method_name in BUILTIN_METHOD_NAMES:
+                    continue
+                if is_commit_hash(method_name) or is_commit_hash(obj_name):
                     continue
                 # If illustrative code defined inside doc example, skip
                 if _is_doc_code_example_ident(method_name, doc_text) or _is_doc_code_example_ident(obj_name, doc_text):
@@ -330,27 +436,43 @@ def check_env_vars(docs_root: Path, project_root: Path, config: dict[str, Any] |
             if any(frag in var for frag in ("KEY", "SECRET", "TOKEN", "PASSWORD")):
                 secret_code_vars.add(var)
 
-    # 2. Collect documented env vars
+    # 2. Collect documented env vars - only from an explicit env context
     doc_env_vars: dict[str, tuple[str, int]] = {}
-    all_doc_text = []
+    all_doc_text: list[str] = []
 
-    for doc_path in list_docs(docs_root):
+    doc_paths = list(list_claim_docs(docs_root))
+    seen_paths = {p.resolve() for p in doc_paths}
+    # The README usually lives at the project root even when docs_root is a
+    # ``docs/`` directory: its mentions document env vars too.
+    for readme in _root_readmes(project_root):
+        if readme.resolve() not in seen_paths:
+            doc_paths.append(readme)
+            seen_paths.add(readme.resolve())
+
+    for doc_path in doc_paths:
         try:
             lines = doc_path.read_text(encoding="utf-8", errors="replace").splitlines()
         except OSError:
             continue
-        rel_doc = str(doc_path.relative_to(docs_root)).replace("\\", "/") if doc_path.is_relative_to(docs_root) else doc_path.name
+        if doc_path.is_relative_to(docs_root):
+            rel_doc = str(doc_path.relative_to(docs_root)).replace("\\", "/")
+        else:
+            rel_doc = doc_path.name
 
         for lineno, line in enumerate(lines, start=1):
             all_doc_text.append(line)
-            # Find env vars: e.g. export FOO_BAR=..., `FOO_BAR`
-            for m in re.finditer(r"\b([A-Z][A-Z0-9_]{3,})\b", line):
-                var = m.group(1)
-                if var in NON_ENV_TOKENS or var in ignore:
+            for var in doc_env_candidates(line):
+                if var in NON_ENV_TOKENS or var in ignore or is_commit_hash(var):
                     continue
-                if "export " in line or "=" in line or "env" in line.lower() or "variable" in line.lower() or "token" in line.lower() or "key" in line.lower():
-                    if var not in doc_env_vars:
-                        doc_env_vars[var] = (rel_doc, lineno)
+                if var not in doc_env_vars:
+                    doc_env_vars[var] = (rel_doc, lineno)
+
+    example_keys = env_example_keys(project_root)
+    for var, location in example_keys.items():
+        all_doc_text.append(var)
+        if var in NON_ENV_TOKENS or var in ignore:
+            continue
+        doc_env_vars.setdefault(var, location)
 
     # Documented env var not read in code -> P2
     for var, (doc_file, doc_line) in doc_env_vars.items():
@@ -370,8 +492,10 @@ def check_env_vars(docs_root: Path, project_root: Path, config: dict[str, Any] |
 
     # Required secret env var read in code but undocumented -> P2
     joined_docs = "\n".join(all_doc_text)
-    for var in secret_code_vars:
-        if var not in joined_docs:
+    for var in sorted(secret_code_vars):
+        # A mention in any form documents it: `BOT_TOKEN=...` in a code block,
+        # a table cell, a `$BOT_TOKEN` reference or an env template key.
+        if not re.search(rf"(?<![A-Za-z0-9_]){re.escape(var)}(?![A-Za-z0-9_])", joined_docs):
             findings.append(
                 DriftFinding(
                     kind="undocumented_secret",
@@ -407,7 +531,7 @@ def check_install_instructions(docs_root: Path, project_root: Path) -> list[Drif
         except Exception:
             pass
 
-    for doc_path in list_docs(docs_root):
+    for doc_path in list_claim_docs(docs_root):
         try:
             lines = doc_path.read_text(encoding="utf-8", errors="replace").splitlines()
         except OSError:

@@ -1,6 +1,6 @@
 # QA Agent Ecosystem
 
-Version 0.4.0. See CHANGELOG.md.
+Version 0.4.1. See CHANGELOG.md.
 
 Deterministic QA control plane with six roles. Give it documentation plus a Python, TypeScript, or JavaScript project (including mixed projects); it walks a fixed test cycle in an **isolated copy** and returns a structured report with a verdict: `CLEAR`, `BLOCKED_ENV`, `VETO`, or `ESCALATE`.
 
@@ -206,7 +206,7 @@ Add QA Ecosystem as a gate in any repository's workflow. The job fails when the 
 
 ```yaml
 - uses: actions/checkout@v4
-- uses: quillhog0/QA-Ecosystem@v0.4.0
+- uses: quillhog0/QA-Ecosystem@v0.4.1
   with:
     project: .
     docs: docs
@@ -280,6 +280,8 @@ Benchmark fixtures:
 | uncommitted_bug | VETO by Nova/Riley |
 | weak_tests | VETO, surviving mutants drop score below threshold |
 | cheating_agent | VETO: skipped test, assertion swallowed by try/except, only trivial assertions |
+| py_lexi_factory_fp | CLEAR: commit hashes, plain uppercase words, root-README secret, QA certificates/plans/fixture docs and a JSON-fixture name raise no Lexi veto |
+| ts_lexi_factory_fp | CLEAR: the same Lexi false positives in a TypeScript project |
 
 ### Field test on public repositories
 

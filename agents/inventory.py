@@ -87,6 +87,31 @@ def _iter_files(root: Path, globs: tuple[str, ...]) -> list[Path]:
     return sorted(set(files))
 
 
+# QA artefacts describe a *review* of the project, not the project itself:
+# certificates, plans and fixture documents quote symbols, hashes and verdicts
+# that are never meant to exist in the code. They are excluded from every
+# docs-vs-code claim (but still listed by ``list_docs`` for other scanners).
+NON_CLAIM_DOC_PREFIXES = ("qa-certificate", "plan-")
+NON_CLAIM_DOC_DIRS = frozenset({"fixtures"})
+
+
+def is_non_claim_doc(path: Path, docs_root: Path) -> bool:
+    """True when *path* is a QA certificate, a plan, or a fixture document."""
+    try:
+        rel_parts = Path(path).resolve().relative_to(Path(docs_root).resolve()).parts
+    except (ValueError, OSError):
+        rel_parts = (Path(path).name,)
+    name = rel_parts[-1].lower() if rel_parts else ""
+    if name.startswith(NON_CLAIM_DOC_PREFIXES):
+        return True
+    return any(part.lower() in NON_CLAIM_DOC_DIRS for part in rel_parts[:-1])
+
+
+def list_claim_docs(docs_root: Path, globs: tuple[str, ...] | None = None) -> list[Path]:
+    """Docs whose statements are claims about the code (QA artefacts excluded)."""
+    return [p for p in list_docs(docs_root, globs) if not is_non_claim_doc(p, docs_root)]
+
+
 def list_docs(docs_root: Path, globs: tuple[str, ...] | None = None) -> list[Path]:
     if docs_root.is_file():
         return [docs_root]

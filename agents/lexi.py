@@ -20,13 +20,15 @@ from agents.inventory import (
     CODE_SKIP,
     DOC_GLOBS,
     doc_tokens,
-    list_docs,
+    list_claim_docs,
     list_sources,
     public_names,
     relative_strings,
     split_code_and_tests,
 )
 from agents.lexi_claims import (
+    _data_file_text,
+    is_commit_hash,
     _is_doc_code_example_ident,
     check_call_form_claims,
     check_cli_claims,
@@ -168,7 +170,7 @@ def _ignore_identifiers(
     # Keys from the config.yaml of the project under test are deliberately not
     # ignored here: a tested project must not be able to hide drift. A key that
     # code really reads is still found via string literals and other sources.
-    for path in list_docs(docs_root, globs=doc_globs):
+    for path in list_claim_docs(docs_root, globs=doc_globs):
         try:
             ignore |= _yaml_fence_keys(path.read_text(encoding="utf-8", errors="replace"))
         except OSError:
@@ -182,7 +184,7 @@ def _backtick_functions(
     docs_allowlist: set[str] | None = None,
 ) -> list[str]:
     names: list[str] = []
-    for path in list_docs(docs_root, globs=doc_globs):
+    for path in list_claim_docs(docs_root, globs=doc_globs):
         if docs_allowlist is not None and not _path_suffix_match(path, docs_allowlist):
             continue
         try:
@@ -663,7 +665,7 @@ def _doc_mentions(
         return cached
 
     mentions: dict[str, list[_Mention]] = {}
-    for path in list_docs(docs_root, globs=doc_globs):
+    for path in list_claim_docs(docs_root, globs=doc_globs):
         doc_file = _relative_doc_path(path, docs_root)
         if docs_allowlist is not None and not _path_suffix_match(doc_file, docs_allowlist):
             continue
@@ -741,7 +743,7 @@ def _docs_signature(docs_root: Path, doc_globs: tuple[str, ...]) -> tuple:
     same path; mtime plus size catches that without hashing contents.
     """
     parts: list[tuple[str, int, int]] = []
-    for path in list_docs(docs_root, globs=doc_globs):
+    for path in list_claim_docs(docs_root, globs=doc_globs):
         try:
             info = path.stat()
         except OSError:
@@ -944,7 +946,7 @@ def _extract_claims(
 ) -> list[str]:
     claims: list[str] = []
     seen_claims: set[str] = set()
-    for path in list_docs(docs_root, globs=doc_globs):
+    for path in list_claim_docs(docs_root, globs=doc_globs):
         doc_file = _relative_doc_path(path, docs_root)
         if docs_allowlist is not None and not _path_suffix_match(doc_file, docs_allowlist):
             continue
@@ -978,7 +980,7 @@ _PLACEHOLDER_RES_CACHE: dict[str, tuple[re.Pattern, ...]] = {}
 def _docs_plain_text(docs_root: Path, doc_globs: tuple[str, ...]) -> str:
     """Raw text of every doc file, used only for placeholder detection."""
     parts: list[str] = []
-    for path in list_docs(docs_root, globs=doc_globs):
+    for path in list_claim_docs(docs_root, globs=doc_globs):
         try:
             parts.append(path.read_text(encoding="utf-8", errors="replace"))
         except OSError:
@@ -1472,6 +1474,7 @@ def _heuristic_drift(
     _CALL_FORM.clear()
     other_bundle: list[tuple[str, str]] | None = None
     other_text: str | None = None
+    data_text: str | None = None
     # A missing name is a warning by default. It may only escalate on code-shaped
     # evidence: a call form (`divide()`), a name written the way code names are
     # written, or a name the docs enumerate beside a real project symbol. Terms
@@ -1505,6 +1508,9 @@ def _heuristic_drift(
         if ident in ignore or ident.lower() in ignore_lower:
             continue
         if ident in dir(builtins):
+            continue
+        if is_commit_hash(ident):
+            # A git commit hash quoted in prose is a reference, never a symbol.
             continue
         if ident.isupper() and "_" not in ident:
             continue
@@ -1582,6 +1588,20 @@ def _heuristic_drift(
             continue
         prose = _prose_only(ident, mentions)
         doc_file, doc_line = _mention_location(ident, mentions)
+        severity = _missing_code_severity(
+            ident,
+            mentions=mentions,
+            strict=strict_missing,
+            docs_plain=docs_plain,
+            resolvable=resolvable_symbol,
+        )
+        if data_text is None:
+            data_text = _data_file_text(project_root)
+        in_data = bool(re.search(rf"(?<![A-Za-z0-9_]){re.escape(ident)}(?![A-Za-z0-9_])", data_text))
+        if in_data and severity == "high":
+            # The name exists in a repository data file (a JSON fixture, a
+            # seed file): real project content, so never a veto.
+            severity = "low"
         findings.append(
             DriftFinding(
                 kind="missing_code",
@@ -1591,13 +1611,7 @@ def _heuristic_drift(
                     if prose
                     else f"docs mention `{ident}` but no matching module or public name exists in code"
                 ),
-                severity=_missing_code_severity(
-                    ident,
-                    mentions=mentions,
-                    strict=strict_missing,
-                    docs_plain=docs_plain,
-                    resolvable=resolvable_symbol,
-                ),
+                severity=severity,
                 docs_file=doc_file,
                 docs_line=doc_line,
             )
@@ -1694,7 +1708,7 @@ def _heuristic_drift(
     return DriftReport(
         verdict=verdict,
         findings=findings,
-        docs_files=relative_strings(list_docs(docs_root, globs=doc_globs), docs_root)
+        docs_files=relative_strings(list_claim_docs(docs_root, globs=doc_globs), docs_root)
         if docs_root.exists()
         else [],
         code_files=relative_strings(code_files, project_root),

@@ -35,7 +35,7 @@ jobs:
 
       - name: Run QA Ecosystem Gate
         id: qa
-        uses: quillhog0/QA-Ecosystem@v0.4.0
+        uses: quillhog0/QA-Ecosystem@v0.4.1
         with:
           project: ${{ matrix.path }}
           docs: ${{ matrix.docs }}
