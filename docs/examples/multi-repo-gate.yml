@@ -1,0 +1,79 @@
+name: Multi-Repository QA Gate
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+    branches: [ master, main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  qa-matrix:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - repo: "repo-a"
+            path: "services/repo-a"
+            docs: "services/repo-a/docs"
+            languages: "python"
+          - repo: "repo-b"
+            path: "services/repo-b"
+            docs: "services/repo-b/docs"
+            languages: "ts"
+          - repo: "repo-c"
+            path: "services/repo-c"
+            docs: "services/repo-c/docs"
+            languages: "both"
+    steps:
+      - name: Checkout caller repository
+        uses: actions/checkout@v4
+
+      - name: Run QA Ecosystem Gate
+        id: qa
+        uses: quillhog0/QA-Ecosystem@v0.4.0
+        with:
+          project: ${{ matrix.path }}
+          docs: ${{ matrix.docs }}
+          languages: ${{ matrix.languages }}
+          strict: "false"
+          sandbox: "auto"
+          summary: "true"
+
+      - name: Upload Gate Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-summary-${{ matrix.repo }}
+          path: |
+            ${{ steps.qa.outputs.summary }}
+            ${{ steps.qa.outputs.report }}
+          if-no-files-found: ignore
+
+  aggregate-summary:
+    needs: qa-matrix
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all QA summaries
+        uses: actions/download-artifact@v4
+        with:
+          path: downloaded-artifacts
+
+      - name: Combine Summaries into Step Summary
+        run: |
+          echo "# Multi-Repository QA Gate Combined Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          find downloaded-artifacts -type f -name "summary.md" | sort | while read -r file; do
+            dir=$(basename "$(dirname "$file")")
+            echo "## ${dir}" >> "$GITHUB_STEP_SUMMARY"
+            cat "$file" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "---" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+          done
+

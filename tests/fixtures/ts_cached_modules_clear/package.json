@@ -1,0 +1,11 @@
+{
+  "name": "ts-cached-modules-clear",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "vitest": "^1.0.0"
+  }
+}

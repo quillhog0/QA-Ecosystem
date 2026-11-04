@@ -94,7 +94,16 @@ class Vesper:
         # invalid sandbox mode cannot leak a copy under the temp directory.
         resolve_sandbox_mode(self.config)
         self.exceptions = list(exceptions or [])
+        from core.exceptions import load_qa_ignore
+        qa_entries, qa_warns = load_qa_ignore(project)
+        existing_matches = {getattr(e, "match", "") for e in self.exceptions}
+        for qe in qa_entries:
+            if qe.match not in existing_matches:
+                self.exceptions.append(qe)
         self._scope = self._compute_diff_scope(project, docs)
+        if self._scope is not None:
+            self.config["_diff_changed"] = list(self._scope.changed)
+        _run_started = time.monotonic()
         started = utc_now()
         run_id = new_run_id()
         base = Path(self.config.get("reports_dir") or "reports").resolve()
@@ -153,6 +162,8 @@ class Vesper:
             tested_tree=isolation.tested_tree,
         )
         report.timings = {"isolation": round(_isolation_seconds, 3)}
+        for w in qa_warns:
+            report.warnings.append(w)
         warn_skipped = [rec for rec in isolation.skipped if not rec["reason"].startswith("secret")]
         if warn_skipped:
             # A path the copy could not carry is never a silent drop: the
@@ -211,6 +222,7 @@ class Vesper:
             try:
                 self._loop(packet, isolation, work_dir, report, blocked_reason=blocked_reason)
             finally:
+                report.timings["total"] = round(time.monotonic() - _run_started, 3)
                 report.role_results = list(self.role_results)
                 report.finished_at = utc_now()
                 write_reports(report, base)
@@ -242,6 +254,7 @@ class Vesper:
         # 1. Lexi drift check
         drift = None
         drift_veto = False
+        _lexi_started = time.monotonic()
         for attempt in range(1, self.max_stage_iterations + 1):
             packet = packet.next(
                 stage=Stage.DRIFT_CHECK.value,
@@ -280,12 +293,14 @@ class Vesper:
             drift_veto = True
             break
 
+        report.timings["lexi"] = round(time.monotonic() - _lexi_started, 3)
         assert drift is not None
 
         # 2–3. Aria design with Riley review (max iterations)
         plan = None
         review = None
         gaps: list[str] = []
+        _design_started = time.monotonic()
         for attempt in range(1, self.max_stage_iterations + 1):
             packet = packet.next(
                 stage=Stage.DESIGN.value,
@@ -347,9 +362,11 @@ class Vesper:
                 report.escalation = ESCALATE_DOMAIN
                 return
 
+        report.timings["design"] = round(time.monotonic() - _design_started, 3)
         assert plan is not None and review is not None
 
         # 4. Sable pre-flight
+        _preflight_started = time.monotonic()
         command = sable.default_command(isolated, work_dir, test_targets=nova_targets)
         env = sanitized_env(allow_network=self.allow_network)
         env["HOME"] = str(work_dir / "home")
@@ -370,6 +387,7 @@ class Vesper:
             sandboxed=report.sandbox == "bwrap",
             only_paths=only_paths,
         )
+        report.timings["preflight"] = round(time.monotonic() - _preflight_started, 3)
         allowed_note = ""
         if policy.allowed:
             allowed_note = "; ALLOWED: " + "; ".join(
@@ -433,6 +451,14 @@ class Vesper:
                 report.verdict = Verdict.VETO.value
                 return
 
+        node_engine_blocked = False
+        from core.toolchain import check_node_engine, detect_languages
+        if not blocked_reason and "ts" in detect_languages(isolated):
+            node_ok, node_msg = check_node_engine(isolated)
+            if not node_ok:
+                blocked_reason = f"node engine precondition: {node_msg}"
+                node_engine_blocked = True
+
         if blocked_reason:
             # Nothing may execute without the required sandbox. Every stage above
             # already ran, so a dangerous project has been VETOed by now and an
@@ -445,12 +471,12 @@ class Vesper:
                 "status": "skipped",
                 "reason": (
                     "drift veto: docs and code disagree"
-                    if drift_veto
+                    if (drift_veto and not node_engine_blocked)
                     else "environment blocked before execution"
                 ),
             }
             report.verdict = (
-                Verdict.VETO.value if drift_veto else Verdict.BLOCKED_ENV.value
+                Verdict.VETO.value if (drift_veto and not node_engine_blocked) else Verdict.BLOCKED_ENV.value
             )
             return
 
@@ -605,11 +631,92 @@ class Vesper:
             if specific_cause:
                 root_cause = specific_cause
 
+        # Check identity leaks
+        from core.identity import scan_identity_leaks
+        _ident_started = time.monotonic()
+        diff_only_paths = set(self._scope.changed) if self._scope is not None else None
+        identity_leaks = scan_identity_leaks(isolated, self.config, only_paths=diff_only_paths)
+        report.timings["identity_scan"] = round(time.monotonic() - _ident_started, 3)
+
+        live_project = Path(packet.project_root)
+
+        # Check deleted tests in diff mode
+        deleted_tests: list[str] = []
+        if self._scope is not None and getattr(self._scope, "base_ref", None):
+            from core.diffscope import detect_deleted_tests
+            deleted_tests = detect_deleted_tests(live_project, self._scope.base_ref)
+
+        # Check clean install if requested
+        clean_install_res: dict[str, Any] | None = None
+        if self.config.get("clean_install", False):
+            from core.clean_install import run_clean_install
+            clean_install_res = run_clean_install(live_project, work_dir)
+
         report.post_audit = {
             "riley": result_review.to_dict(),
             "lexi": post_drift.to_dict(),
             "root_cause": root_cause,
+            "identity_leaks": identity_leaks,
+            "deleted_tests": deleted_tests,
+            "clean_install": clean_install_res,
         }
+
+        p1_leaks = [leak for leak in identity_leaks if leak.get("priority") == "P1"]
+        if p1_leaks:
+            append_result(
+                self.role_results,
+                RoleResult(
+                    role=Role.SABLE.value,
+                    stage="identity_audit",
+                    verdict=Verdict.BLOCK.value,
+                    summary=f"{len(p1_leaks)} critical secret leak(s) detected in shipped tree",
+                    details={"leaks": identity_leaks},
+                ),
+            )
+            report.mutation = {"status": "skipped", "reason": "identity leak veto"}
+            report.verdict = Verdict.VETO.value
+            return
+        elif identity_leaks:
+            append_result(
+                self.role_results,
+                RoleResult(
+                    role=Role.SABLE.value,
+                    stage="identity_audit",
+                    verdict=Verdict.CLEAR.value,
+                    summary=f"{len(identity_leaks)} identity warning(s) (P2) detected in shipped tree",
+                    details={"leaks": identity_leaks},
+                ),
+            )
+
+        if deleted_tests:
+            append_result(
+                self.role_results,
+                RoleResult(
+                    role=Role.RILEY.value,
+                    stage="diff_tests_audit",
+                    verdict=Verdict.VETO.value,
+                    summary=f"{len(deleted_tests)} test(s) deleted in diff mode",
+                    details={"deleted_tests": deleted_tests},
+                ),
+            )
+            report.mutation = {"status": "skipped", "reason": "deleted tests in diff mode"}
+            report.verdict = Verdict.VETO.value
+            return
+
+        if clean_install_res and clean_install_res.get("failed"):
+            append_result(
+                self.role_results,
+                RoleResult(
+                    role=Role.NOVA.value,
+                    stage="clean_install_audit",
+                    verdict=Verdict.VETO.value,
+                    summary="README installation instructions failed in clean environment",
+                    details=clean_install_res,
+                ),
+            )
+            report.mutation = {"status": "skipped", "reason": "clean install failure"}
+            report.verdict = Verdict.VETO.value
+            return
 
         # Veto hierarchy: Sable > Riley > Lexi (Sable applied first). An
         # environmental stop may only soften the technical blocks that say "the

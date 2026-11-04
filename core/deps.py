@@ -39,14 +39,45 @@ def _read_pyproject_deps(path: Path) -> list[str]:
         data = tomllib.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return []
-    deps = data.get("project", {}).get("dependencies", [])
+    deps = list(data.get("project", {}).get("dependencies", []))
     optional_deps = data.get("project", {}).get("optional-dependencies", {})
-    deps.extend(optional_deps.get("dev", []))
-    deps.extend(optional_deps.get("test", []))
+    if isinstance(optional_deps, dict):
+        for key in ("test", "tests", "dev", "testing"):
+            val = optional_deps.get(key, [])
+            if isinstance(val, list):
+                deps.extend(val)
+    # PEP 735 dependency-groups
+    dep_groups = data.get("dependency-groups", {})
+    if isinstance(dep_groups, dict):
+        for key in ("test", "dev", "tests"):
+            val = dep_groups.get(key, [])
+            if isinstance(val, list):
+                for item in val:
+                    if isinstance(item, str):
+                        deps.append(item)
+                    elif isinstance(item, dict) and "include-group" not in item:
+                        pass
     return deps
 
 
 def venv_dir(work_dir: Path) -> Path:
+    """Single source of truth for the per-run virtualenv location."""
+    return work_dir / "venv"
+
+
+def _needs_git_init(isolated_root: Path) -> bool:
+    if (isolated_root / ".git").exists():
+        return False
+    for fname in ("pyproject.toml", "setup.py", "setup.cfg"):
+        p = isolated_root / fname
+        if p.is_file():
+            try:
+                text = p.read_text(encoding="utf-8", errors="replace").lower()
+                if "setuptools_scm" in text or "setuptools-scm" in text or "hatch-vcs" in text:
+                    return True
+            except OSError:
+                pass
+    return False
     """Single source of truth for the per-run virtualenv location."""
     return work_dir / "venv"
 
@@ -156,17 +187,45 @@ def prepare_venv(isolated_root: Path, work_dir: Path, *, timeout: int) -> tuple[
     venv_path = venv_dir(work_dir)
     pip_log_path = work_dir / "pip.log"
 
+    # Minimal git init if missing git metadata so setuptools-scm / setuptools does not fail
+    if _needs_git_init(isolated_root):
+        try:
+            subprocess.run(["git", "init"], cwd=str(isolated_root), check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "qa"], cwd=str(isolated_root), check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "qa@local"], cwd=str(isolated_root), check=True, capture_output=True)
+            subprocess.run(["git", "add", "-A"], cwd=str(isolated_root), check=True, capture_output=True)
+            subprocess.run(["git", "commit", "-m", "init", "--allow-empty"], cwd=str(isolated_root), check=True, capture_output=True)
+        except Exception:
+            pass
+
     # Find dependency manifest
-    requirements_files = [
-        isolated_root / "requirements.txt",
-        isolated_root / "requirements-dev.txt",
-        isolated_root / "requirements-test.txt",
-    ]
-    found_requirements = [f for f in requirements_files if f.is_file()]
+    found_requirements: list[Path] = []
+    for f in sorted(isolated_root.glob("requirements*.txt")):
+        if f.is_file():
+            found_requirements.append(f)
+    for f in sorted(isolated_root.glob("*-requirements*.txt")):
+        if f.is_file() and f not in found_requirements:
+            found_requirements.append(f)
+
     pyproject_toml = isolated_root / "pyproject.toml"
+    setup_py = isolated_root / "setup.py"
+    setup_cfg = isolated_root / "setup.cfg"
 
     deps_to_install: list[str] = []
     pyproject_deps: list[str] = []
+    installed_summary: list[str] = []
+
+    if pyproject_toml.is_file():
+        p_deps = _read_pyproject_deps(pyproject_toml)
+        for dep in p_deps:
+            unsafe = _check_unsafe_requirement(dep)
+            if unsafe:
+                return None, f"pip install failed: unsafe requirement: {unsafe}"
+            pyproject_deps.append(dep)
+            deps_to_install.append(dep)
+        if p_deps:
+            installed_summary.append("pyproject dependencies + extras")
+
     if found_requirements:
         for f in found_requirements:
             try:
@@ -176,22 +235,37 @@ def prepare_venv(isolated_root: Path, work_dir: Path, *, timeout: int) -> tuple[
                     if unsafe:
                         return None, f"pip install failed: unsafe requirement: {unsafe}"
                 deps_to_install.append(f"-r{f.resolve()}")
+                installed_summary.append(f.name)
             except Exception:
                 pass
-    elif pyproject_toml.is_file():
-        for dep in _read_pyproject_deps(pyproject_toml):
-            unsafe = _check_unsafe_requirement(dep)
-            if unsafe:
-                return None, f"pip install failed: unsafe requirement: {unsafe}"
-            pyproject_deps.append(dep)
-            deps_to_install.append(dep)
+
+    if not deps_to_install and (setup_py.is_file() or setup_cfg.is_file()):
+        # Try editable install with extras if present
+        deps_to_install.append(str(isolated_root))
+        installed_summary.append("project root")
 
     if not deps_to_install:
         return None, "no dependency manifest"
 
+    env = sanitized_env(allow_network=True)
+    env["HOME"] = str(work_dir / "home")
+    env["SETUPTOOLS_SCM_PRETEND_VERSION"] = "0.0.0"
+    env["SETUPTOOLS_SCM_PRETEND_VERSION_FOR_ROOT"] = "0.0.0"
+
     # Reuse a previously completed install for this exact manifest, if present.
     cache_key = _venv_cache_key(found_requirements, pyproject_deps)
     if _reuse_cached_venv(cache_key, work_dir):
+        if (isolated_root / "pyproject.toml").is_file() or (isolated_root / "setup.py").is_file() or (isolated_root / "setup.cfg").is_file():
+            try:
+                subprocess.run(
+                    [str(venv_python(work_dir)), "-m", "pip", "install", "--no-deps", "-e", str(isolated_root)],
+                    env=env,
+                    cwd=work_dir,
+                    timeout=30,
+                    capture_output=True,
+                )
+            except Exception:
+                pass
         return venv_python(work_dir), "ok"
 
     # Create venv
@@ -216,9 +290,6 @@ def prepare_venv(isolated_root: Path, work_dir: Path, *, timeout: int) -> tuple[
         "pytest",
     ] + deps_to_install
 
-    env = sanitized_env(allow_network=True)
-    env["HOME"] = str(work_dir / "home")
-
     try:
         result = subprocess.run(
             pip_command,
@@ -230,6 +301,17 @@ def prepare_venv(isolated_root: Path, work_dir: Path, *, timeout: int) -> tuple[
             text=True,
         )
         pip_log_path.write_text(result.stdout + result.stderr, encoding="utf-8")
+        if (isolated_root / "pyproject.toml").is_file() or (isolated_root / "setup.py").is_file() or (isolated_root / "setup.cfg").is_file():
+            try:
+                subprocess.run(
+                    [str(python_executable), "-m", "pip", "install", "--no-deps", "-e", str(isolated_root)],
+                    env=env,
+                    cwd=work_dir,
+                    timeout=timeout,
+                    capture_output=True,
+                )
+            except Exception:
+                pass
         _persist_cached_venv(cache_key, work_dir)
         return python_executable, "ok"
     except subprocess.TimeoutExpired:

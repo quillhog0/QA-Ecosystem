@@ -187,6 +187,8 @@ class ExecutionResult:
     isolated_root: str = ""
     install_status: str = "skipped"
     sandbox_status: str = "unavailable"
+    language: str = ""
+    language_breakdown: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)

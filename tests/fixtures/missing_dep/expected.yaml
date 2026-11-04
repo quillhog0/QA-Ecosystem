@@ -1,0 +1,6 @@
+# A missing test dependency is an environment stop, not an accusation against
+# the project: BLOCKED_ENV with exit 2 (see core/environment.py).
+verdict: BLOCKED_ENV
+escalation: ""
+exit_code: 2
+root_cause: "missing dependency: qa_nonexistent_pkg_xyz"

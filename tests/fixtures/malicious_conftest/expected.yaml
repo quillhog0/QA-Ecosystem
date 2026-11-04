@@ -1,0 +1,6 @@
+verdict: VETO
+accept_verdicts:
+  - BLOCK
+  - VETO
+escalation: ""
+exit_code: 1

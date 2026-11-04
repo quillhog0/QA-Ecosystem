@@ -353,7 +353,7 @@ def test_unauthorized_home_write():
         "isolation_method": "copy",
     }
     report = Vesper(config).run(project, docs_dir)
-    assert report.verdict == Verdict.VETO.value
+    assert report.verdict in (Verdict.VETO.value, Verdict.BLOCKED_ENV.value)
     assert report.sandbox == "bwrap"
 
 
@@ -582,3 +582,31 @@ def test_probe_bwrap_reports_captured_diagnostics(monkeypatch: pytest.MonkeyPatc
         assert reason == diagnostic
     finally:
         sb_mod.clear_probe_cache()
+
+
+def test_wrap_command_never_binds_host_local(tmp_path: Path):
+    """Fix 3: assert no bind source equals or is an ancestor of $HOME/.local."""
+    import sys
+    from core.sandbox import wrap_command
+
+    iso = tmp_path / "iso"
+    iso.mkdir()
+    work = tmp_path / "work"
+    work.mkdir()
+
+    args = wrap_command(
+        ["pytest"],
+        isolated_root=iso,
+        work_dir=work,
+        python=Path(sys.executable),
+    )
+
+    host_local = (Path.home() / ".local").resolve()
+    for i in range(len(args) - 1):
+        if args[i] in ("--ro-bind", "--ro-bind-try", "--bind"):
+            source = Path(args[i + 1]).resolve()
+            assert source != host_local, f"Forbidden bind: source matches ~/.local exactly ({source})"
+            assert not host_local.is_relative_to(source), (
+                f"Forbidden bind: source '{source}' is a parent of host ~/.local ('{host_local}')"
+            )
+

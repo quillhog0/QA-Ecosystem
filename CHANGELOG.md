@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.4.0 (2026-11-04)
+
+### Added
+- First-class TypeScript and JavaScript support:
+  - Automatic language and toolchain detection for Python and TS/JS (including mixed repositories).
+  - Package manager detection with frozen lockfile enforcement (`package-lock.json` -> `npm ci`, `pnpm-lock.yaml` -> `pnpm install --frozen-lockfile`, `yarn.lock` -> `yarn install --frozen-lockfile`, fallback `npm install` with WARN).
+  - Test runner detection and execution (vitest, jest, mocha, node:test, and npm test) with machine-readable reporting.
+  - Typecheck verification with `tsc --noEmit` when `tsconfig.json` exists (P1 finding on compiler errors).
+  - Node engine version verification against `engines.node` and `.nvmrc` (stops with `BLOCKED_ENV` on engine mismatch).
+  - TS test quality analysis (Riley TS) using vendored TypeScript compiler AST: flags empty assertions, tautologies, constant/mock assertions, swallowed catch blocks, committed `.only` (P1), and committed `.skip`/`.todo` (P2).
+  - TS safety analysis (Sable TS): detects child process executions, filesystem writes outside temp directories, unmocked network calls, process environment secrets, and dynamic code evaluation.
+- New README and documentation feature claim checks in Lexi:
+  - Documented CLI subcommands and flags must exist in code definitions (argparse, click, typer for Python; commander, yargs, cac, argv for TS/JS; P1 on missing).
+  - Documented call-form functions/methods must resolve to public symbols in exports and modules (P1 on missing).
+  - Documented environment variables and config keys must be referenced in code (P2 on missing).
+  - Documented install commands and runtime versions must match manifests (P2 on mismatch).
+  - Optional `--claims-strict` flag: marks documented feature claims with no covering test as P2 findings.
+- Additional quality and security checks:
+  - In-repo `.qa-ignore` (YAML) support in tested projects for downgrading P1/P2/P3 findings (P0 ignore rejected with WARN; expired entries ignored with WARN).
+  - Shipped tree identity leak scanner for sensitive tokens, private keys, emails, and personal identifiers (P1).
+  - Clean install check (`--clean-install`): verifies that installation from scratch in an empty environment succeeds according to documentation (P1 on failure).
+  - Test deletion guard in diff mode (`--diff`): detects deleted test cases versus base ref (P1).
+  - Buyer-safe summary report (`summary.md`): compact (<40 lines) report scrubbed of identity and personal data, detailing verdict, test counts, runtime environments, verified features, and known limitations.
+- Enhanced Python dependency installation:
+  - Automatic installation of test extras (`.[test]`, `.[tests]`, `.[dev]`, PEP 735 dependency groups, and `requirements*.txt`).
+  - Fallback pretend version (`SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0`) and minimal git metadata initialization for VCS-backed build tools.
+- Updated GitHub Action inputs (`languages`, `node-version`, `diff-base`, `install-extras`, `clean-install`, `summary`) and matrix workflow example `docs/examples/multi-repo-gate.yml`.
+
+### Fixed
+- Lexi false-positive drift: documentation example code identifiers (e.g. `foo`, `bar`, `my_function`) and prose words are no longer flagged as missing code P1 findings.
+- Non-product and administrative documentation (`AGENTS.md`, `CONTRIBUTING.md`, `CHANGELOG.md`, etc.) capped below veto severity.
+
 ## 0.3.6 (2026-11-03)
 
 Verified with 702 unit tests passing (1 skipped), benchmark 15/15, field test 10/10 and a self-test mutation score of 1.00 (29 killed, 0 survived, verdict CLEAR).

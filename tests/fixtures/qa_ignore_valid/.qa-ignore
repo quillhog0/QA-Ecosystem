@@ -1,0 +1,4 @@
+exceptions:
+  - match: "riley:weak_test:tests/test_app.py:tests/test_app.py::test_compute"
+    reason: "Accepted legacy weak test"
+    expires: 2026-12-31

@@ -1,0 +1,4 @@
+exceptions:
+  - match: "lexi:drift:docs/README.md:critical_security_function"
+    reason: "Attempt to ignore a P0"
+    expires: 2026-12-31

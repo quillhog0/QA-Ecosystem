@@ -82,3 +82,26 @@ Exceptions re-label the *findings projection* only. The control-plane verdict
 (CLEAR / VETO / BLOCKED_ENV) is decided by the roles and is never softened here —
 an excepted finding still cannot turn a VETO into a pass, and an unexcepted P0/P1
 with evidence still vetoes exactly as before.
+
+## In-repo `.qa-ignore` (Tested Project)
+
+Tested projects can declare their own exceptions directly in the repository via `.qa-ignore` (YAML).
+This allows project authors to downgrade expected non-critical findings without editing QA configuration.
+
+### Rules and Bounds:
+- **Location:** `.qa-ignore` in the project root.
+- **Allowed Downgrades:** May downgrade **P1**, **P2**, and **P3** findings to INFO.
+- **P0 is Forbidden:** `.qa-ignore` can **never** silence or downgrade a **P0** finding. If `.qa-ignore` attempts to match a P0, it is rejected and emits a warning (`.qa-ignore cannot silence P0: <fingerprint>`), and the P0 stands.
+- **Expiry:** Expired entries have no effect and emit a warning (`exception expired: <match>`).
+- **Isolation:** The tested project can never modify any other QA gate configuration or rule.
+
+```yaml
+# .qa-ignore example in tested repo root
+exceptions:
+  - match: "sable:eval_call:tests/test_plugin.ts:eval"
+    reason: "Dynamic test fixture plugin loading"
+    expires: 2026-12-31
+  - match: "riley:weak_test:tests/test_legacy.py:test_old"
+    reason: "Scheduled for refactoring in milestone 2"
+    expires: 2026-11-30
+```

@@ -47,11 +47,12 @@ _POLICY_P0_CHECKS = frozenset(
 )
 _POLICY_P1_CHECKS = frozenset({"pytest_only", "isolated_exists"})
 
-_NODE_FILE_RE = re.compile(r"^(?P<file>[^:\s]+\.py)::")
+_EXT_PATTERN = r"\.(?:py|ts|tsx|js|jsx|mjs|cjs)"
+_NODE_FILE_RE = re.compile(rf"^(?P<file>[^:\s]+?{_EXT_PATTERN})::")
 # ``tests/test_x.py:27: in test_y`` or ``File "…/test_x.py", line 27``
-_TB_LINE_RE = re.compile(r"(?:^|\s)(?P<file>[\w./\-]+\.py):(?P<line>\d+):")
-_TB_FILE_LINE_RE = re.compile(r'File "(?P<file>[^"]+\.py)", line (?P<line>\d+)')
-_PY_PATH_RE = re.compile(r"(?P<file>(?:[\w./-]+/)?[\w.-]+\.py)")
+_TB_LINE_RE = re.compile(rf"(?:^|\s)(?P<file>[\w./\-]+?{_EXT_PATTERN}):(?P<line>\d+):")
+_TB_FILE_LINE_RE = re.compile(rf'File "(?P<file>[^"]+?{_EXT_PATTERN})", line (?P<line>\d+)')
+_PY_PATH_RE = re.compile(rf"(?P<file>(?:[\w./-]+/)?[\w.-]+?{_EXT_PATTERN})")
 
 _WEAK_TEST_PREFIX = "weak test: "
 _CLAIM_WEAK_FRAGMENT = "covered only by weak test"
@@ -301,15 +302,17 @@ def _collect_riley(builder: _FindingBuilder, review: dict[str, Any] | None, agen
         if gap.startswith(_WEAK_TEST_PREFIX):
             rest = gap[len(_WEAK_TEST_PREFIX):].strip()
             node = rest.split(" ", 1)[0]
-            file_name, _ = _node_location(node)
+            file_name, line = _node_location(node)
+            priority = "P1" if "[P1]" in gap else "P2"
             builder.add(
                 agent=agent,
                 ftype="weak_test",
-                priority="P2",
+                priority=priority,
                 impact="A test passes without checking behaviour, so it can hide a real bug.",
                 evidence=gap,
                 red_test="Rewrite the test to assert the concrete outcome and confirm it goes red when the behaviour breaks.",
                 file=file_name,
+                line=line,
                 term=node,
             )
             continue
@@ -533,7 +536,64 @@ def build_findings(report: dict[str, Any]) -> list[dict[str, Any]]:
     _collect_sable(builder, report.get("policy"))
     _collect_nova(builder, report.get("execution"))
     _collect_blocked_env(builder, report)
+    _collect_identity(builder, report.get("identity_leaks") or post.get("identity_leaks"))
+    _collect_clean_install(builder, report.get("clean_install") or post.get("clean_install"))
+    _collect_deleted_tests(builder, report.get("deleted_tests") or post.get("deleted_tests"))
     return builder.finalise()
+
+
+def _collect_identity(builder: _FindingBuilder, leaks: list[dict[str, Any]] | None) -> None:
+    for leak in leaks or []:
+        if not isinstance(leak, dict):
+            continue
+        leak_type = leak.get("type", "identity_leak")
+        file = leak.get("file")
+        line = leak.get("line")
+        priority = leak.get("priority", "P2")
+        builder.add(
+            agent="sable",
+            ftype="identity_leak",
+            priority=priority,
+            impact=(
+                "Critical secret token or private key detected in shipped tree."
+                if priority == "P1"
+                else "Sensitive identity or environment path detected in shipped tree."
+            ),
+            evidence=leak.get("evidence") or f"{file}:{line} {leak_type}",
+            red_test="Remove the sensitive identity data or secret token from the file.",
+            file=file,
+            line=line,
+            term=str(leak_type),
+        )
+
+
+def _collect_clean_install(builder: _FindingBuilder, clean_install: dict[str, Any] | None) -> None:
+    if not clean_install or not clean_install.get("failed"):
+        return
+    cmd = clean_install.get("command", "")
+    output = clean_install.get("output", "")
+    builder.add(
+        agent="nova",
+        ftype="clean_install",
+        priority="P1",
+        impact="README install instructions do not work on a fresh environment.",
+        evidence=f"Install command '{cmd}' failed: {output[:200]}",
+        red_test="Fix README installation instructions to match required packages and dependencies.",
+        term="clean_install_failure",
+    )
+
+
+def _collect_deleted_tests(builder: _FindingBuilder, deleted_tests: list[str] | None) -> None:
+    for test_id in deleted_tests or []:
+        builder.add(
+            agent="riley",
+            ftype="deleted_tests",
+            priority="P1",
+            impact=f"Number of tests dropped versus base ref in --diff mode: test '{test_id}' was removed.",
+            evidence=f"deleted test: {test_id}",
+            red_test="Restore removed tests or ensure test count does not decrease in PR/diff.",
+            term=str(test_id),
+        )
 
 
 def count_by_priority(findings: list[dict[str, Any]]) -> dict[str, int]:
@@ -574,6 +634,9 @@ def apply_exceptions(
     for finding in findings:
         entry = active.get(finding.get("fingerprint") or "")
         if entry is None:
+            continue
+        if getattr(entry, "is_in_repo", False) and finding["priority"] == "P0":
+            warnings.append(f".qa-ignore cannot silence P0: {finding['fingerprint']}")
             continue
         if finding["priority"] == "P0" and not getattr(entry, "allow_p0", False):
             # A P0 is never silently excepted: without allow_p0 the finding stands.
@@ -763,9 +826,18 @@ def write_findings(
     md_path = run_dir / "findings.md"
     json_path.write_text(json_bytes, encoding="utf-8")
     md_path.write_text(md_text, encoding="utf-8")
+    summary_path = run_dir / "summary.md"
+    try:
+        from core.report import render_summary_markdown
+        summary_text = render_summary_markdown(data)
+        summary_path.write_text(summary_text, encoding="utf-8")
+    except Exception:
+        summary_path = None
     if run_id:
         latest_dir = base / "latest"
         latest_dir.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(json_path, latest_dir / "findings.json")
         shutil.copyfile(md_path, latest_dir / "findings.md")
+        if summary_path and summary_path.is_file():
+            shutil.copyfile(summary_path, latest_dir / "summary.md")
     return json_path, md_path

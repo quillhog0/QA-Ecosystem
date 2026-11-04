@@ -1,12 +1,8 @@
 # QA Agent Ecosystem
 
-[![CI](https://github.com/quillhog0/QA-Ecosystem/actions/workflows/ci.yml/badge.svg)](https://github.com/quillhog0/QA-Ecosystem/actions/workflows/ci.yml)
+Version 0.4.0. See CHANGELOG.md.
 
-Version 0.3.5. See CHANGELOG.md.
-
-Part of the quillhog toolkit — [github.com/quillhog0](https://github.com/quillhog0) · [quillhog.xyz](https://quillhog.xyz) · X [@Quillhog0](https://x.com/Quillhog0).
-
-Deterministic QA control plane with six roles. Give it documentation plus a Python project; it walks a fixed test cycle in an **isolated copy** and returns a structured report with a verdict: `CLEAR`, `BLOCKED_ENV`, `VETO`, or `ESCALATE`.
+Deterministic QA control plane with six roles. Give it documentation plus a Python, TypeScript, or JavaScript project (including mixed projects); it walks a fixed test cycle in an **isolated copy** and returns a structured report with a verdict: `CLEAR`, `BLOCKED_ENV`, `VETO`, or `ESCALATE`.
 
 It does not patch code, does not run against production, does not read secrets, and does not promise coverage. It answers one question: *do the docs, the code, and the tests actually agree, and does the suite prove what the docs claim?*
 
@@ -14,16 +10,46 @@ It does not patch code, does not run against production, does not read secrets, 
 
 Green tests are not the same as verified claims. A README can promise "never transfers tokens" while no test checks it. This system extracts the claims from the docs, maps each one to the tests that cover it, runs the suite in isolation, and reports the gaps.
 
+## What it catches that plain test runners do not
+
+Plain test runners (`pytest`, `vitest`, `jest`) only check if assertions pass in existing test files. QA Ecosystem catches:
+
+1. **Fake and hollow tests:**
+   - Tests with zero assertions.
+   - Tautological assertions (`expect(true).toBe(true)`, `assert 1 == 1`).
+   - Constant or mock-only assertions (`expect(mockFn).toHaveBeenCalled()` without verifying real results).
+   - Swallowed exceptions in `try/catch` or `except` blocks.
+   - Committed `.only` (which hides the rest of the test suite) and committed `.skip`/`.todo`.
+2. **Documentation drift and false claims:**
+   - Documented CLI subcommands and flags (`mytool sync --dry-run`) missing in code parser definitions.
+   - Documented function/method call-forms missing in public exports or classes.
+   - Documented environment variables never read in code.
+   - Undocumented required secrets read in code.
+   - Documented install commands or runtime versions mismatching package manifests.
+3. **Safety and security hazards:**
+   - Child process execution (`child_process.exec`, `subprocess.Popen`).
+   - Filesystem writes outside temporary directories (`os.tmpdir()`).
+   - Real network calls without mocking during tests (`fetch`, `axios`, `http.request`).
+   - Secrets leaked into process environment or test outputs.
+   - Dynamic code evaluation (`eval`, `new Function`).
+4. **Shipped identity leaks:**
+   - Sensitive tokens, API keys, private keys, absolute host paths, and personal identity data in the shipped repository tree.
+5. **PR test suite shrinkage:**
+   - Tests deleted or removed versus the base branch in `--diff` mode.
+6. **Environment and build mismatches:**
+   - Node engine incompatibilities (`engines.node`, `.nvmrc`).
+   - Missing test extras or broken clean installs (`--clean-install`).
+
 ## Roles
 
 | Role | Kind | Job |
 |------|------|-----|
 | **Vesper** | code | Orchestrator: isolation, packets, iteration caps, escalation |
-| **Lexi** | judgment | Docs vs code vs tests. Extracts claims from docs. `VETO` on drift |
+| **Lexi** | judgment | Docs vs code vs tests. Extracts claims from docs, checks CLI flags, call-forms, and env vars. `VETO` on drift |
 | **Aria** | judgment | Scenarios, acceptance criteria, claim-to-test coverage mapping |
-| **Riley** | judgment | Adversarial review. Technical `VETO` with root cause, flags uncovered claims |
-| **Sable** | policy-as-code | Pre-flight: no secrets, no live tree, pytest-only, no destructive commands. `BLOCK` on risk |
-| **Nova** | code | Per-project venv, dependency install, pytest in the copy. Never repairs |
+| **Riley** | judgment | Adversarial review. Technical `VETO` with root cause, flags fake/hollow tests, flags uncovered claims |
+| **Sable** | policy-as-code | Pre-flight: no secrets, no live tree, authorized test runners only, no destructive commands. `BLOCK` on risk |
+| **Nova** | code | Per-project venv or node_modules, dependency install, pytest and TS/JS runners in the copy. Never repairs |
 
 Roles exchange only structured packets (`core/packets.py`), never free chat. Veto order: **Sable > Riley > Lexi**. Max **2** iterations per stage. If the loop cannot close: `ESCALATE: DOMAIN_EXPERT`.
 
@@ -135,7 +161,9 @@ Every run also writes an IDE-ready findings pair under `<findings-dir>/<run_id>/
 `findings.json` (schema `docs/findings.schema.json`, fields `id`, `agent`, `file`, `line`,
 `code_file`, `code_line`, `priority`, `type`, `customer_impact`, `evidence`,
 `proposed_red_test`, `verdict_effect`) plus a short `findings.md` (count table and top
-findings). The same two files are mirrored into `<findings-dir>/latest/` so an IDE can
+findings) and a buyer-safe `summary.md` (<40 lines, scrubbed of personal and host identities,
+listing verdict, test breakdown by language, runtime versions, verified claims, and known limitations).
+The same files are mirrored into `<findings-dir>/latest/` so an IDE or CI workflow can
 pin one stable path. `file`/`line` is the docs anchor of a drift finding (or the primary
 code/test location for other kinds); `code_file`/`code_line` is the nearest real code
 candidate when the tool can name one, otherwise null. The report is a pure projection -
@@ -178,14 +206,16 @@ Add QA Ecosystem as a gate in any repository's workflow. The job fails when the 
 
 ```yaml
 - uses: actions/checkout@v4
-- uses: quillhog0/QA-Ecosystem@master
+- uses: quillhog0/QA-Ecosystem@v0.4.0
   with:
     project: .
     docs: docs
+    languages: auto
+    node-version: "22"
     strict: "true"
 ```
 
-Inputs: project, docs, strict, mutation, mutation-min-score, sandbox (auto, required or off), allow-sysctl-userns, python-version and sarif (true/false, defaults to false). On GitHub's Ubuntu 24.04 runners the sandbox needs allow-sysctl-userns set to true, which relaxes a kernel security setting on the runner; without it the run is unsandboxed and the report says so. Outputs: verdict, report and sarif (path to the SARIF document, empty when the sarif input is false or the file was not written). The action writes the SARIF file; uploading it to a code-scanning service is left to the caller.
+Inputs: project, docs, languages (auto, python, ts or both), node-version (default 22, used when TS/JS is detected), diff-base (base ref for diff mode), clean-install, identity-strict, summary, allow-network (default false; the tested project's tests stay offline unless set to true), strict, mutation, mutation-min-score, sandbox (auto, required or off), allow-sysctl-userns, python-version and sarif (true/false, defaults to false). On GitHub's Ubuntu 24.04 runners the sandbox needs allow-sysctl-userns set to true, which relaxes a kernel security setting on the runner; without it the run is unsandboxed and the report says so. Outputs: verdict, report and sarif (path to the SARIF document, empty when the sarif input is false or the file was not written). The action writes the SARIF file; uploading it to a code-scanning service is left to the caller.
 
 ## SARIF output
 
@@ -327,7 +357,7 @@ Sable and Nova never depend on a model. OpenRouter is used only when `OPENROUTER
 - **With an LLM enabled, docs and code go to the provider unmasked.** Nothing is redacted or anonymised before the API call.
 - **Claim-to-test mapping is a heuristic.** Aria matches doc claims to tests by token overlap and test-body analysis. It is not formal verification.
 - **The local LLM provider is not gated by `allow_network`.** Only the OpenRouter path checks `allow_network`; `llm.provider: local` is gated only by dry-run.
-- **Sable's static scan is literal-name based.** It misses aliased imports (`import shutil as s`) and calls on variable receivers (`p.unlink()`), and it respects the project's own pytest `norecursedirs`; the Bubblewrap sandbox still applies at runtime.
+- **Sable's static scan is literal-name based.** It misses aliased imports (`import shutil as s`) and calls on variable receivers (such as path unlink method calls), and it respects the project's own pytest `norecursedirs`; the Bubblewrap sandbox still applies at runtime.
 - **String literals count as code.** A function removed from code but whose name still appears as a string literal is not reported by Lexi.
 
 ## Project layout

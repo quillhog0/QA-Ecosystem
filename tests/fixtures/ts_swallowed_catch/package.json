@@ -1,0 +1,1 @@
+{"name": "ts-swallowed-catch", "type": "module", "scripts": {"test": "vitest run"}, "devDependencies": {"vitest": "^1.0.0"}}

@@ -114,7 +114,18 @@ def render_markdown(report: FinalReport) -> str:
         lines.append("")
     if report.timings:
         lines += ["## Phase timings (seconds)", ""]
-        for name in ("isolation", "install", "pytest", "execute", "mutation"):
+        for name in (
+            "isolation",
+            "lexi",
+            "design",
+            "preflight",
+            "install",
+            "pytest",
+            "execute",
+            "identity_scan",
+            "mutation",
+            "total",
+        ):
             if name in report.timings:
                 lines.append(f"- {name}: {report.timings[name]:.3f}")
         lines.append("")
@@ -126,6 +137,104 @@ def render_markdown(report: FinalReport) -> str:
         "",
     ]
     return "\n".join(lines)
+
+
+def render_summary_markdown(report: FinalReport | dict[str, Any]) -> str:
+    """Buyer-safe summary: max ~40 lines, completely scrubbed of identity/personal/host data."""
+    import platform
+    import shutil
+    import subprocess
+    import sys
+    from core.identity import scrub_identity_data
+
+    verdict = getattr(report, "verdict", None) if not isinstance(report, dict) else report.get("verdict", "")
+    finished_at = getattr(report, "finished_at", "") if not isinstance(report, dict) else report.get("finished_at", "")
+    exec_data = (getattr(report, "execution", None) or {}) if not isinstance(report, dict) else (report.get("execution") or {})
+    plan_data = (getattr(report, "plan", None) or {}) if not isinstance(report, dict) else (report.get("plan") or {})
+
+    breakdown = exec_data.get("language_breakdown") or {}
+    languages = list(breakdown.keys()) if breakdown else []
+    if not languages:
+        lang = exec_data.get("language")
+        if lang:
+            languages = [lang]
+        else:
+            languages = ["python"]
+
+    os_name = platform.system()
+    py_ver = sys.version.split()[0]
+    node_ver = "not installed"
+    node_bin = shutil.which("node")
+    if node_bin:
+        try:
+            res = subprocess.run([node_bin, "-v"], capture_output=True, text=True, timeout=5)
+            if res.returncode == 0:
+                node_ver = res.stdout.strip()
+        except Exception:
+            pass
+
+    date_str = finished_at.split("T")[0] if "T" in str(finished_at) else (str(finished_at)[:10] if finished_at else "unknown")
+
+    lines = [
+        "# QA Gate Summary",
+        "",
+        f"- **Verdict:** {verdict}",
+        f"- **Date:** {date_str}",
+        f"- **Languages:** {', '.join(languages)}",
+        f"- **Runtime:** {os_name}, Python {py_ver}, Node {node_ver}",
+    ]
+
+    if breakdown:
+        for lang_name, counts in breakdown.items():
+            lines.append(
+                f"- **Tests ({lang_name}):** {counts.get('passed', 0)} passed, "
+                f"{counts.get('failed', 0)} failed, {counts.get('skipped', 0)} skipped"
+            )
+    else:
+        passed = exec_data.get("passed", 0)
+        failed = exec_data.get("failed", 0)
+        skipped = exec_data.get("skipped", 0)
+        lang_label = languages[0] if languages else "all"
+        lines.append(f"- **Tests ({lang_label}):** {passed} passed, {failed} failed, {skipped} skipped")
+
+    lines.append("")
+    lines.append("## Verified Features")
+    scenarios = plan_data.get("scenarios") or []
+    verified_claims = []
+    for s in scenarios:
+        if str(s.get("id") or "").startswith("C") and s.get("covered_by") and s.get("score", 0) > 0:
+            verified_claims.append(str(s.get("title") or s.get("id")))
+
+    if verified_claims:
+        for vc in verified_claims[:10]:
+            lines.append(f"- {vc}")
+    else:
+        if verdict == Verdict.CLEAR.value:
+            lines.append("- All documented test cases and test suites passed verification.")
+        else:
+            lines.append("- None verified due to test or policy failures.")
+
+    lines.append("")
+    lines.append("## Known Limitations")
+    uncovered_claims = []
+    for s in scenarios:
+        if str(s.get("id") or "").startswith("C") and not s.get("covered_by"):
+            uncovered_claims.append(str(s.get("title") or s.get("id")))
+
+    if uncovered_claims:
+        for uc in uncovered_claims[:10]:
+            lines.append(f"- Claim lacking test coverage: {uc}")
+    elif verdict == Verdict.BLOCKED_ENV.value:
+        lines.append("- Test execution was blocked by the environment.")
+    else:
+        lines.append("- None identified.")
+
+    raw_text = "\n".join(lines)
+    scrubbed_text = scrub_identity_data(raw_text)
+    out_lines = scrubbed_text.splitlines()
+    if len(out_lines) > 40:
+        out_lines = out_lines[:39] + ["- ... (clipped for length)"]
+    return "\n".join(out_lines) + "\n"
 
 
 def write_reports(report: FinalReport, reports_dir: Path) -> tuple[Path, Path]:

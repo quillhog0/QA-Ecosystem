@@ -30,5 +30,8 @@ qa-eco = "main:main"
 py-modules = ["main"]
 packages = ["core", "agents", "policies"]
 
+[tool.setuptools.exclude-package-data]
+agents = ["vendor/typescript.js"]
+
 [tool.setuptools.dynamic]
 version = { attr = "core.__version__" }

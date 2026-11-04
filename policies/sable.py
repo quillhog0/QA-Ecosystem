@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import ast
+import json
 import os
 import re
 import shlex
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -70,13 +73,19 @@ def _command_is_pytest_only(command: list[str]) -> tuple[bool, str]:
         if pat.search(joined):
             return False, f"destructive pattern in command: {pat.pattern}"
     lowered = [t.lower() for t in tokens]
+    basenames = [_token_basename(t) for t in tokens]
     looks_like_python_pytest = (
         len(tokens) >= 3
         and tokens[1] == "-m"
         and tokens[2] == "pytest"
         and Path(tokens[0]).name.lower().startswith("python")
     )
-    if "pytest" not in lowered and not looks_like_python_pytest:
+    looks_like_ts_runner = (
+        any(runner in basenames or runner in lowered for runner in ("vitest", "jest", "mocha"))
+        or (("node" in basenames or "node" in lowered) and "--test" in lowered)
+        or (("npm" in basenames or "npm" in lowered) and "test" in lowered)
+    )
+    if "pytest" not in lowered and not looks_like_python_pytest and not looks_like_ts_runner:
         return False, "command is not pytest"
     for token in tokens:
         base = _token_basename(token)
@@ -499,7 +508,59 @@ def scan_tests_for_risks(
                         and not _is_self_network_import(parts[0], own)
                     ):
                         _record(".".join(parts), f"{rel}: network call {'.'.join(parts)}", kind="dangerous")
+
+    # TypeScript / JavaScript risk scan
+    for item in _scan_ts_for_risks(isolated_root, only_paths=only_paths):
+        rel = str(item.get("file") or "")
+        call = str(item.get("call") or "")
+        reason = str(item.get("reason") or "dangerous operation")
+        is_test = bool(item.get("is_test", False))
+        category = str(item.get("category") or "")
+        lineno = item.get("line", 1)
+        role_tag = f" [in {'tests' if is_test else 'source'}]"
+        match = _match_allow(rel, call, allows)
+        if match:
+            key = (match["path"], match["call"], match["reason"])
+            if key not in seen_allowed:
+                seen_allowed.add(key)
+                allowed.append(
+                    {
+                        "status": "ALLOWED",
+                        "path": match["path"],
+                        "call": match["call"],
+                        "reason": match["reason"],
+                    }
+                )
+            continue
+        if sandboxed:
+            warnings.append(f"{rel}:{lineno}: {reason}{role_tag}")
+        else:
+            hits.append(f"{rel}:{lineno}: {reason}{role_tag}")
+
     return hits, allowed, warnings
+
+
+def _scan_ts_for_risks(
+    isolated_root: Path,
+    only_paths: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    analyzer_js = Path(__file__).resolve().parent.parent / "agents" / "ts_analyzer.js"
+    if not analyzer_js.is_file():
+        return []
+    node_bin = shutil.which("node") or "/tmp/node/node"
+    if not shutil.which(node_bin) and not Path(node_bin).is_file():
+        return []
+    cmd = [str(node_bin), str(analyzer_js), "--project", str(isolated_root)]
+    if only_paths:
+        cmd.extend(["--only-paths", ",".join(only_paths)])
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60, check=False)
+        if proc.returncode == 0 and proc.stdout.strip():
+            data = json.loads(proc.stdout)
+            return list(data.get("sable_findings") or [])
+    except Exception:
+        pass
+    return []
 
 
 RUNTIME_GUARD_MODULE = '''\

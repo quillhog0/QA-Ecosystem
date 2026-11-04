@@ -606,3 +606,38 @@ def test_allow_entry_for_a_from_import_names_the_module_not_its_root(tmp_path: P
     assert any("urllib.parse" in h for h in hits)
 
 
+def test_looks_like_live_root_oserror():
+    from policies.sable import _looks_like_live_root
+    from unittest.mock import MagicMock
+    mock_p = MagicMock()
+    mock_p.resolve.side_effect = OSError("simulated")
+    assert _looks_like_live_root(mock_p, mock_p) is False
+
+
+def test_scan_tests_benign_call_not_flagged(tmp_path: Path):
+    from policies.sable import scan_tests_for_risks
+    t = tmp_path / "tests"
+    t.mkdir()
+    (t / "test_math.py").write_text("import math\ndef test_m():\n    return math.sqrt(4)\n", encoding="utf-8")
+    hits, _, _ = scan_tests_for_risks(tmp_path)
+    assert not hits
+
+
+def test_audit_isolation_no_secret_files(tmp_path: Path):
+    from policies.sable import evaluate_preflight
+    iso = tmp_path / "iso"
+    iso.mkdir()
+    live = tmp_path / "live"
+    live.mkdir()
+    d = evaluate_preflight(command=[sys.executable, "-m", "pytest", str(iso)], isolated_root=iso, live_root=live, allow_network=False, env={}, cwd=iso)
+    assert d.checks["no_secret_files"] is True
+
+
+def test_evaluate_post_execution_collected_zero():
+    from policies.sable import evaluate_post_execution
+    d = evaluate_post_execution(collected=0, command=["pytest"])
+    assert d.checks["collected_gt_zero"] is False
+    assert d.verdict == Verdict.BLOCK.value
+
+
+

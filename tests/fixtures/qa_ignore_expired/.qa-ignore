@@ -1,0 +1,4 @@
+exceptions:
+  - match: "riley:claim:-:C1"
+    reason: "Expired entry"
+    expires: 2020-01-01

@@ -22,6 +22,7 @@ falls back to a full run, never a silent skip.
 from __future__ import annotations
 
 import ast
+import re
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -42,8 +43,15 @@ def _is_doc(rel: str) -> bool:
 
 
 def _is_test(rel: str) -> bool:
-    name = _posix(rel).rsplit("/", 1)[-1]
-    return name.startswith("test_") or name.endswith("_test.py")
+    posix_path = _posix(rel)
+    name = posix_path.rsplit("/", 1)[-1]
+    if name.startswith("test_") or name.endswith("_test.py"):
+        return True
+    if any(name.endswith(ext) for ext in (".test.ts", ".spec.ts", ".test.js", ".spec.js", ".test.tsx", ".spec.tsx")):
+        return True
+    if "/__tests__/" in posix_path:
+        return True
+    return False
 
 
 def _is_python(rel: str) -> bool:
@@ -223,3 +231,81 @@ def compute_diff_scope(
         riley_sable_paths=changed,
         nova_test_targets=nova_targets,
     )
+
+
+def _extract_py_test_names(content: str) -> set[str]:
+    names: set[str] = set()
+    try:
+        tree = ast.parse(content)
+    except Exception:
+        return names
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if node.name.startswith("test_") or node.name.endswith("_test"):
+                names.add(node.name)
+        elif isinstance(node, ast.ClassDef):
+            if node.name.startswith("Test"):
+                for item in node.body:
+                    if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        if item.name.startswith("test_"):
+                            names.add(f"{node.name}::{item.name}")
+    return names
+
+
+def _extract_ts_test_names(content: str) -> set[str]:
+    names: set[str] = set()
+    for m in re.finditer(r"(?:it|test)\s*(?:\.\w+)?\s*\(\s*['\"`]([^'\"`]+)['\"`]", content):
+        names.add(m.group(1))
+    return names
+
+
+def detect_deleted_tests(live_root: Path, base_ref: str) -> list[str]:
+    """In --diff mode, detect if test files or individual tests were removed versus base_ref."""
+    removed: list[str] = []
+    try:
+        raw = _git(live_root, "diff", "--name-status", base_ref)
+    except Exception:
+        return removed
+
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split(maxsplit=1)
+        if len(parts) != 2:
+            continue
+        status, rel_path = parts[0], _posix(parts[1])
+        if not _is_test(rel_path):
+            continue
+
+        if status.startswith("D"):
+            try:
+                base_content = _git(live_root, "show", f"{base_ref}:{rel_path}")
+                if _is_python(rel_path):
+                    tests = _extract_py_test_names(base_content)
+                else:
+                    tests = _extract_ts_test_names(base_content)
+                if tests:
+                    for t in sorted(tests):
+                        removed.append(f"{rel_path}::{t}")
+                else:
+                    removed.append(rel_path)
+            except Exception:
+                removed.append(rel_path)
+        elif status.startswith("M"):
+            try:
+                base_content = _git(live_root, "show", f"{base_ref}:{rel_path}")
+                curr_path = live_root / rel_path
+                curr_content = curr_path.read_text(encoding="utf-8", errors="replace") if curr_path.is_file() else ""
+                if _is_python(rel_path):
+                    base_tests = _extract_py_test_names(base_content)
+                    curr_tests = _extract_py_test_names(curr_content)
+                else:
+                    base_tests = _extract_ts_test_names(base_content)
+                    curr_tests = _extract_ts_test_names(curr_content)
+                diff_tests = base_tests - curr_tests
+                for t in sorted(diff_tests):
+                    removed.append(f"{rel_path}::{t}")
+            except Exception:
+                pass
+    return sorted(removed)

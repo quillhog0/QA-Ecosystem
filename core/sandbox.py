@@ -155,12 +155,18 @@ def get_sandbox_status(config: dict[str, Any] | None) -> tuple[bool, str, str | 
 
 
 def _validate_ro_bind_path(path: Path, host_home: Path) -> Path:
-    """Reject any path that equals or is an ancestor of the host $HOME or of /."""
+    """Reject any path that equals or is an ancestor of the host $HOME, $HOME/.local, or of /."""
     resolved = path.resolve()
-    if resolved == Path("/") or host_home.is_relative_to(resolved):
+    host_local = (host_home / ".local").resolve()
+    if (
+        resolved == Path("/")
+        or host_home.is_relative_to(resolved)
+        or host_local.is_relative_to(resolved)
+        or resolved == host_local
+    ):
         raise ValueError(
             f"Refusing to bind unsafe read-only path '{resolved}': "
-            f"equals or is an ancestor of host HOME ('{host_home}') or '/'"
+            f"equals or is an ancestor of host HOME ('{host_home}'), ~/.local ('{host_local}'), or '/'"
         )
     return resolved
 
@@ -213,6 +219,11 @@ def wrap_command(
 
     if Path("/opt").is_dir():
         args.extend(["--ro-bind-try", "/opt", "/opt"])
+
+    node_bin = shutil.which("node")
+    if node_bin:
+        node_path = Path(node_bin).resolve()
+        args.extend(["--dir", "/tmp/node", "--ro-bind", str(node_path), "/tmp/node/node"])
 
     # Locate virtualenvs or external python trees that need to be mounted read-only
     extra_ro_binds: set[Path] = set()
@@ -278,5 +289,25 @@ def wrap_command(
         "--chdir", str(iso),
         "--setenv", "HOME", "/home/sandbox",
     ])
-    args.extend(cmd)
+    wrapped_cmd = list(cmd)
+    if node_bin and wrapped_cmd:
+        try:
+            node_res = Path(node_bin).resolve()
+            cmd_res = Path(wrapped_cmd[0]).resolve()
+            if cmd_res == node_res:
+                wrapped_cmd[0] = "/tmp/node/node"
+        except (ValueError, OSError):
+            pass
+    args.extend(wrapped_cmd)
+
+    # Sanity guard: assert no bind source equals or is an ancestor of host ~/.local
+    host_local = (host_home / ".local").resolve()
+    for i in range(len(args) - 1):
+        if args[i] in ("--ro-bind", "--ro-bind-try", "--bind"):
+            src = Path(args[i + 1]).resolve()
+            if src == host_local or host_local.is_relative_to(src):
+                raise ValueError(
+                    f"Refusing to bind unsafe path '{src}': equals or is a parent of ~/.local"
+                )
+
     return args

@@ -396,6 +396,18 @@ def classify_execution(
         )
     if install_failed:
         return EnvCause("install_failed", f"dependency installation failed: {install_status}")
+
+    # If all test failures in the run were proved to be environmental:
+    failures = list(execution.get("failures") or [])
+    if failures and int(execution.get("failed") or 0) > 0:
+        env_causes = []
+        for f in failures:
+            c = classify_failure(f, project_root=project_root)
+            if c is not None:
+                env_causes.append(c)
+        if len(env_causes) == len(failures):
+            return env_causes[0]
+
     return None
 
 
@@ -450,6 +462,23 @@ CALLED_PROCESS_ERROR_RE = re.compile(
 # failing.
 PERMISSION_DENIED_RE = re.compile(
     r"PermissionError:\s*\[Errno 13\][^\n]*?['\"](?P<path>[^'\n]+)['\"]"
+)
+TTY_ERROR_RE = re.compile(
+    r"(?:inappropriate ioctl for device|termios\.error|"
+    r"UnsupportedOperation:[^\n]*?(?:fileno|pseudofile)|"
+    r"pytest_pager|no pager found|pager is not available|terminal pager|not a tty|"
+    r"device not configured|requires a tty|stdin is not a tty)",
+    re.IGNORECASE,
+)
+READ_ONLY_FS_RE = re.compile(
+    r"(?:(?:OSError|PermissionError):\s*\[Errno 30\]\s*Read-only file system|EROFS:\s*read-only file system|Error:\s*EROFS)",
+    re.IGNORECASE,
+)
+CACHED_NODE_MODULES_ERROR_RE = re.compile(
+    r"(?:ERR_MODULE_NOT_FOUND|MODULE_NOT_FOUND|Cannot find module\s*['\"][^'\"]*node_modules|"
+    r"node_modules/\.bin/[^:\s]+:\s*(?:not found|No such file or directory)|"
+    r"sh:\s*line\s*\d+:\s*vitest:\s*command not found|sh:\s*vitest:\s*not found)",
+    re.IGNORECASE,
 )
 # A test that cannot proceed because it needs an *external program* the hermetic
 # sandbox simply does not carry announces that in its own words instead of raising
@@ -748,6 +777,25 @@ def classify_failure(
             "missing_writable_storage",
             "sqlite cannot open a database file (the isolated copy has no writable "
             "persistent storage for sqlite)",
+        )
+    tty = TTY_ERROR_RE.search(text)
+    if tty and not _raised_by_project(text, tty.start()):
+        return EnvCause(
+            "sandbox_missing_tty",
+            f"interactive TTY/pager unavailable in sandbox: {tty.group(0)} "
+            "(the test requires an interactive terminal/pager not attached in the isolated sandbox)",
+        )
+    ro_fs = READ_ONLY_FS_RE.search(text)
+    if ro_fs and not _raised_by_project(text, ro_fs.start()):
+        return EnvCause(
+            "sandbox_read_only_fs",
+            "filesystem location is read-only in sandbox (the test attempted to write to a path outside the writable copy)",
+        )
+    nm_err = CACHED_NODE_MODULES_ERROR_RE.search(text)
+    if nm_err and not _raised_by_project(text, nm_err.start()):
+        return EnvCause(
+            "cached_node_modules_resolution",
+            f"cached node_modules resolution issue in sandbox: {nm_err.group(0)}",
         )
     return None
 

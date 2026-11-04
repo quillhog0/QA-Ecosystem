@@ -329,3 +329,64 @@ def test_unknown_schema_type_is_accepted_not_rejected() -> None:
     # fallback to "reject everything unknown" must fail this.
     assert findings.validate_schema("anything", {"type": "some_custom_kind"}) == []
 
+
+def test_diff_mode_skips_unchanged_file_scans(tmp_path: Path) -> None:
+    from unittest.mock import MagicMock, patch
+    from core.identity import scan_identity_leaks
+    from agents.lexi import inspect as lexi_inspect
+    from core.ts_runner import run_ts_tests
+    from core.runner import build_pytest_command
+
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    docs = proj / "docs"
+    docs.mkdir()
+    (docs / "README.md").write_text("# Readme\n", encoding="utf-8")
+    (docs / "unchanged.md").write_text("# Unchanged\n`promised_func`\n", encoding="utf-8")
+    (proj / "unchanged.py").write_text("TOKEN = 'ghp_012345678901234567890123456789'\n", encoding="utf-8")
+    (proj / "changed.py").write_text("x = 1\n", encoding="utf-8")
+
+    # 1. Identity scan with diff_only_paths skips unchanged.py
+    leaks = scan_identity_leaks(proj, only_paths={"changed.py"})
+    assert leaks == []
+    # Without filter, unchanged.py is scanned and leaks are found
+    all_leaks = scan_identity_leaks(proj)
+    assert len(all_leaks) == 1
+    assert all_leaks[0]["file"] == "unchanged.py"
+
+    # 2. Lexi with empty docs_allowlist skips docs scan
+    report = lexi_inspect(
+        docs_root=docs,
+        project_root=proj,
+        config={"llm": {"provider": "none"}},
+        docs_allowlist=set(),
+    )
+    assert report.findings == []
+    assert "diff mode: no docs changed, docs scan skipped" in report.notes
+
+    # 3. TS runner skips typecheck when no TS file changed in diff
+    ts_work = tmp_path / "ts_work"
+    ts_work.mkdir()
+    (proj / "tsconfig.json").write_text("{}", encoding="utf-8")
+    (proj / "package.json").write_text('{"name": "test"}', encoding="utf-8")
+    with patch("subprocess.run", return_value=MagicMock(returncode=0, stdout="", stderr="")):
+        res = run_ts_tests(
+            proj,
+            work_dir=ts_work,
+            config={"_diff_changed": ["changed.py"], "sandbox": "off"},
+        )
+    assert not any(f.get("classification") == "type_error" for f in (res.failures or []))
+
+    # 4. Pytest command with mapped test targets restricts collection
+    (proj / "tests").mkdir()
+    (proj / "tests" / "test_a.py").write_text("def test_a(): pass\n", encoding="utf-8")
+    (proj / "tests" / "test_b.py").write_text("def test_b(): pass\n", encoding="utf-8")
+    cmd = build_pytest_command(
+        proj,
+        cache_dir=ts_work / "cache",
+        basetemp=ts_work / "tmp",
+        test_targets=["tests/test_a.py"],
+    )
+    assert any("test_a.py" in str(arg) for arg in cmd)
+    assert not any("test_b.py" in str(arg) for arg in cmd)
+

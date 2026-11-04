@@ -1,6 +1,6 @@
 name: "QA Ecosystem"
 description: "Deterministic QA gate: runs your tests in an isolated, sandboxed copy, maps doc claims to tests and fails on VETO or BLOCKED_ENV."
-author: "quillhog0"
+author: "QA Ecosystem Maintainers"
 branding:
   icon: "shield"
   color: "green"
@@ -14,6 +14,34 @@ inputs:
     description: "Path to the documentation root, relative to the workspace."
     required: false
     default: "docs"
+  languages:
+    description: "Language selection: auto, python, ts, or both."
+    required: false
+    default: "auto"
+  node-version:
+    description: "Node.js version used when TS/JS is detected."
+    required: false
+    default: "22"
+  diff-base:
+    description: "Base ref for diff mode (empty for full run)."
+    required: false
+    default: ""
+  install-extras:
+    description: "Install optional test dependencies/extras (true/false)."
+    required: false
+    default: "true"
+  clean-install:
+    description: "Verify clean installation from scratch (true/false)."
+    required: false
+    default: "false"
+  identity-strict:
+    description: "Raise identity leaks (names, emails, home paths) to P1 (true/false)."
+    required: false
+    default: "false"
+  summary:
+    description: "Append buyer-safe summary.md to step summary (true/false)."
+    required: false
+    default: "true"
   strict:
     description: "Veto on documented claims without a covering test (true/false)."
     required: false
@@ -31,25 +59,32 @@ inputs:
     required: false
     default: "auto"
   allow-sysctl-userns:
-    description: "On Ubuntu 24.04 runners, run sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0 so the Bubblewrap sandbox can start. This relaxes a kernel security setting on the runner. Without it the run falls back to unsandboxed mode and says so in the report."
+    description: "On Ubuntu 24.04 runners, run sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0 so the Bubblewrap sandbox can start."
     required: false
     default: "false"
   python-version:
     description: "Python version used to run the project's tests."
     required: false
     default: "3.12"
+  allow-network:
+    description: "Permit network for the isolated test process (true/false). Off by default."
+    required: false
+    default: "false"
   sarif:
-    description: "Write a SARIF 2.1.0 document of the run's findings to $RUNNER_TEMP/qa-results.sarif (true/false). Upload is left to the caller."
+    description: "Write a SARIF 2.1.0 document of the run's findings to $RUNNER_TEMP/qa-results.sarif (true/false)."
     required: false
     default: "false"
 
 outputs:
   verdict:
-    description: "Final verdict (CLEAR, VETO, BLOCKED_ENV or ESCALATE). Exit code 0 = CLEAR, 2 = BLOCKED_ENV, 1 = VETO or ESCALATE; every non-zero code fails the step."
+    description: "Final verdict (CLEAR, VETO, BLOCKED_ENV or ESCALATE)."
     value: ${{ steps.run.outputs.verdict }}
   report:
     description: "Path to the Markdown report."
     value: ${{ steps.run.outputs.report }}
+  summary:
+    description: "Path to the buyer-safe summary Markdown report."
+    value: ${{ steps.run.outputs.summary }}
   sarif:
     description: "Path to the SARIF 2.1.0 document, when the sarif input is true; empty otherwise."
     value: ${{ steps.run.outputs.sarif }}
@@ -60,6 +95,10 @@ runs:
     - uses: actions/setup-python@v5
       with:
         python-version: ${{ inputs.python-version }}
+
+    - uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node-version }}
 
     - name: Install QA Ecosystem
       shell: bash
@@ -83,11 +122,22 @@ runs:
         QA_MIN_SCORE: ${{ inputs.mutation-min-score }}
         QA_SANDBOX: ${{ inputs.sandbox }}
         QA_SARIF: ${{ inputs.sarif }}
+        QA_DIFF_BASE: ${{ inputs.diff-base }}
+        QA_CLEAN_INSTALL: ${{ inputs.clean-install }}
+        QA_IDENTITY_STRICT: ${{ inputs.identity-strict }}
+        QA_SUMMARY: ${{ inputs.summary }}
+        QA_LANGS: ${{ inputs.languages }}
+        QA_ALLOW_NETWORK: ${{ inputs.allow-network }}
       run: |
         args=(--project "$GITHUB_WORKSPACE/$QA_PROJECT" --docs "$GITHUB_WORKSPACE/$QA_DOCS"
-              --sandbox "$QA_SANDBOX" --reports-dir "$RUNNER_TEMP/qa-reports")
+              --sandbox "$QA_SANDBOX" --reports-dir "$RUNNER_TEMP/qa-reports"
+              --languages "${QA_LANGS:-auto}")
+        [ "$QA_ALLOW_NETWORK" = "true" ] && args+=(--allow-network)
         [ "$QA_STRICT" = "true" ] && args+=(--strict)
         [ "$QA_MUTATION" = "true" ] && args+=(--mutation)
+        [ "$QA_CLEAN_INSTALL" = "true" ] && args+=(--clean-install)
+        [ "$QA_IDENTITY_STRICT" = "true" ] && args+=(--identity-strict)
+        [ -n "$QA_DIFF_BASE" ] && args+=(--diff "$QA_DIFF_BASE")
         [ -n "$QA_MIN_SCORE" ] && args+=(--mutation-min-score "$QA_MIN_SCORE")
         sarif_path=""
         if [ "$QA_SARIF" = "true" ]; then
@@ -100,17 +150,21 @@ runs:
         set -e
         verdict=$(grep -m1 '^verdict=' "$RUNNER_TEMP/qa-out.txt" | cut -d= -f2)
         report=$(grep -m1 '^report=' "$RUNNER_TEMP/qa-out.txt" | cut -d= -f2-)
+        summary_path=$(grep -m1 '^summary=' "$RUNNER_TEMP/qa-out.txt" | cut -d= -f2-)
         echo "verdict=$verdict" >> "$GITHUB_OUTPUT"
         if [ "$verdict" = "BLOCKED_ENV" ]; then
           echo "::warning title=QA environment blocked::The tests could not run because of an environment precondition (exit 2). The report names the exact cause; no defect is claimed against the project."
         fi
         echo "report=$report" >> "$GITHUB_OUTPUT"
+        echo "summary=$summary_path" >> "$GITHUB_OUTPUT"
         if [ -n "$sarif_path" ] && [ -f "$sarif_path" ]; then
           echo "sarif=$sarif_path" >> "$GITHUB_OUTPUT"
         else
           echo "sarif=" >> "$GITHUB_OUTPUT"
         fi
-        if [ -n "$report" ] && [ -f "$report" ]; then
+        if [ "$QA_SUMMARY" = "true" ] && [ -n "$summary_path" ] && [ -f "$summary_path" ]; then
+          cat "$summary_path" >> "$GITHUB_STEP_SUMMARY"
+        elif [ -n "$report" ] && [ -f "$report" ]; then
           cat "$report" >> "$GITHUB_STEP_SUMMARY"
         fi
         exit $code

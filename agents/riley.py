@@ -1,7 +1,10 @@
 import ast
 import builtins
+import json
 from pathlib import Path
 import re
+import shutil
+import subprocess
 from typing import Any
 
 from agents.adapters import complete_with_status, format_llm_error, load_prompt, parse_yaml_block
@@ -419,6 +422,41 @@ def is_weak_test_node(
     return False, "ok"
 
 
+def _detect_ts_weak_tests(
+    project_root: Path | None,
+    only_paths: set[str] | None = None,
+) -> dict[str, str]:
+    if not project_root or not project_root.is_dir():
+        return {}
+    analyzer_js = Path(__file__).resolve().parent / "ts_analyzer.js"
+    if not analyzer_js.is_file():
+        return {}
+    node_bin = shutil.which("node") or "/tmp/node/node"
+    if not shutil.which(node_bin) and not Path(node_bin).is_file():
+        return {}
+
+    cmd = [str(node_bin), str(analyzer_js), "--project", str(project_root)]
+    if only_paths:
+        cmd.extend(["--only-paths", ",".join(only_paths)])
+
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60, check=False)
+        if proc.returncode == 0 and proc.stdout.strip():
+            data = json.loads(proc.stdout)
+            results: dict[str, str] = {}
+            for item in data.get("weak_tests") or []:
+                tid = item.get("test_id")
+                reason = item.get("reason", "weak test")
+                priority = item.get("priority", "P1")
+                tagged = f"[{priority}] {reason}"
+                results[tid] = tagged
+                results[item.get("name")] = tagged
+            return results
+    except Exception:
+        pass
+    return {}
+
+
 def detect_weak_tests(
     project_root: Path | None,
     only_paths: set[str] | None = None,
@@ -427,9 +465,18 @@ def detect_weak_tests(
     if not project_root or not project_root.is_dir():
         return weak_tests
 
+    # TS / JS tests
+    weak_tests.update(_detect_ts_weak_tests(project_root, only_paths=only_paths))
+
     helper_cache: dict[Path, frozenset[str]] = {}
     for path in project_root.rglob("*.py"):
         if any(part in {".venv", "__pycache__", ".git"} for part in path.parts):
+            continue
+        try:
+            rel_parts = path.relative_to(project_root).parts[:-1]
+        except ValueError:
+            rel_parts = path.parts[:-1]
+        if any(part in {"fixtures", "test_fixtures", "benchmark", "bench"} for part in rel_parts):
             continue
         # Only scan files pytest would actually collect (default python_files
         # = test_*.py / *_test.py). This skips conftest.py, benchmark scripts,
@@ -692,7 +739,10 @@ def review_results(
             if weak_cov:
                 claims_covered_by_weak.append(s.id)
             elif s.covered_by:
-                strong = [t for t in s.covered_by if t not in weak_tests and t.split("::")[-1] not in weak_tests]
+                strong = [
+                    t for t in s.covered_by
+                    if t not in weak_tests and (t.split("::")[-1] not in weak_tests if "::" not in t else True)
+                ]
                 if not strong:
                     claims_covered_by_weak.append(s.id)
                     s.covered_by_weak = list(s.covered_by)
@@ -711,14 +761,17 @@ def review_results(
         if s.id.startswith("C") and not s.covered_by:
             gaps.append(f"claim not covered by tests: {s.id}")
 
-    if claims_covered_by_weak:
-        weak_list = ", ".join(k for k in weak_tests if "::" in k)
+    p1_ts_weak_tests = [k for k, r in weak_tests.items() if "[p1]" in r.lower() and "::" in k]
+    veto_weak = bool((config.get("riley") or {}).get("veto_on_weak_tests", False))
+    flagged_weak = [k for k in weak_tests if "::" in k] if veto_weak else p1_ts_weak_tests
+    if claims_covered_by_weak or flagged_weak:
+        weak_list = ", ".join(flagged_weak or [k for k in weak_tests if "::" in k])
         return _maybe_llm(
             RedTeamReview(
                 verdict=Verdict.VETO.value,
                 gaps=gaps,
                 required_changes=[f"replace weak tests ({weak_list}) with meaningful assertions"],
-                root_cause=f"weak test detected: {weak_list} (claim {', '.join(claims_covered_by_weak)} is not properly tested)",
+                root_cause=f"weak test detected: {weak_list}",
                 notes="tests without meaningful assertions cannot verify claims",
             ),
             {"phase": "results", "plan": plan.to_dict(), "execution": _small_exec(execution)},

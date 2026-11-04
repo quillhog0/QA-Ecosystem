@@ -1,0 +1,1 @@
+{"name": "ts-cli-flag", "bin": {"mycli": "./bin/cli.js"}}

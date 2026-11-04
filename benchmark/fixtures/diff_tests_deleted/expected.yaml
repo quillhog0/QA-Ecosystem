@@ -1,0 +1,5 @@
+verdict: VETO
+escalation: ''
+exit_code: 1
+install_status: no dependency manifest
+args: ['--diff', 'HEAD']

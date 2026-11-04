@@ -43,6 +43,7 @@ class ExceptionEntry:
     expires: date
     added_by: str = ""
     allow_p0: bool = False
+    is_in_repo: bool = False
 
     def is_expired(self, today: date) -> bool:
         return self.expires < today
@@ -173,3 +174,73 @@ def load_exceptions(
     section = config.get("exceptions") or {}
     max_days = int((section.get("max_days") if isinstance(section, dict) else None) or DEFAULT_MAX_DAYS)
     return parse_entries(loaded, today=today, max_days=max_days)
+
+
+def load_qa_ignore(
+    project_root: Path,
+    today: date | None = None,
+) -> tuple[list[ExceptionEntry], list[str]]:
+    """Load in-repo .qa-ignore file from project root.
+
+    Returns (entries, warnings).
+    Expired entries are ignored with a WARN.
+    P0 entries are rejected with a WARN during application.
+    """
+    ignore_file = project_root / ".qa-ignore"
+    if not ignore_file.is_file():
+        return [], []
+
+    try:
+        raw = yaml.safe_load(ignore_file.read_text(encoding="utf-8")) or []
+    except Exception as exc:
+        return [], [f".qa-ignore parse error: {exc}"]
+
+    if isinstance(raw, dict):
+        raw = raw.get("exceptions") or raw.get("ignore") or []
+    if not isinstance(raw, list):
+        return [], [".qa-ignore must contain a list of entries"]
+
+    today = today or date.today()
+    entries: list[ExceptionEntry] = []
+    warnings: list[str] = []
+
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        fingerprint = str(item.get("fingerprint") or item.get("match") or "").strip()
+        reason = str(item.get("reason") or "").strip()
+        exp_raw = item.get("expires") or item.get("expiry")
+        if not fingerprint:
+            continue
+        if not reason:
+            warnings.append(f".qa-ignore entry missing reason: {fingerprint}")
+            continue
+        try:
+            exp_date = _parse_expiry(exp_raw)
+        except Exception:
+            warnings.append(f".qa-ignore entry invalid expiry: {fingerprint}")
+            continue
+
+        if exp_date < today:
+            warnings.append(f".qa-ignore entry expired: {fingerprint}")
+            continue
+
+        if (exp_date - today).days > DEFAULT_MAX_DAYS:
+            warnings.append(f".qa-ignore expiry exceeds {DEFAULT_MAX_DAYS} days: {fingerprint}")
+            continue
+
+        if item.get("allow_p0"):
+            warnings.append(f".qa-ignore cannot set allow_p0: {fingerprint}")
+
+        entries.append(
+            ExceptionEntry(
+                match=fingerprint,
+                reason=reason,
+                expires=exp_date,
+                added_by="in-repo .qa-ignore",
+                allow_p0=False,
+                is_in_repo=True,
+            )
+        )
+
+    return entries, warnings

@@ -957,3 +957,27 @@ def test_imported_module_files_binds_only_test_tree_modules(tmp_path):
         "relative": pkg / "common.py",
     }
 
+
+def test_handler_swallows_call_is_not_swallowing():
+    import ast
+    from agents.riley import _handler_swallows
+    tree = ast.parse("try:\n    pass\nexcept Exception:\n    logger.error('err')\n")
+    handler = tree.body[0].handlers[0]
+    assert _handler_swallows(handler) is False
+
+
+def test_environment_root_cause_filters_by_classification():
+    from agents.riley import environment_failure_cause
+    exec_res = {
+        "failed": 1,
+        "environment_failed": 1,
+        "product_failed": 0,
+        "failures": [
+            {"node": "test_env", "classification": "environment", "environment_kind": "sandbox"},
+        ]
+    }
+    cause = environment_failure_cause(exec_res)
+    assert cause is not None
+    assert "test_env" in cause.cause
+
+

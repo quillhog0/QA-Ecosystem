@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 import argparse
 import shutil
 import sys
@@ -49,6 +50,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Path to config.yaml",
     )
     parser.add_argument(
+        "--languages",
+        choices=["auto", "python", "ts", "both"],
+        default="auto",
+        help="Restrict detected languages: auto, python, ts or both (default auto)",
+    )
+    parser.add_argument(
         "--allow-network",
         action="store_true",
         help="Permit network for the isolated pytest process (off by default)",
@@ -78,6 +85,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--strict",
         action="store_true",
         help="Enable strict verification (riley.veto_on_uncovered_claims=true)",
+    )
+    parser.add_argument(
+        "--claims-strict",
+        action="store_true",
+        help="Documented claims with no covering test are P2 findings",
+    )
+    parser.add_argument(
+        "--identity-strict",
+        action="store_true",
+        help="Raise identity leak findings (names, emails, home paths) to P1",
+    )
+    parser.add_argument(
+        "--clean-install",
+        action="store_true",
+        help="Test installing from scratch in an empty venv / fresh node_modules exactly as README says",
     )
     parser.add_argument(
         "--sandbox",
@@ -163,6 +185,7 @@ def main(argv: list[str] | None = None) -> int:
     config.setdefault("allow_network", False)
     if args.no_dry_run:
         config["dry_run"] = False
+    os.environ["QA_LANGUAGES"] = args.languages
     if args.allow_network:
         config["allow_network"] = True
     if args.llm_network:
@@ -172,8 +195,17 @@ def main(argv: list[str] | None = None) -> int:
         config.setdefault("riley", {})
         config["riley"] = dict(config.get("riley") or {})
         config["riley"]["veto_on_uncovered_claims"] = True
+        config["riley"]["veto_on_weak_tests"] = True
         config["lexi"] = dict(config.get("lexi") or {})
         config["lexi"]["veto_on_missing_code"] = True
+    if args.claims_strict:
+        config.setdefault("lexi", {})
+        config["lexi"] = dict(config.get("lexi") or {})
+        config["lexi"]["claims_strict"] = True
+    if args.identity_strict:
+        config["identity_strict"] = True
+    if args.clean_install:
+        config["clean_install"] = True
     if args.sandbox:
         config.setdefault("sandbox", {})
         config["sandbox"] = dict(config.get("sandbox") or {})
@@ -212,7 +244,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # Load operator exceptions at startup. An invalid entry is a hard config
     # error (never a silent ignore), so a typo cannot quietly disable a guard.
-    from core.exceptions import ExceptionsConfigError, load_exceptions
+    from core.exceptions import ExceptionsConfigError, load_exceptions, load_qa_ignore
 
     project_name = project.resolve().name
     try:
@@ -220,6 +252,9 @@ def main(argv: list[str] | None = None) -> int:
     except ExceptionsConfigError as exc:
         print(f"exceptions config error: {exc}", file=sys.stderr)
         return 1
+
+    qa_ignore_entries, _ = load_qa_ignore(project)
+    exception_entries.extend(qa_ignore_entries)
 
     started_monotonic = time.monotonic()
     try:
@@ -245,6 +280,8 @@ def main(argv: list[str] | None = None) -> int:
     findings_base = Path(config.get("findings_dir") or reports_dir)
     print(f"findings={findings_base / report.run_id / 'findings.md'}")
     print(f"findings_latest={findings_base / 'latest' / 'findings.md'}")
+    print(f"summary={findings_base / report.run_id / 'summary.md'}")
+    print(f"summary_latest={findings_base / 'latest' / 'summary.md'}")
     print(f"isolated_root={report.isolated_root}")
     if args.sarif:
         try:

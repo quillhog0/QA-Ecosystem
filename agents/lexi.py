@@ -26,6 +26,13 @@ from agents.inventory import (
     relative_strings,
     split_code_and_tests,
 )
+from agents.lexi_claims import (
+    _is_doc_code_example_ident,
+    check_call_form_claims,
+    check_cli_claims,
+    check_env_vars,
+    check_install_instructions,
+)
 from core.environment import classify_execution
 from core.packets import DriftFinding, DriftReport, Verdict
 
@@ -169,9 +176,15 @@ def _ignore_identifiers(
     return ignore
 
 
-def _backtick_functions(docs_root: Path, doc_globs: tuple[str, ...]) -> list[str]:
+def _backtick_functions(
+    docs_root: Path,
+    doc_globs: tuple[str, ...],
+    docs_allowlist: set[str] | None = None,
+) -> list[str]:
     names: list[str] = []
     for path in list_docs(docs_root, globs=doc_globs):
+        if docs_allowlist is not None and not _path_suffix_match(path, docs_allowlist):
+            continue
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
@@ -444,6 +457,8 @@ class _Mention:
         ``1. **Label:** `alpha`, `beta`, `gamma`.`` is a vocabulary list: the
         terms are items, not APIs, whatever language the label is written in.
         """
+        if self.line.strip().startswith("|") and self.line.strip().endswith("|"):
+            return True
         if self.prev_term and not _has_words(self.gap_before):
             return True
         if self.next_term and not _has_words(self.gap_after):
@@ -560,6 +575,7 @@ _HISTORICAL_DIR_NAMES = frozenset(
         "post-mortems", "changelog", "changelogs", "history", "histories",
         "adr", "adrs", "decisions", "retrospective", "retrospectives",
         "release-notes", "releasenotes", "release_notes",
+        "governance", "team", "process",
     }
 )
 _HISTORICAL_FILE_STEMS = frozenset(
@@ -567,10 +583,12 @@ _HISTORICAL_FILE_STEMS = frozenset(
         "incident", "incidents", "postmortem", "postmortems", "post-mortem",
         "post-mortems", "changelog", "changelogs", "changes", "history",
         "histories", "releasenotes", "release-notes", "release_notes",
+        "agents", "contributing", "team", "process", "governance", "code_of_conduct",
+        "security", "license", "authors", "roadmap",
     }
 )
 _HISTORICAL_FILE_PREFIXES = (
-    "changelog", "history", "postmortem", "post-mortem", "incident",
+    "changelog", "history", "postmortem", "post-mortem", "incident", "contributing",
 )
 
 
@@ -624,24 +642,35 @@ def _mention_location(
     return fallback
 
 
-def _doc_mentions(docs_root: Path, doc_globs: tuple[str, ...]) -> dict[str, list[_Mention]]:
+def _doc_mentions(
+    docs_root: Path,
+    doc_globs: tuple[str, ...],
+    docs_allowlist: set[str] | None = None,
+) -> dict[str, list[_Mention]]:
     """Every backticked term in the docs, with the structure of each mention.
 
     Code fences are removed first, so a mention counted here is a mention in
     prose. Cached per docs root because Lexi runs the scan twice per cycle.
     """
-    key = (str(docs_root.resolve()), doc_globs, _docs_signature(docs_root, doc_globs))
+    key = (
+        str(docs_root.resolve()),
+        doc_globs,
+        tuple(sorted(docs_allowlist)) if docs_allowlist is not None else None,
+        _docs_signature(docs_root, doc_globs),
+    )
     cached = _MENTION_CACHE.get(key)
     if cached is not None:
         return cached
 
     mentions: dict[str, list[_Mention]] = {}
     for path in list_docs(docs_root, globs=doc_globs):
+        doc_file = _relative_doc_path(path, docs_root)
+        if docs_allowlist is not None and not _path_suffix_match(doc_file, docs_allowlist):
+            continue
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        doc_file = _relative_doc_path(path, docs_root)
         heading = ""
         previous: list[str] = []
         for lineno, raw_line in enumerate(_strip_fences(text).splitlines(), start=1):
@@ -837,6 +866,8 @@ def _external_reference(
         return False
     if _qualified_in_docs(ident, docs_text):
         return True
+    if re.search(rf"`?{re.escape(ident)}`?\s+(?:from|in|of)\s+\[?[a-zA-Z0-9_-]+\]?", docs_text, re.IGNORECASE):
+        return True
     return _exception_like(ident)
 
 
@@ -906,10 +937,17 @@ def _clean_and_extract_claims_from_text(text: str) -> list[str]:
     return claims
 
 
-def _extract_claims(docs_root: Path, doc_globs: tuple[str, ...]) -> list[str]:
+def _extract_claims(
+    docs_root: Path,
+    doc_globs: tuple[str, ...],
+    docs_allowlist: set[str] | None = None,
+) -> list[str]:
     claims: list[str] = []
     seen_claims: set[str] = set()
     for path in list_docs(docs_root, globs=doc_globs):
+        doc_file = _relative_doc_path(path, docs_root)
+        if docs_allowlist is not None and not _path_suffix_match(doc_file, docs_allowlist):
+            continue
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
@@ -974,7 +1012,7 @@ _SPECULATIVE_HEADINGS = (
 # "`x` might land", "until / once `x` exists" all describe a possible tomorrow,
 # not the present contract, so the term carries no present promise.
 _SPECULATIVE_MODAL_RE = re.compile(
-    r"\b(?:could|might|once|until|would(?:\s+also)?|we\s+can\s+also|plan(?:s|ned)?|want(?:ed)?\s+to)\b",
+    r"\b(?:could|might|once|until|would(?:\s+also)?|we\s+can\s+also|plan(?:s|ned)?|want(?:ed)?\s+to|if\s+you|for\s+example|e\.g\.|i\.e\.)\b",
     re.IGNORECASE,
 )
 
@@ -1033,6 +1071,8 @@ def _missing_code_severity(
         # name is code-shaped or written in call form, because the prose around
         # it never commits to the symbol existing today.
         return "low"
+    if _is_doc_code_example_ident(ident, docs_plain):
+        return "low"
     if strict or ident in _CALL_FORM:
         return "high"
     if _prose_only(ident, mentions):
@@ -1058,9 +1098,10 @@ def _is_placeholder(ident: str, docs_text: str) -> bool:
                 rf"where\s+`?{esc}`?\s+is\b",
                 rf"`{esc}`\s+is\s+(?:some|any|an|a)\b",
                 rf"\b{esc}\s+is\s+some\b",
-                rf"(?:e\.g\.|i\.e\.|for example)\s*[:\-]?\s*`{esc}`",
+                rf"(?:e\.g\.|i\.e\.|for example|such as)\s*[:\-]?\s*`?{esc}`?",
                 rf"`[^`]*[=:]\s*{esc}\b[^`]*`",
                 rf"\b{esc}\b\s*=\s*(?:some|an|a|any)\b",
+                rf"variable\s+(?:is|named|called)\s+`?{esc}`?",
             )
         )
         _PLACEHOLDER_RES_CACHE[ident] = compiled
@@ -1370,7 +1411,18 @@ def _heuristic_drift(
     changed_code: set[str] | None = None,
 ) -> DriftReport:
     code_files, test_files = split_code_and_tests(list_sources(project_root), project_root)
-    tokens, _excerpt = doc_tokens(docs_root)
+    if docs_allowlist is not None and not docs_allowlist:
+        return DriftReport(
+            verdict=Verdict.CLEAR.value,
+            findings=[],
+            docs_files=[],
+            code_files=[str(p.relative_to(project_root)) for p in code_files],
+            test_files=[str(p.relative_to(project_root)) for p in test_files],
+            notes="diff mode: no docs changed, docs scan skipped",
+            claims=[],
+            llm_status="none",
+        )
+    tokens, _excerpt = doc_tokens(docs_root, docs_allowlist=docs_allowlist)
     findings: list[DriftFinding] = []
     doc_globs = tuple((config.get("lexi") or {}).get("doc_globs") or DOC_GLOBS)
     ignore = _ignore_identifiers(
@@ -1426,7 +1478,7 @@ def _heuristic_drift(
     # that are merely listed, glossed in parentheses, negated or used as prose
     # placeholders stay under the veto line in every language (see
     # _missing_code_severity), and ``--strict`` remains an explicit opt-in.
-    claims = _extract_claims(docs_root, doc_globs)
+    claims = _extract_claims(docs_root, doc_globs, docs_allowlist=docs_allowlist)
     docs_plain = _docs_plain_text(docs_root, doc_globs)
     mentions: dict[str, list[_Mention]] | None = None
     # Everything that counts as "this name exists in the project", used to tell
@@ -1446,7 +1498,7 @@ def _heuristic_drift(
         return name in function_names or name in class_names
 
     seen: set[str] = set()
-    for ident in _backtick_functions(docs_root, doc_globs):
+    for ident in _backtick_functions(docs_root, doc_globs, docs_allowlist=docs_allowlist):
         if ident in seen:
             continue
         seen.add(ident)
@@ -1503,7 +1555,7 @@ def _heuristic_drift(
         if re.search(rf"(?<![A-Za-z0-9_]){re.escape(ident)}(?![A-Za-z0-9_])", other_text):
             continue
         if mentions is None:
-            mentions = _doc_mentions(docs_root, doc_globs)
+            mentions = _doc_mentions(docs_root, doc_globs, docs_allowlist=docs_allowlist)
         if _external_reference(
             ident,
             docs_plain,
@@ -1599,6 +1651,26 @@ def _heuristic_drift(
                     severity="medium" if env_cause else "high",
                 )
             )
+
+    # Additional Lexi claim checks (CLI commands/flags, call-forms, env vars, install instructions)
+    findings.extend(check_cli_claims(docs_root, project_root))
+    findings.extend(check_call_form_claims(docs_root, project_root))
+    findings.extend(check_env_vars(docs_root, project_root, config=config))
+    findings.extend(check_install_instructions(docs_root, project_root))
+
+    claims_strict = bool((config.get("lexi") or {}).get("claims_strict", False))
+    if claims_strict and test_files:
+        for claim in claims:
+            claim_slug = re.sub(r"[^a-zA-Z0-9]+", "_", claim.lower()).strip("_")
+            if not any(claim_slug[:20] in t.read_text(encoding="utf-8", errors="replace").lower() for t in test_files):
+                findings.append(
+                    DriftFinding(
+                        kind="uncovered_claim",
+                        path=claim[:40],
+                        message=f"documented claim '{claim}' has no covering test in the test suite",
+                        severity="medium",
+                    )
+                )
 
     if docs_allowlist is not None or changed_code is not None:
         # Diff mode: keep only findings inside the computed scope, then let the

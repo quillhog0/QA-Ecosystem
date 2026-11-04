@@ -80,6 +80,39 @@ def run_fixture(fixture: Path, reports_dir: Path) -> dict:
         )
         calc.write_text("def add(left: int, right: int) -> int:\n    return left - right\n", encoding="utf-8")
 
+    if fixture.name == "diff_tests_deleted":
+        git_dir = fixture / ".git"
+        test_file = fixture / "tests" / "test_sample.py"
+        test_file.parent.mkdir(parents=True, exist_ok=True)
+        test_file.write_text("def test_one(): assert True\ndef test_two(): assert True\n", encoding="utf-8")
+        if not git_dir.exists():
+            subprocess.run(["git", "init"], cwd=fixture, check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(fixture), "config", "user.name", "test"], check=True)
+            subprocess.run(["git", "-C", str(fixture), "config", "user.email", "test@test"], check=True)
+            cleanup_git = True
+        subprocess.run(["git", "-C", str(fixture), "add", "-A"], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(fixture), "commit", "-m", "init", "--allow-empty"],
+            check=True,
+            capture_output=True,
+        )
+        test_file.write_text("def test_one(): assert True\n", encoding="utf-8")
+
+    if fixture.name == "ts_cached_modules_clear":
+        from core.ts_runner import _lockfile_hash, _node_cache_dir
+        cache_key = _lockfile_hash(fixture)
+        if cache_key:
+            cache_entry = _node_cache_dir() / cache_key
+            cache_marker = cache_entry / "valid.ok"
+            cache_tree = cache_entry / "node_modules"
+            seed_nm = fixture / "seed_node_modules"
+            if seed_nm.is_dir():
+                cache_entry.mkdir(parents=True, exist_ok=True)
+                if cache_tree.exists():
+                    shutil.rmtree(cache_tree, ignore_errors=True)
+                shutil.copytree(seed_nm, cache_tree, symlinks=True)
+                cache_marker.write_text(cache_key, encoding="utf-8")
+
     try:
         before = tree_sha256(fixture)
         proc = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True, check=False)

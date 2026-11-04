@@ -18,6 +18,7 @@ CODE_SKIP = {
     "env",
     "__pycache__",
     ".git",
+    ".hypothesis",
     ".hg",
     ".svn",
     "node_modules",
@@ -43,7 +44,10 @@ BACKUP_DOC_SUFFIXES = (".bak", ".orig", ".rej", ".accept", ".merge", "~")
 # Extensions the code index reads. Python plus the everyday web languages: a
 # symbol defined in a ``.ts`` file is real project code just as much as one
 # defined in a ``.py`` file, so Lexi must not call it missing.
-SOURCE_SUFFIXES = frozenset({".py", ".ts", ".tsx", ".mjs", ".cjs", ".jsx"})
+SOURCE_SUFFIXES = frozenset({".py", ".ts", ".tsx", ".mjs", ".cjs", ".jsx", ".js"})
+
+
+DOC_SKIP = CODE_SKIP | {".github"}
 
 
 def is_backup_doc(path: Path) -> bool:
@@ -59,6 +63,10 @@ def _in_skip_dir(parts: tuple[str, ...]) -> bool:
     return any(part in CODE_SKIP for part in parts)
 
 
+def _in_doc_skip_dir(parts: tuple[str, ...]) -> bool:
+    return any(part in DOC_SKIP for part in parts)
+
+
 def _iter_files(root: Path, globs: tuple[str, ...]) -> list[Path]:
     files: list[Path] = []
     if not root.exists():
@@ -71,7 +79,7 @@ def _iter_files(root: Path, globs: tuple[str, ...]) -> list[Path]:
                 rel_parts = path.relative_to(root.resolve()).parts
             except ValueError:
                 rel_parts = path.parts
-            if _in_skip_dir(rel_parts):
+            if _in_doc_skip_dir(rel_parts):
                 continue
             if is_backup_doc(path):
                 continue
@@ -119,11 +127,15 @@ def list_sources(root: Path) -> list[Path]:
 def _is_test_path(path: Path, rel_parts_lower: set[str]) -> bool:
     """One test file, in either ecosystem: pytest naming or JS co-located tests."""
     name = path.name.lower()
+    stem = path.stem.lower()
     if "tests" in rel_parts_lower or "test" in rel_parts_lower:
         return True
     if "__tests__" in rel_parts_lower:
         return True
-    if name.startswith("test_") or name.endswith("_test.py"):
+    if stem == "test" or stem.startswith(("test_", "test-")) or stem.endswith(("_test", ".test", ".spec", ".test-d")):
+        return True
+    if name.endswith(("_test.py", ".test.js", ".test.ts", ".test.jsx", ".test.tsx", ".test.mjs", ".test.cjs",
+                      ".spec.js", ".spec.ts", ".spec.jsx", ".spec.tsx", ".spec.mjs", ".spec.cjs")):
         return True
     if ".test." in name or ".spec." in name:
         return True
@@ -214,13 +226,21 @@ def public_names(py_file: Path) -> list[str]:
     return names
 
 
-def doc_tokens(docs_root: Path, limit_chars: int = 12_000) -> tuple[list[str], str]:
+def doc_tokens(
+    docs_root: Path,
+    limit_chars: int = 12_000,
+    docs_allowlist: set[str] | None = None,
+) -> tuple[list[str], str]:
     chunks: list[str] = []
     size = 0
     identifiers: list[str] = []
     ident_re = re.compile(r"`([A-Za-z_][A-Za-z0-9_\.]*)`")
     heading_re = re.compile(r"^#+\s+(.+)$", re.MULTILINE)
     for path in list_docs(docs_root):
+        if docs_allowlist is not None:
+            rel = str(path.relative_to(docs_root)).replace("\\", "/")
+            if not any(rel.endswith(a) or a.endswith(rel) for a in docs_allowlist):
+                continue
         text = path.read_text(encoding="utf-8", errors="replace")
         identifiers.extend(ident_re.findall(text))
         identifiers.extend(heading_re.findall(text))

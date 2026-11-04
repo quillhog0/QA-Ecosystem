@@ -105,7 +105,8 @@ def _ini_testpaths(isolated_root: Path) -> list[str]:
             except (OSError, ValueError):
                 continue
             options = ((data or {}).get("tool") or {}).get("pytest") or {}
-            value = (options.get("ini_options") or {}).get(key)
+            ini_opts = options.get("ini_options") if isinstance(options.get("ini_options"), dict) else {}
+            value = ini_opts.get(key) if key in ini_opts else options.get(key)
         else:
             parser = configparser.ConfigParser()
             try:

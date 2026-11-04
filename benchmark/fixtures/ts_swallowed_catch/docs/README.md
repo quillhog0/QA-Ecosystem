@@ -1,0 +1,2 @@
+# Swallowed Catch
+Swallows errors.
