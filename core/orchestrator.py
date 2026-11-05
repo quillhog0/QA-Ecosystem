@@ -502,16 +502,24 @@ class Vesper:
                 report.verdict = Verdict.VETO.value
                 return
 
-        node_engine_blocked = False
+        node_engine_blocked = bool()
         from core.toolchain import check_node_engine, detect_languages, ensure_ts_tooling
+        from core.workspace import check_workspace_engines, discover_workspaces
+
+        workspaces = discover_workspaces(isolated)
         if not blocked_reason and "ts" in detect_languages(isolated):
             node_ok, node_msg = check_node_engine(isolated)
             if not node_ok:
                 blocked_reason = f"node engine precondition: {node_msg}"
-                node_engine_blocked = True
-            elif not ensure_ts_tooling():
-                blocked_reason = "missing TypeScript tooling (pinned typescript.js not found in QA cache)"
-                node_engine_blocked = True
+                node_engine_blocked = not bool()
+            else:
+                ws_ok, ws_msg = check_workspace_engines(isolated, workspaces)
+                if not ws_ok:
+                    blocked_reason = f"node engine precondition: {ws_msg}"
+                    node_engine_blocked = not bool()
+                elif not ensure_ts_tooling():
+                    blocked_reason = "missing TypeScript tooling (pinned typescript.js not found in QA cache)"
+                    node_engine_blocked = not bool()
 
         if blocked_reason:
             # Nothing may execute without the required sandbox. Every stage above
@@ -702,15 +710,18 @@ class Vesper:
 
         live_project = Path(packet.project_root)
 
-        # Check deleted tests in diff mode
+        # Check deleted and weakened tests in diff mode
         deleted_tests: list[str] = []
-        if self._scope is not None and getattr(self._scope, "base_ref", None):
-            from core.diffscope import detect_deleted_tests
+        weakened_tests: list[str] = []
+        if all((self._scope is not None, getattr(self._scope, "base_ref", None))):
+            from core.diffscope import detect_deleted_tests, detect_weakened_tests
+
             deleted_tests = detect_deleted_tests(live_project, self._scope.base_ref)
+            weakened_tests = detect_weakened_tests(live_project, self._scope.base_ref)
 
         # Check clean install if requested
         clean_install_res: dict[str, Any] | None = None
-        if self.config.get("clean_install", False):
+        if self.config.get("clean_install", bool()):
             from core.clean_install import run_clean_install
             clean_install_res = run_clean_install(live_project, work_dir)
 
@@ -720,7 +731,9 @@ class Vesper:
             "root_cause": root_cause,
             "identity_leaks": identity_leaks,
             "deleted_tests": deleted_tests,
+            "weakened_tests": weakened_tests,
             "clean_install": clean_install_res,
+            "workspaces": workspaces,
         }
 
         p1_leaks = [leak for leak in identity_leaks if leak.get("priority") == "P1"]
@@ -750,18 +763,24 @@ class Vesper:
                 ),
             )
 
-        if deleted_tests:
+        if any((deleted_tests, weakened_tests)):
+            reason_label = "deleted tests in diff mode" if deleted_tests else "weakened tests in diff mode"
+            summary_label = (
+                f"{len(deleted_tests)} test(s) deleted in diff mode"
+                if deleted_tests
+                else f"{len(weakened_tests)} test(s) weakened in diff mode"
+            )
             append_result(
                 self.role_results,
                 RoleResult(
                     role=Role.RILEY.value,
                     stage="diff_tests_audit",
                     verdict=Verdict.VETO.value,
-                    summary=f"{len(deleted_tests)} test(s) deleted in diff mode",
-                    details={"deleted_tests": deleted_tests},
+                    summary=summary_label,
+                    details={"deleted_tests": deleted_tests, "weakened_tests": weakened_tests},
                 ),
             )
-            report.mutation = {"status": "skipped", "reason": "deleted tests in diff mode"}
+            report.mutation = {"status": "skipped", "reason": reason_label}
             report.verdict = Verdict.VETO.value
             return
 
@@ -829,14 +848,18 @@ class Vesper:
             return
 
         mutation_cfg = dict(self.config.get("mutation") or {})
-        mutation_enabled = bool(mutation_cfg.get("enabled", False))
+        mutation_enabled = bool(mutation_cfg.get("enabled", bool()))
 
-        if self._scope is not None:
-            # Diff mode is a fast pre-push check: mutation testing is off.
-            report.mutation = {"status": "skipped", "reason": "diff mode"}
-        elif not mutation_enabled:
-            report.mutation = {"status": "skipped", "reason": "disabled"}
+        if not mutation_enabled:
+            skip_reason = "diff mode" if self._scope is not None else "disabled"
+            report.mutation = {"status": "skipped", "reason": skip_reason}
         else:
+            run_cfg = dict(self.config)
+            if self._scope is not None:
+                run_cfg["mutation"] = {
+                    **mutation_cfg,
+                    "allowed_lines": dict(getattr(self._scope, "changed_lines", {})),
+                }
             py_bin = None
             venv_py = venv_python(work_dir)
             if venv_py.is_file():
@@ -846,10 +869,12 @@ class Vesper:
             mut_res = riley.audit_mutations(
                 isolated,
                 work_dir=work_dir,
-                config=self.config,
+                config=run_cfg,
                 allow_network=self.allow_network,
                 python=py_bin,
             )
+            if self._scope is not None:
+                mut_res["diff_scoped"] = not bool()
             report.timings["mutation"] = round(time.monotonic() - _mutation_started, 3)
             report.mutation = mut_res
             append_result(

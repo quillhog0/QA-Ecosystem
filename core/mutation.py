@@ -291,13 +291,23 @@ def apply_mutation_to_source(source: str, target_node_index: int) -> str:
     return ast.unparse(mutated_tree)
 
 
-def find_all_mutants(project_root: Path) -> list[Mutant]:
+def find_all_mutants(
+    project_root: Path,
+    allowed_lines: dict[str, list[int] | set[int]] | None = None,
+) -> list[Mutant]:
     mutants: list[Mutant] = []
     for path in sorted(project_root.rglob("*.py")):
         rel = path.relative_to(project_root)
         if not is_mutable_file(rel):
             continue
-        file_mutants = collect_file_mutants(path, rel.as_posix())
+        rel_posix = rel.as_posix()
+        if allowed_lines is not None:
+            if rel_posix not in allowed_lines:
+                continue
+        file_mutants = collect_file_mutants(path, rel_posix)
+        if allowed_lines is not None:
+            line_set = set(allowed_lines[rel_posix])
+            file_mutants = [m for m in file_mutants if m.lineno in line_set]
         mutants.extend(file_mutants)
 
     # Deterministic sorting
@@ -374,8 +384,12 @@ def run_mutation_testing(
     timeout_per_mutant = int(mutation_cfg.get("timeout_per_mutant", 30))
     seed = int(mutation_cfg.get("seed", 42))
     min_score = float(mutation_cfg.get("min_score", 0.0))
+    allowed_lines = mutation_cfg.get("allowed_lines")
 
-    all_mutants = find_all_mutants(isolated_root)
+    all_mutants = find_all_mutants(
+        isolated_root,
+        allowed_lines=allowed_lines if isinstance(allowed_lines, dict) else None,
+    )
     if max_mutants <= 0 and all_mutants:
         return {
             "status": "skipped",

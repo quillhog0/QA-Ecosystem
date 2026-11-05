@@ -23,6 +23,11 @@
       "items": {"type": "object"}
     },
     "false_positive_counts": {"type": "object"},
+    "workspaces": {
+      "type": "array",
+      "items": {"type": "object"}
+    },
+    "workspace_verdicts": {"type": "object"},
     "findings": {
       "type": "array",
       "items": {
@@ -50,9 +55,10 @@
           "code_file": {"type": ["string", "null"]},
           "code_line": {"type": ["integer", "null"]},
           "priority": {"type": "string", "enum": ["P0", "P1", "P2", "P3"]},
-          "type": {"type": "string", "enum": ["drift", "claim", "weak_test", "policy", "test_failure", "environment", "identity_leak", "clean_install", "deleted_tests"]},
+          "type": {"type": "string", "enum": ["drift", "claim", "weak_test", "policy", "test_failure", "environment", "identity_leak", "clean_install", "deleted_tests", "mutation"]},
           "class": {"type": "string", "enum": ["hard", "heuristic"]},
           "confidence": {"type": "string", "enum": ["high", "low"]},
+          "package": {"type": ["string", "null"]},
           "fingerprint": {"type": "string"},
           "customer_impact": {"type": "string"},
           "evidence": {"type": "string"},

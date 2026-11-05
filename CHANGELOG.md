@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.0 (2026-11-05)
+
+### Added
+- **Diff-scoped mutation (`core/diffscope.py`, `core/mutation.py`, `core/orchestrator.py`, `core/findings.py`)**: when mutation testing is enabled alongside `--diff <base-ref>`, mutation evaluation is restricted to modified lines in changed source files (`changed_lines`), and surviving mutants emit `riley.mutation` findings (`"No test guards this change"`).
+- **Changed-line coverage and assertion-strength diffing (`core/diffscope.py`, `core/orchestrator.py`, `core/findings.py`)**: tracks `changed_lines` and `uncovered_changed_files` in `DiffScope`, and detects tests whose assertion count decreased versus `base_ref` (`detect_weakened_tests`) to trigger a `VETO`.
+- **Monorepo and workspace support (`core/workspace.py`, `core/orchestrator.py`, `core/findings.py`)**: discovers npm/yarn/pnpm workspaces (`package.json` `workspaces`, `pnpm-workspace.yaml`) and multi-package Python/TS trees (`packages/*`, `apps/*`, `services/*`), checks per-package Node `engines`, attributes findings to `package`, and computes per-package verdicts (`workspace_verdicts`).
+
 ## 0.6.0 (2026-11-05)
 
 ### Added

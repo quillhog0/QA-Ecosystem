@@ -31,6 +31,7 @@ FINDING_TYPES = (
     "identity_leak",
     "clean_install",
     "deleted_tests",
+    "mutation",
 )
 FINDING_CLASSES = ("hard", "heuristic")
 FINDING_CONFIDENCES = ("high", "low")
@@ -629,6 +630,8 @@ def build_findings(report: dict[str, Any]) -> list[dict[str, Any]]:
     _collect_identity(builder, report.get("identity_leaks") or post.get("identity_leaks"))
     _collect_clean_install(builder, report.get("clean_install") or post.get("clean_install"))
     _collect_deleted_tests(builder, report.get("deleted_tests") or post.get("deleted_tests"))
+    _collect_weakened_tests(builder, report.get("weakened_tests") or post.get("weakened_tests"))
+    _collect_diff_mutants(builder, report.get("mutation"))
     return builder.finalise()
 
 
@@ -690,6 +693,49 @@ def _collect_deleted_tests(builder: _FindingBuilder, deleted_tests: list[str] | 
             fclass="hard",
             confidence="high",
         )
+
+
+def _collect_weakened_tests(builder: _FindingBuilder, weakened_tests: list[str] | None) -> None:
+    for entry in weakened_tests or []:
+        text = str(entry)
+        file_part = text.split("::", 1)[0] if "::" in text else None
+        term_part = text.split(" ", 1)[0]
+        builder.add(
+            agent="riley",
+            ftype="weak_test",
+            priority="P1",
+            impact=f"Test assertion strength decreased versus base ref in --diff mode: {text}.",
+            evidence=f"weakened test: {text}",
+            red_test="Restore removed assertions so the test guards the original behaviour.",
+            file=file_part,
+            term=term_part,
+            fclass="heuristic",
+            confidence="high",
+        )
+
+
+def _collect_diff_mutants(builder: _FindingBuilder, mutation: dict[str, Any] | None) -> None:
+    if isinstance(mutation, dict):
+        if mutation.get("diff_scoped"):
+            for surv in mutation.get("survived_mutants", ()):
+                if isinstance(surv, dict):
+                    loc = str(surv.get("location", ""))
+                    file_part, _, line_str = loc.partition(":")
+                    orig = str(surv.get("original", ""))
+                    mut = str(surv.get("mutated", ""))
+                    builder.add(
+                        agent="riley",
+                        ftype="mutation",
+                        priority="P2",
+                        impact=f"No test guards this change at {loc} ({surv.get('type')}: {orig} -> {mut}).",
+                        evidence=f"surviving mutant {surv.get('id')} at {loc}: {orig} -> {mut}",
+                        red_test=f"Add a test assertion that fails when {loc} is mutated from {orig} to {mut}.",
+                        file=file_part if file_part else None,
+                        line=_as_int(line_str) if line_str else None,
+                        term=loc,
+                        fclass="heuristic",
+                        confidence="high",
+                    )
 
 
 def count_by_priority(findings: list[dict[str, Any]]) -> dict[str, int]:
@@ -833,6 +879,17 @@ def build_document(
         for f in findings:
             if not any((f.get("excepted"), f.get("baselined"))):
                 f["verdict_effect"] = verdict_effect_for(str(f["priority"]), str(f["evidence"]), fail_on=fail_on)
+    post = report.get("post_audit") if isinstance(report.get("post_audit"), dict) else {}
+    workspaces = report.get("workspaces", post.get("workspaces"))
+    if isinstance(workspaces, list):
+        if workspaces:
+            from core.workspace import assign_finding_packages, compute_workspace_verdicts
+
+            assign_finding_packages(findings, workspaces)
+            document["workspaces"] = workspaces
+            document["workspace_verdicts"] = compute_workspace_verdicts(
+                findings, workspaces, str(document["verdict"])
+            )
     document["counts"] = count_by_priority(findings)
     document["findings"] = findings
     return document
