@@ -1,0 +1,12 @@
+{
+  "name": "ts-third-party-cli-fp",
+  "version": "1.0.0",
+  "type": "module",
+  "devDependencies": {
+    "vitest": "^2.0.0"
+  },
+  "scripts": {
+    "test": "vitest run"
+  }
+}
+

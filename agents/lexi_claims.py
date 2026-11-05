@@ -67,7 +67,39 @@ EXTERNAL_TOOLS = frozenset({
     "cat", "echo", "chmod", "bash", "sh", "make", "sphinx-build", "doc2dash", "coverage", "tox", "pre-commit",
     "bumpversion", "flit", "twine", "wheel", "hatch", "pdm", "poetry", "uv", "ruff", "black", "flake8", "mypy",
     "pyright", "codecov", "towncrier", "cogapp", "pytest-benchmark", "pytest-codspeed",
+    "node", "npx", "bun", "deno", "python", "python3", "brew", "cargo", "go", "pip3", "gem",
 })
+
+DOT_EXTENSIONS = frozenset({
+    "js", "ts", "mjs", "cjs", "jsx", "tsx", "py", "json", "yaml", "yml", "md", "html", "css",
+    "io", "org", "com", "net", "sh", "txt", "wasm", "map", "sql", "db",
+})
+
+DOT_PACKAGES = frozenset({
+    "sql.js", "chart.js", "node.js", "next.js", "three.js", "vue.js", "moment.js",
+    "highlight.js", "socket.io", "day.js", "pdf.js", "math.js", "fabric.js", "video.js",
+    "anime.js", "d3.js", "p5.js", "require.js",
+})
+
+
+def is_external_tool_invocation(line: str) -> bool:
+    """True if line represents an invocation of a third-party tool."""
+    clean = line.strip()
+    m = re.search(
+        r"(?:^\s*[$>#]\s*|`|(?:^|\s)(?:run|exec|install|via|using|use|start)\s+|^\s*)([a-zA-Z0-9_.-]+)",
+        clean,
+        re.IGNORECASE,
+    )
+    if m and m.group(1).lower() in EXTERNAL_TOOLS:
+        return True
+    for seg in re.split(r"[|;&]", clean):
+        seg_clean = seg.strip().lstrip("$># ").strip("`\"' ")
+        tokens = [t.strip("`\"' ") for t in seg_clean.split() if t.strip("`\"' ")]
+        while tokens and tokens[0].lower() in {"run", "exec", "install", "via", "using", "use", "start", "to", "with"}:
+            tokens = tokens[1:]
+        if tokens and tokens[0].lower() in EXTERNAL_TOOLS:
+            return True
+    return False
 
 _COMMIT_HASH_RE = re.compile(r"[0-9a-f]{7,40}")
 
@@ -274,8 +306,7 @@ def check_cli_claims(docs_root: Path, project_root: Path) -> list[DriftFinding]:
             if stripped.startswith("<!--") or "-->" in stripped:
                 continue
             # Skip external tools
-            m_cmd = re.search(r"(?:^\s*[$>]\s*|`)([a-zA-Z0-9_.-]+)", stripped)
-            if m_cmd and m_cmd.group(1).lower() in EXTERNAL_TOOLS:
+            if is_external_tool_invocation(stripped):
                 continue
             # Extract flags from the line
             line_flags = re.findall(r"(--[a-zA-Z0-9][a-zA-Z0-9_-]*)", stripped)
@@ -301,10 +332,19 @@ def check_cli_claims(docs_root: Path, project_root: Path) -> list[DriftFinding]:
                         )
 
             # Subcommand check
-            m = re.search(r"(?:^\s*[$>]\s*|`)[a-zA-Z0-9_-]+\s+([a-zA-Z0-9_-]+)\s+--", stripped)
+            m = re.search(r"(?:^\s*[$>]\s*|`|^)\s*([a-zA-Z0-9_-]+)\s+([a-zA-Z0-9_-]+)\s+--", stripped)
             if m:
-                subcmd = m.group(1)
-                if subcmd and not subcmd.startswith("-") and subcmd not in commands_in_code and subcmd not in ("run", "exec", "python", "node"):
+                tool_name = m.group(1).lower()
+                subcmd = m.group(2)
+                if tool_name in EXTERNAL_TOOLS or tool_name in ("run", "exec", "python", "node"):
+                    continue
+                if (
+                    subcmd
+                    and not subcmd.startswith("-")
+                    and subcmd not in commands_in_code
+                    and subcmd not in ("run", "exec", "python", "node")
+                    and subcmd not in EXTERNAL_TOOLS
+                ):
                     search_note = ", ".join(searched[:5])
                     findings.append(
                         DriftFinding(
@@ -376,13 +416,16 @@ def check_call_form_claims(docs_root: Path, project_root: Path) -> list[DriftFin
         rel_doc = str(doc_path.relative_to(docs_root)).replace("\\", "/") if doc_path.is_relative_to(docs_root) else doc_path.name
 
         for lineno, line in enumerate(lines, start=1):
-            for m in call_form_re.finditer(line):
+            line_clean = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", line)
+            for m in call_form_re.finditer(line_clean):
                 obj_name, method_name = m.group(1), m.group(2)
                 if obj_name in COMMON_CALL_OBJECTS:
                     continue
                 if method_name.startswith("_"):
                     continue
                 if method_name in BUILTIN_METHOD_NAMES:
+                    continue
+                if f"{obj_name}.{method_name}".lower() in DOT_PACKAGES or method_name.lower() in DOT_EXTENSIONS:
                     continue
                 if is_commit_hash(method_name) or is_commit_hash(obj_name):
                     continue

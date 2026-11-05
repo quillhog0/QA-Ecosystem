@@ -550,11 +550,18 @@ def _scan_ts_for_risks(
     node_bin = shutil.which("node") or "/tmp/node/node"
     if not shutil.which(node_bin) and not Path(node_bin).is_file():
         return []
+    from core.toolchain import ensure_ts_tooling
+    tooling_dir = ensure_ts_tooling()
+    if not tooling_dir or not (tooling_dir / "typescript.js").is_file():
+        return []
+
     cmd = [str(node_bin), str(analyzer_js), "--project", str(isolated_root)]
     if only_paths:
         cmd.extend(["--only-paths", ",".join(only_paths)])
+    env = dict(os.environ)
+    env["QA_TOOLING_DIR"] = str(tooling_dir)
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60, check=False)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60, check=False, env=env)
         if proc.returncode == 0 and proc.stdout.strip():
             data = json.loads(proc.stdout)
             return list(data.get("sable_findings") or [])

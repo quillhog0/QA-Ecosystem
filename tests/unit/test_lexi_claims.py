@@ -230,3 +230,117 @@ def test_check_install_instructions_matching_packages(tmp_path: Path):
     assert len(findings) == 0
 
 
+def test_is_external_tool_invocation_cases():
+    """Kill mutants in is_external_tool_invocation."""
+    from agents.lexi_claims import is_external_tool_invocation
+
+    # Direct invocations
+    assert is_external_tool_invocation("npm ci --omit=dev") is True
+    assert is_external_tool_invocation("$ docker run -v /tmp:/tmp myimg") is True
+    assert is_external_tool_invocation("npx vitest run") is True
+    assert is_external_tool_invocation("pip3 install pytest") is True
+    assert is_external_tool_invocation("`node` main.js") is True
+
+    # Piped or chained commands
+    assert is_external_tool_invocation("cat package.json | npm test") is True
+    assert is_external_tool_invocation("build && cargo test") is True
+    assert is_external_tool_invocation("setup; python -m unittest") is True
+
+    # Prefixes with action verbs
+    assert is_external_tool_invocation("run with cargo test") is True
+    assert is_external_tool_invocation("install via brew install foo") is True
+    assert is_external_tool_invocation("using pip3 to install") is True
+
+    # Project CLI commands (not external)
+    assert is_external_tool_invocation("mytool run --flag") is False
+    assert is_external_tool_invocation("mytool sync") is False
+    assert is_external_tool_invocation("custom_binary --help") is False
+
+
+def test_check_call_form_claims_packages_and_hashes(tmp_path: Path):
+    """Kill mutants in check_call_form_claims: DOT_PACKAGES, DOT_EXTENSIONS, commit hashes, example names."""
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "README.md").write_text(
+        "[sql.js](https://example.com) for sqlite\n"
+        "chart.js provides charts\n"
+        "socket.io handles websocket connections\n"
+        "export const data = load.json()\n"
+        "commit.a1b2c3d()\n"
+        "a1b2c3d.verify()\n"
+        "my_custom_client.fetch()\n"
+        "real_client.my_dummy_func()\n"
+        "real_client.missing_feature_call()\n",
+        encoding="utf-8",
+    )
+
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "app.ts").write_text("class RealClient {}\n", encoding="utf-8")
+
+    findings = check_call_form_claims(docs, tmp_path)
+    flagged = [f.path for f in findings if f.kind == "missing_code"]
+    assert "missing_feature_call" in flagged
+    assert "json" not in flagged
+    assert "io" not in flagged
+    assert "a1b2c3d" not in flagged
+    assert "verify" not in flagged
+    assert "fetch" not in flagged
+    assert "my_dummy_func" not in flagged
+
+
+def test_check_cli_claims_subcommands_and_comments(tmp_path: Path):
+    """Kill mutants in check_cli_claims: comments, stdlib python -m, help/version, subcommands."""
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "README.md").write_text(
+        "<!-- $ tool comment --flag -->\n"
+        "--> $ tool comment2 --comment-flag\n"
+        "$ python -m pip install --upgrade pkg\n"
+        "Run without dash dash: mytool test\n"
+        "$ mytool --help\n"
+        "$ mytool --version\n"
+        "some plain doc prose mentioning --standalone-flag without command keywords\n"
+        "$ mytool sync --unknown-flag\n"
+        "$ mytool run --unknown-flag\n"
+        "$ mytool run --timeit-flag\n"
+        "$ run exec --ignored-flag\n"
+        "$ run arbitrarysub --ignored-flag\n"
+        "$ npm ci --omit=dev\n",
+        encoding="utf-8",
+    )
+
+    src = tmp_path / "src"
+    src.mkdir()
+    # Exactly 5 files so len(searched) == 5 (kill > vs >= 5 mutant)
+    for i in range(5):
+        (src / f"cli_{i}.py").write_text(
+            "parser.add_argument('--known-flag')\n"
+            "@click.command('sync')\ndef sync(): pass\n",
+            encoding="utf-8",
+        )
+
+    findings = check_cli_claims(docs, tmp_path)
+    flag_findings = [f.path for f in findings if f.kind == "missing_cli_flag"]
+    assert "--unknown-flag" in flag_findings
+    assert "--timeit-flag" in flag_findings
+    assert "--help" not in flag_findings
+    assert "--version" not in flag_findings
+    assert "--standalone-flag" not in flag_findings
+    assert "--comment-flag" not in flag_findings
+    assert "--omit" not in flag_findings
+    assert "--upgrade" not in flag_findings
+
+    # Check search note has no "and 0 more" when len(searched) == 5
+    unknown_finding = next(f for f in findings if f.path == "--unknown-flag")
+    assert "and 0 more" not in unknown_finding.message
+
+    cmd_findings = [f.path for f in findings if f.kind == "missing_cli_command"]
+    assert "sync" not in cmd_findings
+    assert "run" not in cmd_findings
+    assert "exec" not in cmd_findings
+    assert "arbitrarysub" not in cmd_findings
+    assert "ci" not in cmd_findings
+
+
+

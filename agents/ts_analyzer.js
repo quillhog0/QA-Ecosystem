@@ -10,28 +10,32 @@ const path = require("path");
 // Resolve typescript compiler API
 let ts;
 const homeDir = process.env.HOME || process.env.USERPROFILE || "";
-const toolingTs = process.env.QA_TOOLING_DIR
-  ? path.join(process.env.QA_TOOLING_DIR, "typescript.js")
-  : path.join(homeDir, ".cache", "qa-ecosystem", "tooling", "typescript.js");
 
-if (fs.existsSync(toolingTs)) {
+function tryRequire(p) {
   try {
-    ts = require(toolingTs);
-  } catch (_) {}
-}
-
-if (!ts) {
-  try {
-    ts = require("./vendor/typescript.js");
-  } catch (e1) {
-    try {
-      ts = require("typescript");
-    } catch (e2) {
-      console.error("TypeScript compiler API not found");
-      process.exit(1);
-    }
+    return require(p);
+  } catch (_) {
+    return null;
   }
 }
+
+function resolveTypeScript() {
+  if (ts) return ts;
+  const toolingTs = process.env.QA_TOOLING_DIR
+    ? path.join(process.env.QA_TOOLING_DIR, "typescript.js")
+    : path.join(homeDir, ".cache", "qa-ecosystem", "tooling", "typescript.js");
+
+  ts = tryRequire(toolingTs);
+  if (ts) return ts;
+
+  const vendorTs = path.join(__dirname, "vendor", "typescript.js");
+  ts = tryRequire(vendorTs);
+  if (ts) return ts;
+
+  return null;
+}
+
+resolveTypeScript();
 
 const SKIP_DIRS = new Set([
   "node_modules",
@@ -65,7 +69,8 @@ function isTestPath(relPath) {
 function collectSourceFiles(rootDir, onlyPaths = null) {
   const files = [];
   function walk(currentDir) {
-    const entries = fs.readdirSync(currentDir, { withFileTypes: true });
+    const rawEntries = fs.readdirSync(currentDir, { withFileTypes: true });
+    const entries = rawEntries.slice().sort((a, b) => a.name.localeCompare(b.name));
     for (const entry of entries) {
       if (entry.isDirectory()) {
         if (SKIP_DIRS.has(entry.name)) continue;
@@ -82,6 +87,7 @@ function collectSourceFiles(rootDir, onlyPaths = null) {
   if (fs.existsSync(rootDir)) {
     walk(rootDir);
   }
+  files.sort((a, b) => a.rel.localeCompare(b.rel));
   return files;
 }
 
@@ -103,32 +109,9 @@ function isSecretEnvName(name) {
   return SECRET_ENV_FRAGMENTS.some((frag) => upper.includes(frag)) || upper.includes("KEY");
 }
 
-function analyzeSourceFile(fileInfo, sf, allTestHelpers) {
-  const weakTests = [];
-  const sableFindings = [];
-  const relPath = fileInfo.rel;
-
-  let hasMockSetup = false;
+function collectDeclaredHelpers(sf) {
   const declaredHelpers = new Set();
-
-  // First pass: look for mock frameworks, helpers, and test definitions
-  function firstPass(node) {
-    // Check mock setups: vi.mock, jest.mock, msw, nock
-    if (ts.isCallExpression(node)) {
-      const text = node.expression.getText(sf);
-      if (
-        text.includes("vi.mock") ||
-        text.includes("jest.mock") ||
-        text.includes("nock") ||
-        text.includes("server.use") ||
-        text.includes("mockResolvedValue") ||
-        text.includes("mockReturnValue")
-      ) {
-        hasMockSetup = true;
-      }
-    }
-
-    // Check helper functions with assertions
+  function visit(node) {
     if (
       ts.isFunctionDeclaration(node) ||
       ts.isFunctionExpression(node) ||
@@ -154,7 +137,7 @@ function analyzeSourceFile(fileInfo, sf, allTestHelpers) {
               hasAssert = true;
             }
           }
-          ts.forEachChild(n, findAssert);
+          if (!hasAssert) ts.forEachChild(n, findAssert);
         }
         findAssert(node);
         if (hasAssert) {
@@ -162,10 +145,39 @@ function analyzeSourceFile(fileInfo, sf, allTestHelpers) {
         }
       }
     }
-
-    ts.forEachChild(node, firstPass);
+    ts.forEachChild(node, visit);
   }
-  firstPass(sf);
+  visit(sf);
+  return declaredHelpers;
+}
+
+function analyzeSourceFile(fileInfo, sf, allTestHelpers) {
+  const weakTests = [];
+  const sableFindings = [];
+  const relPath = fileInfo.rel;
+
+  let hasMockSetup = false;
+  const declaredHelpers = collectDeclaredHelpers(sf);
+
+  // Look for mock frameworks
+  function checkMocks(node) {
+    // Check mock setups: vi.mock, jest.mock, msw, nock
+    if (ts.isCallExpression(node)) {
+      const text = node.expression.getText(sf);
+      if (
+        text.includes("vi.mock") ||
+        text.includes("jest.mock") ||
+        text.includes("nock") ||
+        text.includes("server.use") ||
+        text.includes("mockResolvedValue") ||
+        text.includes("mockReturnValue")
+      ) {
+        hasMockSetup = true;
+      }
+    }
+    ts.forEachChild(node, checkMocks);
+  }
+  checkMocks(sf);
 
   // Helper check
   function isAssertionCall(callNode) {
@@ -271,33 +283,42 @@ function analyzeSourceFile(fileInfo, sf, allTestHelpers) {
 
     // Analyze body of callback
     let assertionCalls = [];
+    let assertionsInsideSwallowedTry = [];
+    let assertionsOutsideSwallowedTry = [];
+    let swallowedTryStatements = [];
     let tautologyCount = 0;
     let snapshotCount = 0;
     let trivialObjectAssertCount = 0;
-    let hasSwallowedCatch = false;
     let localVars = new Map(); // name -> { isConstant: bool, isMock: bool }
     let callsOutsideExpect = 0;
+    let activeSwallowedTryDepth = 0;
+
+    function isCatchSwallowing(catchClause) {
+      if (!catchClause || !catchClause.block) return true;
+      let rethrowsOrFails = false;
+      function check(n) {
+        if (ts.isThrowStatement(n)) rethrowsOrFails = true;
+        if (ts.isCallExpression(n)) {
+          const ct = n.expression.getText(sf);
+          if (ct.includes("assert.fail") || ct.includes("expect.fail")) {
+            rethrowsOrFails = true;
+          }
+        }
+        if (!rethrowsOrFails) ts.forEachChild(n, check);
+      }
+      check(catchClause.block);
+      return !rethrowsOrFails;
+    }
 
     // Inspect statements
     function analyzeBody(node) {
+      let enteredSwallowedTry = false;
       // Swallowed catch
       if (ts.isTryStatement(node)) {
-        if (node.catchClause) {
-          const catchBlock = node.catchClause.block;
-          const stmts = catchBlock.statements;
-          let rethrowsOrFails = false;
-          for (const s of stmts) {
-            if (ts.isThrowStatement(s)) rethrowsOrFails = true;
-            if (ts.isExpressionStatement(s) && ts.isCallExpression(s.expression)) {
-              const ct = s.expression.getText(sf);
-              if (ct.includes("assert.fail") || ct.includes("expect.fail")) {
-                rethrowsOrFails = true;
-              }
-            }
-          }
-          if (!rethrowsOrFails) {
-            hasSwallowedCatch = true;
-          }
+        if (node.catchClause && isCatchSwallowing(node.catchClause)) {
+          swallowedTryStatements.push(node);
+          enteredSwallowedTry = true;
+          activeSwallowedTryDepth++;
         }
       }
 
@@ -309,7 +330,7 @@ function analyzeSourceFile(fileInfo, sf, allTestHelpers) {
             if (catchArg && (ts.isArrowFunction(catchArg) || ts.isFunctionExpression(catchArg))) {
               const body = catchArg.body;
               if (ts.isBlock(body)) {
-                if (body.statements.length === 0) hasSwallowedCatch = true;
+                if (body.statements.length === 0) swallowedTryStatements.push(node);
               }
             }
           }
@@ -335,6 +356,11 @@ function analyzeSourceFile(fileInfo, sf, allTestHelpers) {
       if (ts.isCallExpression(node)) {
         if (isAssertionCall(node)) {
           assertionCalls.push(node);
+          if (activeSwallowedTryDepth > 0) {
+            assertionsInsideSwallowedTry.push(node);
+          } else {
+            assertionsOutsideSwallowedTry.push(node);
+          }
           const fullText = node.getText(sf);
 
           // Check tautology: expect(true).toBe(true), expect(1).toBe(1), expect(x).toBe(x)
@@ -387,8 +413,17 @@ function analyzeSourceFile(fileInfo, sf, allTestHelpers) {
       }
 
       ts.forEachChild(node, analyzeBody);
+      if (enteredSwallowedTry) {
+        activeSwallowedTryDepth--;
+      }
     }
     analyzeBody(callback);
+
+    const hasSwallowedCatch = (
+      swallowedTryStatements.length > 0 &&
+      assertionsOutsideSwallowedTry.length === 0 &&
+      (assertionsInsideSwallowedTry.length > 0 || assertionCalls.length === 0)
+    );
 
     if (hasSwallowedCatch) {
       weakTests.push({
@@ -651,30 +686,37 @@ function main() {
     }
   }
 
+  if (!resolveTypeScript()) {
+    console.error("TypeScript compiler API not found in QA tooling or vendor");
+    process.exit(1);
+  }
+
   const files = collectSourceFiles(projectDir, onlyPaths);
   const allWeakTests = [];
   const allSableFindings = [];
   const globalHelpers = new Set();
 
-  // First collect helpers across all files
+  // Pass 1: Parse all files and collect declared assertion helpers across all files
   const parsedFiles = [];
   for (const f of files) {
     try {
       const code = fs.readFileSync(f.full, "utf-8");
       const sf = ts.createSourceFile(f.rel, code, ts.ScriptTarget.Latest, true);
       parsedFiles.push({ fileInfo: f, sf });
+      const helpers = collectDeclaredHelpers(sf);
+      for (const h of helpers) globalHelpers.add(h);
     } catch (err) {
       // ignore read/parse errors
     }
   }
 
+  // Pass 2: Analyze each file using the complete set of globalHelpers
   for (const { fileInfo, sf } of parsedFiles) {
-    const { weakTests, sableFindings, helpers } = analyzeSourceFile(
+    const { weakTests, sableFindings } = analyzeSourceFile(
       fileInfo,
       sf,
       globalHelpers
     );
-    for (const h of helpers) globalHelpers.add(h);
     allWeakTests.push(...weakTests);
     allSableFindings.push(...sableFindings);
   }

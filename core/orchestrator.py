@@ -452,11 +452,14 @@ class Vesper:
                 return
 
         node_engine_blocked = False
-        from core.toolchain import check_node_engine, detect_languages
+        from core.toolchain import check_node_engine, detect_languages, ensure_ts_tooling
         if not blocked_reason and "ts" in detect_languages(isolated):
             node_ok, node_msg = check_node_engine(isolated)
             if not node_ok:
                 blocked_reason = f"node engine precondition: {node_msg}"
+                node_engine_blocked = True
+            elif not ensure_ts_tooling():
+                blocked_reason = "missing TypeScript tooling (pinned typescript.js not found in QA cache)"
                 node_engine_blocked = True
 
         if blocked_reason:

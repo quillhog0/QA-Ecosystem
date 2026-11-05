@@ -9,7 +9,7 @@ import re
 from typing import Any
 
 from agents.adapters import complete_with_status, format_llm_error, load_prompt, parse_yaml_block
-from agents.inventory import doc_tokens, list_python, public_names, split_code_and_tests
+from agents.inventory import doc_tokens, list_python, list_sources, public_names, split_code_and_tests
 from core.packets import Scenario, TestPlan
 
 
@@ -99,6 +99,27 @@ def _collect_test_functions(test_files: list[Path], project_root: Path) -> list[
             rel = str(path.relative_to(project_root)).replace("\\", "/")
         except ValueError:
             rel = path.name
+        suffix = path.suffix.lower()
+        if suffix in {".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"}:
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+                lines = text.splitlines()
+            except OSError:
+                continue
+            test_decl_re = re.compile(
+                r"""(?:^|\s)(?:it|test)(?:\.(?:only|skip|concurrent|each[^\)]*\)))?\s*\(\s*(?P<quote>["'`])(?P<title>.*?)(?P=quote)""",
+                re.MULTILINE,
+            )
+            for m in test_decl_re.finditer(text):
+                title = m.group("title").strip()
+                if not title:
+                    continue
+                start_line = text[:m.start()].count("\n")
+                end_line = min(start_line + 40, len(lines))
+                body_text = "\n".join(lines[start_line:end_line])
+                test_id = f"{rel}::{title}"
+                tests.append((test_id, title, body_text))
+            continue
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
             lines = text.splitlines()
@@ -134,7 +155,7 @@ def _find_covering_tests_scored(
 
     scored = []
     for test_id, func_name, body in tests:
-        name_parts = [p.lower() for p in func_name.split("_") if p.lower() != "test"]
+        name_parts = [p.lower() for p in re.split(r"[_\s]+", func_name) if p.lower() not in {"test", "it"}]
         name_stems = set()
         for p in name_parts:
             if len(p) >= 3 and p not in STOP_WORDS:
@@ -174,12 +195,16 @@ def _heuristic_plan(
     gaps: list[str],
     claims: list[str],
 ) -> TestPlan:
-    py_files = list_python(project_root)
-    code_files, test_files = split_code_and_tests(py_files, project_root)
+    sources = list_sources(project_root)
+    code_files, test_files = split_code_and_tests(sources, project_root)
     tokens, excerpt = doc_tokens(docs_root)
     scenarios: list[Scenario] = []
     tests = _collect_test_functions(test_files, project_root)
     common_body_words = _compute_common_body_words(tests)
+
+    has_ts = any(p.suffix.lower() in {".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"} for p in sources)
+    has_py = any(p.suffix.lower() == ".py" for p in sources)
+    is_pure_ts = has_ts and not has_py
 
     for i, claim in enumerate(claims, start=1):
         covered, top_score = _find_covering_tests_scored(claim, tests, common_body_words)
@@ -199,16 +224,19 @@ def _heuristic_plan(
         publics.extend(public_names(path))
 
     if test_files:
+        runner_title = "Existing test suite completes" if is_pure_ts else "Existing pytest suite completes"
+        suite_step = "Run the isolated test suite against the project copy" if is_pure_ts else "Run the isolated pytest suite against the project copy"
+        collect_acc = "test runner collects more than 0 tests" if is_pure_ts else "pytest collects more than 0 tests"
         scenarios.append(
             Scenario(
                 id="S1",
-                title="Existing pytest suite completes",
+                title=runner_title,
                 steps=[
-                    "Run the isolated pytest suite against the project copy",
+                    suite_step,
                     "Record collected count, exit code, and failures",
                 ],
                 acceptance=[
-                    "pytest collects more than 0 tests",
+                    collect_acc,
                     "exit code is 0 when no assertion failures are expected by docs",
                 ],
                 negative=False,
@@ -251,12 +279,17 @@ def _heuristic_plan(
             )
         )
     elif test_files:
+        err_step = (
+            "If a test fails, the test suite must report failures rather than hiding the error"
+            if is_pure_ts
+            else "If a test fails, pytest must report failed > 0 rather than hiding the error"
+        )
         scenarios.append(
             Scenario(
                 id="S3",
                 title="Suite reports failures instead of silent collection errors",
                 steps=[
-                    "If a test fails, pytest must report failed > 0 rather than hiding the error",
+                    err_step,
                 ],
                 acceptance=[
                     "errors count is 0 unless import of the project under test is broken",
@@ -269,18 +302,22 @@ def _heuristic_plan(
         scenarios.append(
             Scenario(
                 id="S1",
-                title="Establish a runnable pytest surface",
+                title="Establish a runnable test surface",
                 steps=["Discover tests in the isolated copy"],
                 acceptance=["collected > 0"],
                 negative=False,
             )
         )
 
-    notes = "Scenarios map to the existing pytest surface; no new files are required."
+    notes = (
+        "Scenarios map to the existing test surface; no new files are required."
+        if is_pure_ts
+        else "Scenarios map to the existing pytest surface; no new files are required."
+    )
     if tokens:
         notes += " Docs headings considered: " + ", ".join(tokens[:8]) + "."
     assumptions = [
-        "Default language is Python + pytest",
+        "Default language is TypeScript / JavaScript" if is_pure_ts else "Default language is Python + pytest",
         "Execution happens only in the isolated copy",
         "This plan does not claim coverage percentage",
     ]

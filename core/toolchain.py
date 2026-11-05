@@ -245,22 +245,39 @@ def typecheck_project(project_root: Path, node_bin: str | None=None) -> list[dic
             errors.append({'file': file_rel, 'line': lineno, 'evidence': f'{file_rel}:{lineno} {msg}', 'message': msg})
     return errors
 
-def ensure_ts_tooling() -> Path:
-    """Ensure pinned TypeScript compiler API is cached in ~/.cache/qa-ecosystem/tooling/."""
-    override = os.environ.get('QA_TOOLING_DIR')
+PINNED_TS_SHA256 = "3ae902c92cc44dace175c0e69e13a4b0899f6983c6121d76b9ab8dd5795e7675"
+
+
+def ensure_ts_tooling(project_root: Path | None = None) -> Path | None:
+    """Ensure pinned TypeScript compiler API is cached in ~/.cache/qa-ecosystem/tooling/.
+
+    SECURITY: Only QA-controlled sources (QA_TOOLING_DIR or ~/.cache/qa-ecosystem/tooling
+    populated from QA's own pinned vendor artifact) are permitted. The tested project's
+    node_modules or arbitrary external paths must NEVER supply code executed by QA tooling.
+    """
+    override = os.environ.get("QA_TOOLING_DIR")
     if override:
         tooling_dir = Path(override).expanduser()
     else:
-        xdg = os.environ.get('XDG_CACHE_HOME')
-        base = Path(xdg).expanduser() if xdg else Path.home() / '.cache'
-        tooling_dir = base / 'qa-ecosystem' / 'tooling'
+        xdg = os.environ.get("XDG_CACHE_HOME")
+        base = Path(xdg).expanduser() if xdg else Path.home() / ".cache"
+        tooling_dir = base / "qa-ecosystem" / "tooling"
     tooling_dir.mkdir(parents=True, exist_ok=True)
-    target_ts = tooling_dir / 'typescript.js'
+    target_ts = tooling_dir / "typescript.js"
+    sha_file = tooling_dir / "typescript.sha256"
+
     if target_ts.is_file() and target_ts.stat().st_size > 1000:
-        return tooling_dir
-    vendor_ts = Path(__file__).resolve().parents[1] / 'agents' / 'vendor' / 'typescript.js'
+        actual_sha = hashlib.sha256(target_ts.read_bytes()).hexdigest()
+        expected_sha = sha_file.read_text(encoding="utf-8").strip() if sha_file.is_file() else PINNED_TS_SHA256
+        if actual_sha == expected_sha or actual_sha == PINNED_TS_SHA256:
+            return tooling_dir
+
+    vendor_ts = Path(__file__).resolve().parents[1] / "agents" / "vendor" / "typescript.js"
     if vendor_ts.is_file():
-        sha = hashlib.sha256(vendor_ts.read_bytes()).hexdigest()
-        shutil.copy2(vendor_ts, target_ts)
-        (tooling_dir / 'typescript.sha256').write_text(sha, encoding='utf-8')
-    return tooling_dir
+        actual_sha = hashlib.sha256(vendor_ts.read_bytes()).hexdigest()
+        if actual_sha == PINNED_TS_SHA256:
+            shutil.copy2(vendor_ts, target_ts)
+            sha_file.write_text(actual_sha, encoding="utf-8")
+            return tooling_dir
+
+    return None

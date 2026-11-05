@@ -232,7 +232,7 @@ def _public_names_ts(text: str) -> list[str]:
 
 def public_names(py_file: Path) -> list[str]:
     suffix = py_file.suffix.lower()
-    if suffix in {".ts", ".tsx", ".mjs", ".cjs", ".jsx"}:
+    if suffix in {".ts", ".tsx", ".mjs", ".cjs", ".jsx", ".js"}:
         try:
             text = py_file.read_text(encoding="utf-8", errors="replace")
         except OSError:

@@ -1,6 +1,7 @@
 import ast
 import builtins
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -435,12 +436,20 @@ def _detect_ts_weak_tests(
     if not shutil.which(node_bin) and not Path(node_bin).is_file():
         return {}
 
+    from core.toolchain import ensure_ts_tooling
+    tooling_dir = ensure_ts_tooling()
+    if not tooling_dir or not (tooling_dir / "typescript.js").is_file():
+        return {}
+
     cmd = [str(node_bin), str(analyzer_js), "--project", str(project_root)]
     if only_paths:
         cmd.extend(["--only-paths", ",".join(only_paths)])
 
+    env = dict(os.environ)
+    env["QA_TOOLING_DIR"] = str(tooling_dir)
+
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60, check=False)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60, check=False, env=env)
         if proc.returncode == 0 and proc.stdout.strip():
             data = json.loads(proc.stdout)
             results: dict[str, str] = {}
@@ -542,9 +551,9 @@ def review_plan(
     for cid in claims_covered_by_weak:
         gaps.append(f"claim {cid} is covered only by weak test (not counted as covered)")
 
-    for tid, reason in weak_tests.items():
+    for tid in sorted(weak_tests):
         if "::" in tid:
-            gaps.append(f"weak test: {tid} ({reason})")
+            gaps.append(f"weak test: {tid} ({weak_tests[tid]})")
 
     veto_uncovered = bool((config.get("riley") or {}).get("veto_on_uncovered_claims", False))
     uncovered_claims = [s.id for s in plan.scenarios if s.id.startswith("C") and not s.covered_by]
@@ -751,9 +760,9 @@ def review_results(
     for cid in claims_covered_by_weak:
         gaps.append(f"claim {cid} is covered only by weak test (not counted as covered)")
 
-    for tid, reason in weak_tests.items():
+    for tid in sorted(weak_tests):
         if "::" in tid:
-            gaps.append(f"weak test: {tid} ({reason})")
+            gaps.append(f"weak test: {tid} ({weak_tests[tid]})")
 
     veto_uncovered = bool((config.get("riley") or {}).get("veto_on_uncovered_claims", False))
     uncovered_claims = [s.id for s in plan.scenarios if s.id.startswith("C") and not s.covered_by]
