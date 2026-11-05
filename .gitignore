@@ -10,7 +10,6 @@ reports/
 dist/
 build/
 *.egg-info/
-agents/vendor/typescript.js
 .env.*
 !benchmark/fixtures/**/.env*
 *.bundle

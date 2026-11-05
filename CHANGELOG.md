@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.3 (2026-11-05)
+
+### Fixed
+- **BLOCKED_ENV "missing TypeScript tooling" on every fresh runner** (regression in 0.4.2): the pinned QA artifact `agents/vendor/typescript.js` was git-ignored and therefore absent from the released action, so `ensure_ts_tooling` could never populate `~/.cache/qa-ecosystem/tooling` and every TypeScript project stopped with `BLOCKED_ENV` before any test ran. The pinned file (SHA-256 `3ae902c9…e7675`, Apache-2.0, see `agents/vendor/LICENSE`) is now tracked.
+- **Summary language fallback**: when a run produced no execution data (e.g. `BLOCKED_ENV`), the summary reported `Languages: python` regardless of the project or `--languages`. It now reports the detected/selected languages of the tested tree.
+
+### Added
+- Regression tests `tests/unit/test_vendor_ts_tooling.py`: vendor artifact is tracked and matches the pin; `ensure_ts_tooling` works with an empty HOME and no `QA_TOOLING_DIR`; summary language fallback.
+
 ## 0.4.2 (2026-11-05)
 
 ### Fixed

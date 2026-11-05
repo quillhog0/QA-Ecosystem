@@ -1,6 +1,6 @@
 # QA Agent Ecosystem
 
-Version 0.4.2. See CHANGELOG.md.
+Version 0.4.3. See CHANGELOG.md.
 
 Deterministic QA control plane with six roles. Give it documentation plus a Python, TypeScript, or JavaScript project (including mixed projects); it walks a fixed test cycle in an **isolated copy** and returns a structured report with a verdict: `CLEAR`, `BLOCKED_ENV`, `VETO`, or `ESCALATE`.
 
@@ -206,7 +206,7 @@ Add QA Ecosystem as a gate in any repository's workflow. The job fails when the 
 
 ```yaml
 - uses: actions/checkout@v4
-- uses: quillhog0/QA-Ecosystem@v0.4.2
+- uses: quillhog0/QA-Ecosystem@v0.4.3
   with:
     project: .
     docs: docs

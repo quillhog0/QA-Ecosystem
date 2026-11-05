@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -139,6 +140,35 @@ def render_markdown(report: FinalReport) -> str:
     return "\n".join(lines)
 
 
+def _fallback_languages(report: FinalReport | dict[str, Any]) -> list[str]:
+    """Languages for a run that produced no execution data (e.g. BLOCKED_ENV).
+
+    Uses the selected/detected languages of the tested tree; never assumes python.
+    """
+    from core.toolchain import detect_languages
+
+    def _get(name: str) -> str:
+        if isinstance(report, dict):
+            return str(report.get(name) or "")
+        return str(getattr(report, name, "") or "")
+
+    for name in ("isolated_root", "project_root"):
+        root = _get(name)
+        if root and Path(root).is_dir():
+            try:
+                detected = detect_languages(Path(root))
+            except Exception:
+                detected = []
+            if detected:
+                return detected
+    selection = os.environ.get("QA_LANGUAGES", "auto").strip().lower()
+    if selection == "both":
+        return ["python", "ts"]
+    if selection in ("python", "ts"):
+        return [selection]
+    return ["unknown"]
+
+
 def render_summary_markdown(report: FinalReport | dict[str, Any]) -> str:
     """Buyer-safe summary: max ~40 lines, completely scrubbed of identity/personal/host data."""
     import platform
@@ -159,7 +189,7 @@ def render_summary_markdown(report: FinalReport | dict[str, Any]) -> str:
         if lang:
             languages = [lang]
         else:
-            languages = ["python"]
+            languages = _fallback_languages(report)
 
     os_name = platform.system()
     py_ver = sys.version.split()[0]
