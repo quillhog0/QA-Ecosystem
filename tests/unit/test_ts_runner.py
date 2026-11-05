@@ -727,5 +727,46 @@ def test_cache_rmtree_and_copytree_flags(tmp_path: Path, monkeypatch):
         assert mock_cp.call_args[1].get("symlinks") is True
 
 
+def test_run_ts_tests_flaky_rerun(tmp_path: Path):
+    """A TS test that fails on the first run and passes on rerun is marked FLAKY."""
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    work = tmp_path / "work"
+    work.mkdir()
+    vitest_bin = proj / "node_modules" / ".bin" / "vitest"
+    vitest_bin.parent.mkdir(parents=True)
+    vitest_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+
+    call_idx = {"n": 0}
+
+    def fake_vitest_flaky(*args, **kwargs):
+        cmd = args[0]
+        if cmd and "bwrap" in str(cmd[0]) and "true" in cmd:
+            return MagicMock(returncode=0, stdout="", stderr="")
+        call_idx["n"] += 1
+        if call_idx["n"] == 1:
+            results_json = work / "pytest_tmp" / "ts-results.json"
+            results_json.write_text(
+                '{"numTotalTests": 1, "numPassedTests": 0, "numFailedTests": 1, "numPendingTests": 0, '
+                '"testResults": [{"name": "tests/flaky.test.ts", "assertionResults": '
+                '[{"title": "flaky spec", "ancestorTitles": [], "status": "failed", "failureMessages": ["transient error"]}]}]}',
+                encoding="utf-8",
+            )
+            return MagicMock(returncode=1, stdout="", stderr="")
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    with patch("core.ts_runner.detect_ts_runner", return_value={"runner": "vitest"}), \
+         patch("subprocess.run", side_effect=fake_vitest_flaky):
+        res = run_ts_tests(proj, work_dir=work, config={"sandbox": {"mode": "off"}})
+        assert res.flaky == 1
+        assert res.failed == 0
+        assert res.passed == 1
+        assert res.exit_code == 0
+        assert res.status == "FLAKY"
+        assert len(res.flaky_tests) == 1
+        assert res.flaky_tests[0]["node"] == "tests/flaky.test.ts::flaky spec"
+
+
+
 
 

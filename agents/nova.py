@@ -99,8 +99,10 @@ def execute(
 
     # Merged result for mixed repo
     merged_failures = []
+    merged_flaky_tests = []
     for r in results:
         merged_failures.extend(r.failures)
+        merged_flaky_tests.extend(r.flaky_tests)
 
     merged = ExecutionResult(
         collected=sum(r.collected for r in results),
@@ -110,6 +112,8 @@ def execute(
         errors=sum(r.errors for r in results),
         product_failed=sum(r.product_failed for r in results),
         environment_failed=sum(r.environment_failed for r in results),
+        flaky=sum(r.flaky for r in results),
+        flaky_tests=merged_flaky_tests,
         failures=merged_failures,
         exit_code=max(r.exit_code for r in results),
         duration_seconds=round(sum(r.duration_seconds for r in results), 3),

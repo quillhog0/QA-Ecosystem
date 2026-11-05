@@ -32,6 +32,9 @@ DEFAULT_MAX_DAYS = 90
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
+VALID_EXCEPTION_KINDS = ("false-positive", "accepted-risk")
+
+
 class ExceptionsConfigError(Exception):
     """Raised when an exceptions file is present but invalid. Never ignored."""
 
@@ -44,6 +47,8 @@ class ExceptionEntry:
     added_by: str = ""
     allow_p0: bool = False
     is_in_repo: bool = False
+    rule: str = ""
+    kind: str = "accepted-risk"
 
     def is_expired(self, today: date) -> bool:
         return self.expires < today
@@ -139,6 +144,12 @@ def parse_entries(loaded: Any, *, today: date, max_days: int = DEFAULT_MAX_DAYS)
             )
         allow_p0 = bool(item.get("allow_p0", False))
         added_by = str(item.get("added_by") or "").strip()
+        rule = str(item.get("rule", "")).strip()
+        kind = str(item.get("kind") or "accepted-risk").strip().lower()
+        if kind not in VALID_EXCEPTION_KINDS:
+            raise ExceptionsConfigError(
+                f"exception #{index} (match={match!r}): 'kind' must be one of {VALID_EXCEPTION_KINDS}, got {kind!r}"
+            )
         entries.append(
             ExceptionEntry(
                 match=match,
@@ -146,6 +157,8 @@ def parse_entries(loaded: Any, *, today: date, max_days: int = DEFAULT_MAX_DAYS)
                 expires=expires,
                 added_by=added_by,
                 allow_p0=allow_p0,
+                rule=rule,
+                kind=kind,
             )
         )
     return entries
@@ -209,8 +222,13 @@ def load_qa_ignore(
             continue
         fingerprint = str(item.get("fingerprint") or item.get("match") or "").strip()
         reason = str(item.get("reason") or "").strip()
+        rule = str(item.get("rule", "")).strip()
+        kind = str(item.get("kind") or "accepted-risk").strip().lower()
         exp_raw = item.get("expires") or item.get("expiry")
         if not fingerprint:
+            continue
+        if kind not in VALID_EXCEPTION_KINDS:
+            warnings.append(f".qa-ignore entry invalid kind {kind!r}: {fingerprint}")
             continue
         if not reason:
             warnings.append(f".qa-ignore entry missing reason: {fingerprint}")
@@ -240,7 +258,42 @@ def load_qa_ignore(
                 added_by="in-repo .qa-ignore",
                 allow_p0=False,
                 is_in_repo=True,
+                rule=rule,
+                kind=kind,
             )
         )
 
     return entries, warnings
+
+
+def load_baseline(baseline_path: Path | str | None) -> set[str]:
+    """Load recorded finding fingerprints from a baseline JSON file."""
+    import json
+
+    if not baseline_path:
+        return set()
+    p = Path(baseline_path).expanduser()
+    if not p.is_file():
+        raise ExceptionsConfigError(f"baseline file does not exist: {p}")
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise ExceptionsConfigError(f"baseline file is not valid JSON ({p}): {exc}") from exc
+
+    fingerprints: set[str] = set()
+    items: list[Any] = []
+    if isinstance(data, dict):
+        items = data.get("findings") or data.get("fingerprints") or []
+    elif isinstance(data, list):
+        items = data
+    else:
+        raise ExceptionsConfigError(f"baseline file must be a JSON object or array ({p})")
+
+    for item in items:
+        if isinstance(item, str) and item.strip():
+            fingerprints.add(item.strip())
+        elif isinstance(item, dict):
+            fp = str(item.get("fingerprint") or item.get("match") or "").strip()
+            if fp:
+                fingerprints.add(fp)
+    return fingerprints

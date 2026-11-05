@@ -1,0 +1,4 @@
+[project]
+name = "order-service"
+version = "0.1.0"
+

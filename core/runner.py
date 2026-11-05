@@ -338,6 +338,13 @@ def run_pytest(
     env = sanitized_env(allow_network=allow_network)
     env["HOME"] = str(work_dir / "home")
     Path(env["HOME"]).mkdir(parents=True, exist_ok=True)
+    if (isolated_root / "core" / "toolchain.py").is_file():
+        for fname in ("typescript.js", "typescript.sha256"):
+            host_f = Path.home() / ".cache" / "qa-ecosystem" / "tooling" / fname
+            if host_f.is_file():
+                dst_f = Path(env["HOME"]) / ".cache" / "qa-ecosystem" / "tooling" / fname
+                os.makedirs(dst_f.parent, exist_ok=bool(dst_f))
+                dst_f.write_bytes(host_f.read_bytes())
     extra_path = str(isolated_root)
     work_path = str(work_dir)
     # work, then the copy root, then the copy's own import roots (src-layout).
@@ -378,6 +385,86 @@ def run_pytest(
         # Nothing proved any failure environmental, so every one of them counts
         # against the project - the conservative default from Task 8b.
         product_failed, environment_failed = failed, 0
+
+    flaky_count = 0
+    flaky_tests: list[dict[str, Any]] = []
+    is_mutation_run = bool(extra_args and "-x" in extra_args)
+    if all((product_failed, errors == 0, exit_code not in (0, 124), not is_mutation_run, failures)):
+        product_nodes = [
+            str(f.get("node"))
+            for f in failures
+            if f.get("classification", "product") == "product"
+        ]
+        if product_nodes:
+            rerun_junit = work_dir / "pytest_tmp" / "junit" / "rerun_report.xml"
+            if rerun_junit.is_file():
+                rerun_junit.unlink()
+            rerun_cmd = [
+                str(python) if python else sys.executable,
+                "-m",
+                "pytest",
+                *product_nodes,
+                "-v",
+                "-rfE",
+                "--tb=short",
+                "-o",
+                f"cache_dir={cache_dir}",
+                "--basetemp",
+                str(basetemp / "rerun"),
+                "--junitxml",
+                str(rerun_junit),
+            ]
+            if extra_args:
+                rerun_cmd.extend(extra_args)
+            if (work_dir / "_sable_guard.py").is_file() and "_sable_guard" not in rerun_cmd:
+                rerun_cmd.extend(["-p", "_sable_guard"])
+            rerun_exec = (
+                wrap_command(
+                    rerun_cmd,
+                    isolated_root=isolated_root,
+                    work_dir=work_dir,
+                    python=python,
+                    allow_network=allow_network,
+                )
+                if sandbox_enabled
+                else rerun_cmd
+            )
+            try:
+                rerun_kwargs: dict[str, Any] = {
+                    "cwd": str(isolated_root),
+                    "env": env,
+                    "capture_output": bool(rerun_exec),
+                    "text": bool(rerun_exec),
+                    "timeout": timeout,
+                    "check": not bool(rerun_exec),
+                }
+                rerun_proc = subprocess.run(rerun_exec, **rerun_kwargs)
+                still_failing_nodes: set[str] | None = (
+                    set()
+                    if not rerun_proc.returncode
+                    else ({rf.node for rf in parse_failures(rerun_junit)} if rerun_junit.is_file() else None)
+                )
+                if still_failing_nodes is not None:
+                    remaining_failures: list[dict[str, Any]] = []
+                    for f in failures:
+                        node = str(f.get("node", ""))
+                        if node not in still_failing_nodes:
+                            flaky_entry = dict(f)
+                            flaky_entry["classification"] = "flaky"
+                            flaky_tests.append(flaky_entry)
+                            flaky_count += 1
+                        else:
+                            remaining_failures.append(f)
+                    if flaky_count:
+                        failures = remaining_failures
+                        failed = max(0, failed - flaky_count)
+                        product_failed = max(0, product_failed - flaky_count)
+                        passed += flaky_count
+                        if not failed:
+                            exit_code = 0
+            except subprocess.TimeoutExpired:
+                pass
+
     return ExecutionResult(
         collected=collected,
         passed=passed,
@@ -386,6 +473,8 @@ def run_pytest(
         errors=errors,
         product_failed=product_failed,
         environment_failed=environment_failed,
+        flaky=flaky_count,
+        flaky_tests=flaky_tests,
         failures=failures,
         exit_code=exit_code,
         duration_seconds=round(duration, 3),

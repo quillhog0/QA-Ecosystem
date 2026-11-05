@@ -21,7 +21,19 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 PRIORITY_LEVELS = ("P0", "P1", "P2", "P3")
-FINDING_TYPES = ("drift", "claim", "weak_test", "policy", "test_failure", "environment")
+FINDING_TYPES = (
+    "drift",
+    "claim",
+    "weak_test",
+    "policy",
+    "test_failure",
+    "environment",
+    "identity_leak",
+    "clean_install",
+    "deleted_tests",
+)
+FINDING_CLASSES = ("hard", "heuristic")
+FINDING_CONFIDENCES = ("high", "low")
 FINDING_AGENTS = ("lexi", "aria", "riley", "sable", "nova")
 VERDICT_EFFECTS = ("VETO", "WARN", "INFO")
 
@@ -170,7 +182,16 @@ class _FindingBuilder:
         code_file: str | None = None,
         code_line: int | None = None,
         term: str | None = None,
+        fclass: str = "heuristic",
+        confidence: str = "high",
     ) -> None:
+        if fclass not in FINDING_CLASSES:
+            fclass = "heuristic"
+        if confidence not in FINDING_CONFIDENCES:
+            confidence = "high"
+        # Rule: Low-confidence heuristic findings must be capped at P2 (never P1/P0).
+        if fclass == "heuristic" and confidence == "low" and priority in ("P0", "P1"):
+            priority = "P2"
         key = (agent, ftype, file, line, _one_line(evidence))
         if key in self._seen:
             return
@@ -185,6 +206,8 @@ class _FindingBuilder:
                 "code_line": code_line,
                 "priority": priority,
                 "type": ftype,
+                "class": fclass,
+                "confidence": confidence,
                 "fingerprint": fingerprint_for(agent, ftype, file, term),
                 "customer_impact": impact,
                 "evidence": _one_line(evidence),
@@ -227,6 +250,9 @@ def _collect_lexi(builder: _FindingBuilder, drift: dict[str, Any] | None) -> Non
         message = str(finding.get("message") or "")
         severity = str(finding.get("severity") or "medium")
         priority = _drift_priority(severity)
+        fclass = str(finding.get("class", "heuristic"))
+        default_conf = "high" if severity.lower() == "high" else "low"
+        confidence = str(finding.get("confidence", default_conf))
         if kind == "missing_tests":
             file = ident if ident.endswith(".py") or "/" in ident else None
             code_file = finding.get("code_file") or None
@@ -242,6 +268,8 @@ def _collect_lexi(builder: _FindingBuilder, drift: dict[str, Any] | None) -> Non
                 code_file=code_file,
                 code_line=code_line,
                 term=ident,
+                fclass=fclass,
+                confidence=confidence,
             )
             continue
         docs_file = finding.get("docs_file") or None
@@ -269,6 +297,8 @@ def _collect_lexi(builder: _FindingBuilder, drift: dict[str, Any] | None) -> Non
             code_file=code_file,
             code_line=code_line,
             term=ident,
+            fclass=fclass,
+            confidence=confidence,
         )
 
 
@@ -292,6 +322,8 @@ def _collect_aria(builder: _FindingBuilder, plan: dict[str, Any] | None) -> None
                 "and asserts the documented outcome; it fails today."
             ),
             term=sid,
+            fclass="heuristic",
+            confidence="low",
         )
 
 
@@ -303,7 +335,8 @@ def _collect_riley(builder: _FindingBuilder, review: dict[str, Any] | None, agen
             rest = gap[len(_WEAK_TEST_PREFIX):].strip()
             node = rest.split(" ", 1)[0]
             file_name, line = _node_location(node)
-            priority = "P1" if "[P1]" in gap else "P2"
+            is_p1 = "[P1]" in gap
+            priority = "P1" if is_p1 else "P2"
             builder.add(
                 agent=agent,
                 ftype="weak_test",
@@ -314,6 +347,8 @@ def _collect_riley(builder: _FindingBuilder, review: dict[str, Any] | None, agen
                 file=file_name,
                 line=line,
                 term=node,
+                fclass="heuristic",
+                confidence="high" if is_p1 else "low",
             )
             continue
         if _CLAIM_WEAK_FRAGMENT in gap or gap.startswith(_CLAIM_UNCOVERED_PREFIXES):
@@ -325,6 +360,8 @@ def _collect_riley(builder: _FindingBuilder, review: dict[str, Any] | None, agen
                 evidence=gap,
                 red_test="Add or strengthen a test that proves the claim and fails when the behaviour regresses.",
                 term=_stable_term(gap),
+                fclass="heuristic",
+                confidence="low",
             )
             continue
         if gap.startswith(RILEY_SKIPPED_PREFIXES):
@@ -337,6 +374,8 @@ def _collect_riley(builder: _FindingBuilder, review: dict[str, Any] | None, agen
             evidence=gap,
             red_test="Close the plan gap with a concrete failing-then-passing scenario before trusting the suite.",
             term=_stable_term(gap),
+            fclass="heuristic",
+            confidence="low",
         )
 
 
@@ -389,6 +428,8 @@ def _collect_sable(builder: _FindingBuilder, policy: dict[str, Any] | None) -> N
                 ),
                 file=_extract_policy_file(evidence) if check_key == "tests_ast_clean" else None,
                 term=check_key,
+                fclass="hard",
+                confidence="high",
             )
         for warning in phase.get("warnings") or []:
             builder.add(
@@ -399,6 +440,8 @@ def _collect_sable(builder: _FindingBuilder, policy: dict[str, Any] | None) -> N
                 evidence=str(warning),
                 red_test="None; informational note about a sandbox-conditional relaxation.",
                 term=_stable_term(str(warning)),
+                fclass="hard",
+                confidence="high",
             )
 
 
@@ -427,7 +470,8 @@ def _collect_nova(builder: _FindingBuilder, execution: dict[str, Any] | None) ->
         message = str(failure.get("message") or "")
         traceback = str(failure.get("traceback") or "")
         file_name, line = _node_location(node, traceback)
-        if str(failure.get("classification") or "product") == "environment":
+        classification = str(failure.get("classification") or "product")
+        if classification == "environment":
             cause = str(failure.get("environment_cause") or message)
             builder.add(
                 agent="nova",
@@ -439,8 +483,25 @@ def _collect_nova(builder: _FindingBuilder, execution: dict[str, Any] | None) ->
                 file=file_name,
                 line=line,
                 term=node,
+                fclass="hard",
+                confidence="high",
             )
             emitted_failure = True
+            continue
+        if classification == "flaky":
+            builder.add(
+                agent="nova",
+                ftype="test_failure",
+                priority="P2",
+                impact="Test failed on first run and passed on rerun (FLAKY), indicating non-deterministic behaviour.",
+                evidence=f"FLAKY: {node} ({message})",
+                red_test=f"Stabilize `{node}` so it passes deterministically on every run.",
+                file=file_name,
+                line=line,
+                term=node,
+                fclass="hard",
+                confidence="high",
+            )
             continue
         impact, priority = _product_impact(node, message)
         evidence = " ".join((message or traceback or node).split())
@@ -454,8 +515,30 @@ def _collect_nova(builder: _FindingBuilder, execution: dict[str, Any] | None) ->
             file=file_name,
             line=line,
             term=node,
+            fclass="hard",
+            confidence="high",
         )
         emitted_failure = True
+    for flaky_item in execution.get("flaky_tests") or []:
+        if not isinstance(flaky_item, dict):
+            continue
+        node = str(flaky_item.get("node") or "unknown test")
+        message = str(flaky_item.get("message", ""))
+        traceback = str(flaky_item.get("traceback", ""))
+        file_name, line = _node_location(node, traceback)
+        builder.add(
+            agent="nova",
+            ftype="test_failure",
+            priority="P2",
+            impact="Test failed on first run and passed on rerun (FLAKY), indicating non-deterministic behaviour.",
+            evidence=f"FLAKY: {node} ({message})",
+            red_test=f"Stabilize `{node}` so it passes deterministically on every run.",
+            file=file_name,
+            line=line,
+            term=node,
+            fclass="hard",
+            confidence="high",
+        )
     failed = _as_int(execution.get("failed"))
     errors = _as_int(execution.get("errors"))
     if failed and not emitted_failure:
@@ -470,6 +553,8 @@ def _collect_nova(builder: _FindingBuilder, execution: dict[str, Any] | None) ->
             evidence=f"pytest exit={execution.get('exit_code')} failed={failed} errors={errors}",
             red_test="Rerun pytest and keep the first failing test red as the regression test.",
             term="__aggregate_failures__",
+            fclass="hard",
+            confidence="high",
         )
     install_status = str(execution.get("install_status") or "")
     if install_status.startswith("pip install failed"):
@@ -481,6 +566,8 @@ def _collect_nova(builder: _FindingBuilder, execution: dict[str, Any] | None) ->
             evidence=install_status,
             red_test="Restore the dependency set and rerun the suite; not a product red test.",
             term="__pip_install_failed__",
+            fclass="hard",
+            confidence="high",
         )
 
 
@@ -507,6 +594,8 @@ def _collect_blocked_env(builder: _FindingBuilder, report: dict[str, Any]) -> No
             evidence=cause,
             red_test="Restore the environment precondition and rerun; not a product red test.",
             term="__blocked_env__",
+            fclass="hard",
+            confidence="high",
         )
 
 
@@ -564,6 +653,8 @@ def _collect_identity(builder: _FindingBuilder, leaks: list[dict[str, Any]] | No
             file=file,
             line=line,
             term=str(leak_type),
+            fclass="hard",
+            confidence="high",
         )
 
 
@@ -580,6 +671,8 @@ def _collect_clean_install(builder: _FindingBuilder, clean_install: dict[str, An
         evidence=f"Install command '{cmd}' failed: {output[:200]}",
         red_test="Fix README installation instructions to match required packages and dependencies.",
         term="clean_install_failure",
+        fclass="hard",
+        confidence="high",
     )
 
 
@@ -593,6 +686,8 @@ def _collect_deleted_tests(builder: _FindingBuilder, deleted_tests: list[str] | 
             evidence=f"deleted test: {test_id}",
             red_test="Restore removed tests or ensure test count does not decrease in PR/diff.",
             term=str(test_id),
+            fclass="hard",
+            confidence="high",
         )
 
 
@@ -602,6 +697,16 @@ def count_by_priority(findings: list[dict[str, Any]]) -> dict[str, int]:
         counts[finding["priority"]] = counts.get(finding["priority"], 0) + 1
     counts["total"] = len(findings)
     return counts
+
+
+def _finding_matches_entry(finding: dict[str, Any], entry: Any) -> bool:
+    fp = str(finding.get("fingerprint", ""))
+    match_val = str(getattr(entry, "match", ""))
+    rule_val = str(getattr(entry, "rule", "")).strip()
+    agent_type = f"{finding.get('agent')}.{finding.get('type')}"
+    rule_prefix = rule_val.split(".")[0]
+    term = fp.split(":", 3)[-1]
+    return all((match_val in (fp, term, str(finding.get("file", ""))), agent_type.startswith(rule_prefix)))
 
 
 def apply_exceptions(
@@ -621,51 +726,87 @@ def apply_exceptions(
     """
     entries = entries or []
     warnings: list[str] = []
-    active: dict[str, Any] = {}
+    active_list: list[Any] = []
+    seen_keys: dict[tuple[str, str], int] = {}
     for entry in entries:
         expires = getattr(entry, "expires", None)
         if expires is not None and expires < today:
             warnings.append(f"exception expired: {entry.match}")
             continue
-        # Latest write wins for a duplicated fingerprint.
-        active[entry.match] = entry
+        key = (str(getattr(entry, "rule", "")), str(entry.match))
+        if key in seen_keys:
+            active_list[seen_keys[key]] = entry
+        else:
+            seen_keys[key] = len(active_list)
+            active_list.append(entry)
 
     excepted_p0: list[dict[str, Any]] = []
+    false_positive_counts: dict[str, int] = {}
     for finding in findings:
-        entry = active.get(finding.get("fingerprint") or "")
-        if entry is None:
+        matched_entry = None
+        for candidate in reversed(active_list):
+            if _finding_matches_entry(finding, candidate):
+                matched_entry = candidate
+                break
+        if matched_entry is None:
             continue
-        if getattr(entry, "is_in_repo", False) and finding["priority"] == "P0":
+        if getattr(matched_entry, "is_in_repo", None) and finding["priority"] == "P0":
             warnings.append(f".qa-ignore cannot silence P0: {finding['fingerprint']}")
             continue
-        if finding["priority"] == "P0" and not getattr(entry, "allow_p0", False):
+        if finding["priority"] == "P0" and not getattr(matched_entry, "allow_p0", None):
             # A P0 is never silently excepted: without allow_p0 the finding stands.
             continue
         was_p0 = finding["priority"] == "P0"
         finding["priority"] = "P3"
         finding["verdict_effect"] = "INFO"
-        finding["excepted"] = entry.reason
+        finding["excepted"] = matched_entry.reason
+        kind = str(getattr(matched_entry, "kind", "accepted-risk"))
+        finding["exception_kind"] = kind
+        if kind == "false-positive":
+            entry_rule = str(getattr(matched_entry, "rule", ""))
+            rule_key = entry_rule if entry_rule else f"{finding.get('agent')}.{finding.get('type')}"
+            false_positive_counts[rule_key] = false_positive_counts.get(rule_key, 0) + 1
         if was_p0:
             excepted_p0.append(
                 {
                     "id": finding["id"],
                     "fingerprint": finding["fingerprint"],
-                    "reason": entry.reason,
-                    "expires": entry.expires.isoformat() if getattr(entry, "expires", None) else "",
-                    "added_by": getattr(entry, "added_by", "") or "",
+                    "reason": matched_entry.reason,
+                    "expires": matched_entry.expires.isoformat() if getattr(matched_entry, "expires", None) else "",
+                    "added_by": str(getattr(matched_entry, "added_by", "")),
                 }
             )
     return {
         "findings": findings,
         "warnings": sorted(set(warnings)),
         "excepted_p0": excepted_p0,
+        "false_positive_counts": false_positive_counts,
     }
+
+
+def apply_baseline(
+    findings: list[dict[str, Any]],
+    baseline_fingerprints: set[str] | list[str] | None,
+) -> list[dict[str, Any]]:
+    """Downgrade non-P0 findings whose fingerprints are recorded in the baseline."""
+    if not baseline_fingerprints:
+        return findings
+    fp_set = set(baseline_fingerprints)
+    for finding in findings:
+        if finding.get("priority") == "P0":
+            continue
+        if str(finding.get("fingerprint") or "") in fp_set:
+            finding["baselined"] = True
+            finding["priority"] = "P3"
+            finding["verdict_effect"] = "INFO"
+    return findings
 
 
 def build_document(
     report: dict[str, Any],
     exceptions: list[Any] | None = None,
     today: Any = None,
+    baseline: set[str] | list[str] | None = None,
 ) -> dict[str, Any]:
     findings = build_findings(report)
     document: dict[str, Any] = {
@@ -681,6 +822,11 @@ def build_document(
         applied = apply_exceptions(findings, exceptions, today)
         document["warnings"] = applied["warnings"]
         document["excepted_p0"] = applied["excepted_p0"]
+        if applied.get("false_positive_counts"):
+            document["false_positive_counts"] = applied["false_positive_counts"]
+    effective_baseline = baseline if baseline is not None else report.get("baseline_fingerprints")
+    if effective_baseline:
+        apply_baseline(findings, effective_baseline)
     document["counts"] = count_by_priority(findings)
     document["findings"] = findings
     return document
@@ -697,6 +843,8 @@ def _finding_md_line(finding: dict[str, Any]) -> str:
     tail = ""
     if finding.get("excepted"):
         tail = f" [excepted: {_one_line(finding['excepted'], 60)}]"
+    elif finding.get("baselined"):
+        tail = " [baselined]"
     return (
         f"- [{finding['id']}] {finding['priority']} {finding['type']} "
         f"{finding['agent']} {location}: {impact} ({finding['verdict_effect']}){tail}"
@@ -712,8 +860,12 @@ def render_markdown(document: dict[str, Any]) -> str:
         "",
         f"- run verdict: **{document.get('verdict') or '?'}**",
         f"- findings: {counts.get('total', len(findings))} total",
-        "",
     ]
+    fp_counts = document.get("false_positive_counts") or {}
+    if fp_counts:
+        fp_str = ", ".join(f"{k}={v}" for k, v in sorted(fp_counts.items()))
+        lines.append(f"- false-positive counts by rule: {fp_str}")
+    lines.append("")
     excepted_p0 = document.get("excepted_p0") or []
     if excepted_p0:
         lines.append("## Excepted P0 findings (top of report)")
@@ -799,6 +951,7 @@ def write_findings(
     findings_dir: Path | str,
     exceptions: list[Any] | None = None,
     today: Any = None,
+    baseline: set[str] | list[str] | None = None,
 ) -> tuple[Path, Path]:
     """Write the run's findings under ``<findings_dir>/<run_id>/`` and mirror
     them into ``<findings_dir>/latest/`` so an IDE can pin one stable path.
@@ -815,7 +968,7 @@ def write_findings(
         if not callable(to_dict):
             raise TypeError("findings builder expects a mapping or an object with to_dict()")
         data = to_dict()
-    document = build_document(data, exceptions=exceptions, today=today)
+    document = build_document(data, exceptions=exceptions, today=today, baseline=baseline)
     base = Path(findings_dir)
     run_id = str(document.get("run_id") or "")
     run_dir = base / run_id if run_id else base
@@ -833,6 +986,11 @@ def write_findings(
         summary_path.write_text(summary_text, encoding="utf-8")
     except Exception:
         summary_path = None
+    try:
+        from core.brief import write_fix_brief
+        write_fix_brief(data, document, base)
+    except Exception:
+        pass
     if run_id:
         latest_dir = base / "latest"
         latest_dir.mkdir(parents=True, exist_ok=True)

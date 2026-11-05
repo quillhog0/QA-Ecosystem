@@ -219,4 +219,42 @@ def test_orchestrator_drift_veto_with_blocked_sandbox(tmp_path: Path):
         assert "drift veto" in report.mutation.get("reason", "")
 
 
+def test_orchestrator_loop_returns_none_explicitly(tmp_path: Path):
+    """Verify Vesper._loop returns None on early return paths (line 452 equivalent mutant guard)."""
+    from core.orchestrator import Vesper
+    from core.packets import FinalReport, HandoffPacket, PolicyDecision, Verdict
+    from core.isolation import create_isolation
+
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    docs = proj / "docs"
+    docs.mkdir()
+    iso_dir = tmp_path / "iso"
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    isolation = create_isolation(proj, iso_dir, method="copy", read_only=False)
+    packet = HandoffPacket(
+        run_id="test-run",
+        stage="init",
+        from_role="vesper",
+        to_role="lexi",
+        project_root=str(proj),
+        docs_root=str(docs),
+        isolated_root=str(isolation.isolated_root),
+    )
+    report = FinalReport(run_id="test-run", verdict="PENDING", sandbox="bwrap")
+    vesper = Vesper(config={"sandbox": "auto"})
+
+    relaxed_policy = PolicyDecision(
+        verdict=Verdict.CLEAR.value,
+        warnings=["subprocess in test"],
+    )
+    with patch("policies.sable.evaluate_preflight", return_value=relaxed_policy), \
+         patch("core.sandbox.get_sandbox_status", return_value=(False, "unavailable", "disappeared")):
+        ret = vesper._loop(packet, isolation, work_dir, report)
+        assert ret is None
+        assert report.verdict == Verdict.VETO.value
+
+
+
 

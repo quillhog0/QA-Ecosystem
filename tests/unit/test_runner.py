@@ -216,3 +216,35 @@ def test_run_pytest_src_layout_imports_the_copy(tmp_path):
     assert res.errors == 0
 
 
+def test_run_pytest_flaky_test_detected_on_rerun(tmp_path):
+    """A test that fails on the first run and passes on the rerun is marked FLAKY."""
+    from core.runner import run_pytest
+
+    iso = tmp_path / "iso"
+    work = tmp_path / "work"
+    (iso / "tests").mkdir(parents=True)
+    (iso / "tests" / "test_flaky.py").write_text(
+        "from pathlib import Path\n\n"
+        "def test_sometimes_fails():\n"
+        "    marker = Path('.flaky_marker')\n"
+        "    if not marker.exists():\n"
+        "        marker.write_text('1', encoding='utf-8')\n"
+        "        assert False, 'transient first-run failure'\n"
+        "    assert True\n",
+        encoding="utf-8",
+    )
+
+    res = run_pytest(iso, work_dir=work, allow_network=False, config={"sandbox": {"mode": "off"}})
+    assert res.collected == 1
+    assert res.failed == 0
+    assert res.product_failed == 0
+    assert res.passed == 1
+    assert res.flaky == 1
+    assert res.exit_code == 0
+    assert res.status == "FLAKY"
+    assert len(res.flaky_tests) == 1
+    assert res.flaky_tests[0]["classification"] == "flaky"
+    assert "test_sometimes_fails" in res.flaky_tests[0]["node"]
+
+
+

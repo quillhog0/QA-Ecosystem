@@ -225,9 +225,28 @@ class Vesper:
                 report.timings["total"] = round(time.monotonic() - _run_started, 3)
                 report.role_results = list(self.role_results)
                 report.finished_at = utc_now()
+                baseline_fps = self.config.get("baseline_fingerprints")
+                if baseline_fps:
+                    from core.findings import build_document, build_findings
+                    raw_f = build_findings(report.to_dict())
+                    raw_veto = [f for f in raw_f if f.get("verdict_effect") == "VETO"]
+                    doc_after = build_document(
+                        report.to_dict(),
+                        exceptions=getattr(self, "exceptions", None),
+                        baseline=baseline_fps,
+                    )
+                    rem_veto = [f for f in (doc_after.get("findings") or []) if f.get("verdict_effect") == "VETO"]
+                    exec_collected = int((report.execution or {}).get("collected") or 0)
+                    if raw_veto and not rem_veto and bool(exec_collected):
+                        report.verdict = Verdict.CLEAR.value
                 write_reports(report, base)
                 findings_base = Path(self.config.get("findings_dir") or base).resolve()
-                write_findings(report, findings_base, exceptions=getattr(self, "exceptions", None))
+                write_findings(
+                    report,
+                    findings_base,
+                    exceptions=getattr(self, "exceptions", None),
+                    baseline=baseline_fps,
+                )
         finally:
             release_isolation(isolation, keep=bool(self.config.get("keep_isolated_copy", False)))
         return report
@@ -535,6 +554,11 @@ class Vesper:
                     f"failed={execution.failed} exit={execution.exit_code} "
                     f"duration={execution.duration_seconds}s install={execution.install_status} "
                     + (
+                        f"flaky={execution.flaky} status={execution.status} "
+                        if execution.flaky
+                        else ""
+                    )
+                    + (
                         f"product_failed={execution.product_failed} "
                         f"environment_failed={execution.environment_failed} "
                         if execution.failures
@@ -556,6 +580,9 @@ class Vesper:
                     "errors": execution.errors,
                     "product_failed": execution.product_failed,
                     "environment_failed": execution.environment_failed,
+                    "flaky": execution.flaky,
+                    "flaky_tests": execution.flaky_tests,
+                    "status": execution.status,
                     "failures": execution.to_dict().get("failures") or [],
                     "exit_code": execution.exit_code,
                     "duration_seconds": execution.duration_seconds,

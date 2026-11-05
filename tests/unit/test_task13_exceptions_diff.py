@@ -390,3 +390,102 @@ def test_diff_mode_skips_unchanged_file_scans(tmp_path: Path) -> None:
     assert any("test_a.py" in str(arg) for arg in cmd)
     assert not any("test_b.py" in str(arg) for arg in cmd)
 
+
+def test_qa_ignore_kind_labels_and_false_positive_counts(tmp_path: Path) -> None:
+    """Verify kind: false-positive / accepted-risk, rule matching, and false_positive_counts per rule."""
+    from core.exceptions import load_qa_ignore
+
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    exp_str = (TODAY + timedelta(days=30)).isoformat()
+    (proj / ".qa-ignore").write_text(
+        f"- rule: lexi.drift\n"
+        f"  match: missing_fn\n"
+        f"  kind: false-positive\n"
+        f"  reason: dynamically generated symbol\n"
+        f"  expiry: {exp_str}\n"
+        f"- rule: riley.weak_test\n"
+        f"  match: tests/test_x.py::test_w\n"
+        f"  kind: accepted-risk\n"
+        f"  reason: smoke test only\n"
+        f"  expiry: {exp_str}\n"
+        f"- rule: lexi.drift\n"
+        f"  match: bad_kind_item\n"
+        f"  kind: unknown-kind\n"
+        f"  reason: invalid kind\n"
+        f"  expiry: {exp_str}\n",
+        encoding="utf-8",
+    )
+
+    entries, warnings = load_qa_ignore(proj, today=TODAY)
+    assert len(entries) == 2
+    assert any("invalid kind" in w for w in warnings)
+
+    rep = _drift_report()
+    rep["post_audit"] = {"riley": {"gaps": ["weak test: tests/test_x.py::test_w (no assertions)"]}}
+    doc = findings.build_document(rep, exceptions=entries, today=TODAY)
+
+    assert doc.get("false_positive_counts") == {"lexi.drift": 1}
+    by_type = {f["type"]: f for f in doc["findings"]}
+    assert by_type["drift"]["exception_kind"] == "false-positive"
+    assert by_type["drift"]["priority"] == "P3"
+    assert by_type["weak_test"]["exception_kind"] == "accepted-risk"
+    assert by_type["weak_test"]["priority"] == "P3"
+
+    md = findings.render_markdown(doc)
+    assert "false-positive counts by rule: lexi.drift=1" in md
+    assert findings.validate_schema(doc, findings.load_schema()) == []
+
+
+def test_baseline_loading_and_gate_filtering(tmp_path: Path) -> None:
+    """Recorded baseline findings do not fail the gate; newly introduced findings still trigger VETO."""
+    import json
+    import main as main_module
+    from core.exceptions import load_baseline
+    from core.orchestrator import Vesper
+
+    baseline_path = tmp_path / "baseline.json"
+    baseline_path.write_text(
+        json.dumps(
+            {
+                "findings": [
+                    {"fingerprint": "lexi:drift:README.md:--old-missing-flag"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    fps = load_baseline(baseline_path)
+    assert fps == {"lexi:drift:README.md:--old-missing-flag"}
+    assert load_baseline(None) == set()
+
+    parsed = main_module.parse_args(["--project", "p", "--docs", "d", "--baseline", str(baseline_path)])
+    assert parsed.baseline == str(baseline_path)
+
+    # Set up a mini project with only the baselined drift finding
+    proj = mini_project(tmp_path / "repo")
+    docs = proj / "docs"
+    (docs / "README.md").write_text(
+        "# Calc\n\n`$ mycalc --old-missing-flag`\n\n- `add(a, b)` returns sum\n",
+        encoding="utf-8",
+    )
+    cfg = {
+        "dry_run": True,
+        "allow_network": False,
+        "sandbox": {"mode": "off"},
+        "reports_dir": str(tmp_path / "reports"),
+        "lexi": {"veto_on_missing_code": True},
+        "baseline_fingerprints": sorted(fps),
+    }
+    report_clear = Vesper(cfg).run(proj, docs)
+    assert report_clear.verdict == "CLEAR"
+
+    # Now introduce a brand-new missing CLI flag not in the baseline -> VETO
+    (docs / "README.md").write_text(
+        "# Calc\n\n`$ mycalc --old-missing-flag`\n`$ mycalc --brand-new-missing-flag`\n",
+        encoding="utf-8",
+    )
+    report_veto = Vesper(cfg).run(proj, docs)
+    assert report_veto.verdict == "VETO"
+
+

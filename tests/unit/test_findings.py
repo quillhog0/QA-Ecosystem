@@ -482,3 +482,96 @@ def test_counts_match_the_findings_list() -> None:
     assert doc["counts"]["total"] == len(doc["findings"]) == 5
     assert doc["counts"]["P2"] == 5
     assert doc["counts"]["P0"] == doc["counts"]["P1"] == doc["counts"]["P3"] == 0
+
+
+def test_finding_class_and_low_confidence_heuristic_p2_cap() -> None:
+    """Low-confidence heuristic findings must be capped at P2 (never P1/P0), while hard findings keep P0/P1."""
+    build = _report(
+        drift={
+            "findings": [
+                {
+                    "kind": "missing_code",
+                    "path": "uncertain_fn()",
+                    "severity": "high",
+                    "confidence": "low",
+                    "class": "heuristic",
+                    "message": "low confidence heuristic claim",
+                    "docs_file": "README.md",
+                    "docs_line": 10,
+                },
+                {
+                    "kind": "missing_cli_flag",
+                    "path": "--strict",
+                    "severity": "high",
+                    "confidence": "high",
+                    "class": "heuristic",
+                    "message": "high confidence missing flag",
+                    "docs_file": "README.md",
+                    "docs_line": 12,
+                },
+            ]
+        },
+        execution={
+            "failed": 1,
+            "failures": [
+                {
+                    "node": "tests/test_core.py::test_hard_fail",
+                    "classification": "product",
+                    "message": "AssertionError",
+                    "traceback": "tests/test_core.py:5: in test_hard_fail",
+                }
+            ],
+            "flaky": 1,
+            "flaky_tests": [
+                {
+                    "node": "tests/test_core.py::test_flaky_one",
+                    "classification": "flaky",
+                    "message": "timed out once",
+                    "traceback": "tests/test_core.py:20: in test_flaky_one",
+                }
+            ],
+        },
+    )
+    items = findings.build_findings(build)
+    by_term = {f["fingerprint"].split(":", 3)[-1]: f for f in items}
+
+    low_heur = by_term["uncertain_fn()"]
+    assert low_heur["class"] == "heuristic"
+    assert low_heur["confidence"] == "low"
+    assert low_heur["priority"] == "P2"
+    assert low_heur["verdict_effect"] == "WARN"
+
+    high_heur = by_term["--strict"]
+    assert high_heur["class"] == "heuristic"
+    assert high_heur["confidence"] == "high"
+    assert high_heur["priority"] == "P1"
+    assert high_heur["verdict_effect"] == "VETO"
+
+    hard_fail = by_term["tests/test_core.py::test_hard_fail"]
+    assert hard_fail["class"] == "hard"
+    assert hard_fail["confidence"] == "high"
+    assert hard_fail["priority"] == "P1"
+
+    flaky_find = by_term["tests/test_core.py::test_flaky_one"]
+    assert flaky_find["class"] == "hard"
+    assert flaky_find["priority"] == "P2"
+    assert flaky_find["verdict_effect"] == "WARN"
+    assert "FLAKY" in flaky_find["evidence"]
+
+    # DriftFinding.to_dict() and ExecutionResult status transitions
+    from core.packets import DriftFinding, ExecutionResult
+
+    df = DriftFinding(kind="missing_code", path="fn()", severity="warn", message="missing")
+    assert df.to_dict()["class"] == "heuristic"
+    assert ExecutionResult(exit_code=0).status == "PASS"
+    assert ExecutionResult(exit_code=1).status == "FAIL"
+    assert ExecutionResult(flaky=1, exit_code=0).status == "FLAKY"
+
+    # apply_baseline direct checks
+    assert findings.apply_baseline(items, None) is items
+    baselined_items = findings.apply_baseline(items, {high_heur["fingerprint"]})
+    assert baselined_items is items
+    assert high_heur.get("baselined") is True
+    assert high_heur["priority"] == "P3"
+
+

@@ -160,8 +160,6 @@ def _find_covering_tests_scored(
         for p in name_parts:
             if len(p) >= 3 and p not in STOP_WORDS:
                 name_stems.update(_stems(p))
-            elif len(p) < 3 and p not in STOP_WORDS:
-                name_stems.add(p)
 
         body_tokens = _extract_body_tokens(body)
         score = 0

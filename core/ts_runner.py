@@ -376,6 +376,68 @@ def run_ts_tests(
                 }
             )
 
+    flaky_count = 0
+    flaky_tests: list[dict[str, Any]] = []
+    if all((failed, exit_code not in (0, 124), "-e" not in raw_cmd, failures)):
+        failed_files = sorted({str(f["file"]) for f in failures if f.get("file")})
+        rerun_json = tmp_dir / "ts-results-rerun.json"
+        if rerun_json.exists():
+            rerun_json.unlink()
+        rerun_raw = [
+            arg.replace(str(results_json), str(rerun_json)) for arg in raw_cmd
+        ]
+        if not test_targets:
+            rerun_raw.extend(failed_files)
+        rerun_exec = (
+            wrap_command(
+                rerun_raw,
+                isolated_root=isolated_root,
+                work_dir=work_dir,
+                allow_network=allow_network,
+            )
+            if sandbox_enabled
+            else rerun_raw
+        )
+        try:
+            rerun_kwargs: dict[str, Any] = {
+                "cwd": str(isolated_root),
+                "env": env,
+                "capture_output": bool(rerun_exec),
+                "text": bool(rerun_exec),
+                "timeout": timeout,
+                "check": not bool(rerun_exec),
+            }
+            rerun_proc = subprocess.run(rerun_exec, **rerun_kwargs)
+            still_failing_nodes: set[str] | None = None
+            if not rerun_proc.returncode:
+                still_failing_nodes = set()
+            elif rerun_json.is_file():
+                try:
+                    rdata = json.loads(rerun_json.read_text(encoding="utf-8"))
+                    _, _, _, _, rfailures = _parse_vitest_json(rdata, isolated_root)
+                    still_failing_nodes = {str(rf.get("node")) for rf in rfailures}
+                except Exception:
+                    still_failing_nodes = None
+            if still_failing_nodes is not None:
+                remaining_failures: list[dict[str, Any]] = []
+                for f in failures:
+                    node = str(f.get("node", ""))
+                    if node not in still_failing_nodes:
+                        flaky_entry = dict(f)
+                        flaky_entry["classification"] = "flaky"
+                        flaky_tests.append(flaky_entry)
+                        flaky_count += 1
+                    else:
+                        remaining_failures.append(f)
+                if flaky_count:
+                    failures = remaining_failures
+                    failed = max(0, failed - flaky_count)
+                    passed += flaky_count
+                    if not failed:
+                        exit_code = 0
+        except subprocess.TimeoutExpired:
+            pass
+
     # Attach type errors to failures if any
     for te in type_errors:
         failed += 1
@@ -402,6 +464,8 @@ def run_ts_tests(
         errors=errors,
         product_failed=product_failed,
         environment_failed=environment_failed,
+        flaky=flaky_count,
+        flaky_tests=flaky_tests,
         failures=failures,
         exit_code=exit_code if not type_errors else 1,
         duration_seconds=round(duration, 3),

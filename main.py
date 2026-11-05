@@ -143,6 +143,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "(e.g. origin/master or HEAD~5). Mutation testing is off; if the scope "
         "cannot be computed the full cycle runs instead.",
     )
+    parser.add_argument(
+        "--baseline",
+        default="",
+        metavar="PATH",
+        help="Path to a baseline findings.json file; recorded findings do not fail the gate",
+    )
     return parser.parse_args(argv)
 
 
@@ -244,11 +250,18 @@ def main(argv: list[str] | None = None) -> int:
 
     # Load operator exceptions at startup. An invalid entry is a hard config
     # error (never a silent ignore), so a typo cannot quietly disable a guard.
-    from core.exceptions import ExceptionsConfigError, load_exceptions, load_qa_ignore
+    from core.exceptions import (
+        ExceptionsConfigError,
+        load_baseline,
+        load_exceptions,
+        load_qa_ignore,
+    )
 
     project_name = project.resolve().name
     try:
         exception_entries = load_exceptions(config, project_name)
+        if args.baseline:
+            config["baseline_fingerprints"] = sorted(load_baseline(args.baseline))
     except ExceptionsConfigError as exc:
         print(f"exceptions config error: {exc}", file=sys.stderr)
         return 1
@@ -280,6 +293,8 @@ def main(argv: list[str] | None = None) -> int:
     findings_base = Path(config.get("findings_dir") or reports_dir)
     print(f"findings={findings_base / report.run_id / 'findings.md'}")
     print(f"findings_latest={findings_base / 'latest' / 'findings.md'}")
+    print(f"fix_brief={findings_base / report.run_id / 'fix-brief.md'}")
+    print(f"fix_brief_latest={findings_base / 'latest' / 'fix-brief.md'}")
     print(f"summary={findings_base / report.run_id / 'summary.md'}")
     print(f"summary_latest={findings_base / 'latest' / 'summary.md'}")
     print(f"isolated_root={report.isolated_root}")

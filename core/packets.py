@@ -83,9 +83,13 @@ class DriftFinding:
     # stands behind the docs promise.
     code_file: str | None = None
     code_line: int | None = None
+    finding_class: str = "heuristic"
+    confidence: str = "high"
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        data = asdict(self)
+        data["class"] = self.finding_class
+        return data
 
 
 @dataclass
@@ -178,6 +182,9 @@ class ExecutionResult:
     errors: int = 0
     product_failed: int = 0
     environment_failed: int = 0
+    flaky: int = 0
+    flaky_tests: list[dict[str, Any]] = field(default_factory=list)
+    status: str = ""
     failures: list[dict[str, Any]] = field(default_factory=list)
     exit_code: int = -1
     duration_seconds: float = 0.0
@@ -189,6 +196,15 @@ class ExecutionResult:
     sandbox_status: str = "unavailable"
     language: str = ""
     language_breakdown: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.status:
+            if any((self.failed, self.errors, self.exit_code > 0)):
+                self.status = "FAIL"
+            elif self.flaky:
+                self.status = "FLAKY"
+            else:
+                self.status = "PASS"
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)

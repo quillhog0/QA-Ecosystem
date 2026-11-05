@@ -17,3 +17,5 @@ ARGON.md
 node_modules/
 !benchmark/fixtures/**/node_modules/
 !tests/fixtures/**/node_modules/
+agents/vendor/typescript.js
+scratch/

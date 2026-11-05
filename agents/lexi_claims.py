@@ -259,8 +259,10 @@ def _find_cli_definitions(project_root: Path) -> tuple[set[str], set[str], list[
             for m in flag_re.finditer(text):
                 flags.add(m.group(1))
 
-            # click: @click.command('name'), @click.option('--flag')
+            # click / typer / argparse subparsers
             for m in re.finditer(r"@(?:click|app)\.command\(\s*['\"]([^'\"]+)['\"]", text):
+                commands.add(m.group(1))
+            for m in re.finditer(r"\.add_parser\(\s*['\"]([^'\"]+)['\"]", text):
                 commands.add(m.group(1))
             for m in re.finditer(r"def\s+([a-zA-Z0-9_]+)\s*\(", text):
                 commands.add(m.group(1).replace("_", "-"))
@@ -278,15 +280,176 @@ def _find_cli_definitions(project_root: Path) -> tuple[set[str], set[str], list[
     return commands, flags, searched
 
 
+class DocLineNode:
+    """Structured Markdown line node distinguishing prose, code blocks, and terminal transcripts."""
+
+    __slots__ = ("lineno", "text", "kind", "lang")
+
+    def __init__(self, lineno: int, text: str, kind: str, lang: str = "") -> None:
+        self.lineno = lineno
+        self.text = text
+        self.kind = kind  # "prose", "code_block", "shell_block", "comment"
+        self.lang = lang
+
+
+_SHELL_LANGS = frozenset({"bash", "sh", "zsh", "shell", "console", "terminal", ""})
+
+
+def parse_markdown_nodes(doc_text: str) -> list[DocLineNode]:
+    """Parse Markdown text into structured line nodes with fence and language context."""
+    nodes: list[DocLineNode] = []
+    in_fence = False
+    fence_marker = ""
+    fence_lang = ""
+    in_html_comment = False
+
+    for lineno, raw_line in enumerate(doc_text.splitlines(), start=1):
+        stripped = raw_line.strip()
+        if in_html_comment:
+            nodes.append(DocLineNode(lineno, raw_line, "comment"))
+            if "-->" in stripped:
+                in_html_comment = False
+            continue
+        if stripped.startswith("<!--"):
+            nodes.append(DocLineNode(lineno, raw_line, "comment"))
+            if "-->" not in stripped:
+                in_html_comment = True
+            continue
+        if "-->" in stripped:
+            nodes.append(DocLineNode(lineno, raw_line, "comment"))
+            continue
+
+        m_fence = re.match(r"^(`{3,}|~{3,})([^\n]*)$", stripped)
+        if m_fence:
+            marker = m_fence.group(1)[:3]
+            if not in_fence:
+                in_fence = not bool()
+                fence_marker = marker
+                fence_lang = m_fence.group(2).strip().split()[0].lower() if m_fence.group(2).strip() else ""
+            else:
+                in_fence = bool()
+                fence_marker = ""
+                fence_lang = ""
+            nodes.append(DocLineNode(lineno, raw_line, "fence", fence_lang))
+            continue
+
+        if in_fence:
+            block_kind = "shell_block" if fence_lang in _SHELL_LANGS else "code_block"
+            nodes.append(DocLineNode(lineno, raw_line, block_kind, fence_lang))
+        else:
+            nodes.append(DocLineNode(lineno, raw_line, "prose", ""))
+
+    return nodes
+
+
+def _project_cli_scripts(project_root: Path) -> set[str]:
+    """Source file basenames or module names that act as CLI entry scripts in the project."""
+    scripts: set[str] = set()
+    cli_markers = ("argparse", "ArgumentParser", "click", "typer", "commander", "yargs", "cac", "process.argv", "sys.argv")
+    for path in list_sources(project_root):
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if any((*((m in text) for m in cli_markers), path.stem.lower() in ("cli", "main", "__main__"))):
+            scripts.add(path.name.lower())
+            scripts.add(path.stem.lower())
+    return scripts
+
+
+def _extract_project_cli_invocation(
+    line: str,
+    node_kind: str,
+    allowed_commands: set[str],
+    cli_scripts: set[str],
+    has_manifest: bool = bool(),
+) -> tuple[str, str | None, list[str]] | None:
+    """Extract (binary, subcommand, flags) if and only if the line invokes a project-owned CLI command.
+
+    When allowed_commands is non-empty, only binaries in allowed_commands (or python/node invoking a
+    project CLI script) are matched. When allowed_commands is empty, falls back to cli_scripts when
+    a project manifest exists, or non-external commands in manifest-less synthetic fixtures.
+    """
+    stripped = line.strip()
+    if any((not stripped, stripped.startswith("#"), re.match(r"^\S+\s{2,}", stripped))):
+        return None
+
+    # Candidates: either inside a shell block, a `$ cmd` / `> cmd` transcript line, or inline backticks `cmd ...`
+    segments: list[str] = []
+    if node_kind == "shell_block":
+        segments.append(stripped.lstrip("$># ").strip())
+    else:
+        if stripped.startswith(("$ ", "> ")):
+            segments.append(stripped[2:].strip())
+        for backtick_match in re.finditer(r"`([^`]+)`", stripped):
+            segments.append(backtick_match.group(1).strip().lstrip("$># ").strip())
+        if not segments and "--" in stripped and any(kw in stripped for kw in ("$", ">", "run", "cli", "Usage:", "usage:", "python -m")):
+            segments.append(stripped.lstrip("$># ").strip())
+
+    allowed_lower = {c.lower() for c in allowed_commands}
+
+    for seg in segments:
+        if not seg:
+            continue
+        if is_external_tool_invocation(seg):
+            m_py = re.match(r"^(?:python3?|node)\s+(?:-m\s+)?(\S+)(.*)$", seg, re.IGNORECASE)
+            if m_py:
+                script_token = Path(m_py.group(1)).name.lower()
+                if script_token not in ("timeit", "pip", "pytest", "venv", "http.server", "json.tool", "unittest"):
+                    if any((script_token in cli_scripts, script_token in allowed_lower)):
+                        rest_str = m_py.group(2).strip()
+                        m_sub = re.match(r"^([a-z][a-z0-9_-]*)\b", rest_str)
+                        subcmd = m_sub.group(1) if m_sub else None
+                        flags = re.findall(r"(--[a-zA-Z0-9][a-zA-Z0-9_-]*)", rest_str)
+                        return (script_token, subcmd, flags)
+            continue
+
+        tokens = seg.split()
+        while tokens and tokens[0].lower() in ("Usage:", "usage:"):
+            tokens = tokens[1:]
+        if not tokens:
+            continue
+
+        binary = tokens[0].strip("`\"'").lower()
+        if not re.fullmatch(r"[a-zA-Z0-9_.-]+", binary):
+            continue
+        if binary in EXTERNAL_TOOLS or binary in ("run", "exec", "python", "python3", "node"):
+            continue
+
+        # Allow-list check:
+        if allowed_lower:
+            if binary not in allowed_lower and binary not in cli_scripts:
+                continue
+        elif has_manifest:
+            # Manifest exists without declared CLI scripts/bin: only check if project has CLI parser scripts
+            if not cli_scripts:
+                continue
+
+        rest = tokens[1:]
+        subcmd = None
+        if rest and not rest[0].startswith("-") and re.fullmatch(r"[a-z][a-z0-9_-]*", rest[0]):
+            # Only treat as subcommand if followed by flags or in a subcommand context (matching previous behavior)
+            if "--" in seg:
+                subcmd = rest[0]
+        flags = re.findall(r"(--[a-zA-Z0-9][a-zA-Z0-9_-]*)", seg)
+        if flags or subcmd:
+            return (binary, subcmd, flags)
+
+    return None
+
+
 def check_cli_claims(docs_root: Path, project_root: Path) -> list[DriftFinding]:
     """Verify that CLI commands and flags shown in README/docs exist in code."""
     from agents.lexi import _is_historical_doc
+    from core.toolchain import detect_project_cli_commands
+
     findings: list[DriftFinding] = []
     commands_in_code, flags_in_code, searched = _find_cli_definitions(project_root)
-
-    # CLI command pattern in docs: e.g. mytool sync --dry-run or $ mytool --flag
-    cli_line_re = re.compile(
-        r"(?:^\s*[$>]\s*|`)([a-zA-Z0-9_-]+)\s+([a-zA-Z0-9_-]+)?\s*([^`\n]*)"
+    allowed_commands = detect_project_cli_commands(project_root)
+    cli_scripts = _project_cli_scripts(project_root)
+    has_manifest = any(
+        (project_root / m).is_file()
+        for m in ("package.json", "pyproject.toml", "setup.cfg", "setup.py")
     )
 
     for doc_path in list_claim_docs(docs_root):
@@ -295,64 +458,38 @@ def check_cli_claims(docs_root: Path, project_root: Path) -> list[DriftFinding]:
         if _is_historical_doc(doc_path, docs_root):
             continue
         try:
-            lines = doc_path.read_text(encoding="utf-8", errors="replace").splitlines()
+            doc_text = doc_path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
 
         rel_doc = str(doc_path.relative_to(docs_root)).replace("\\", "/") if doc_path.is_relative_to(docs_root) else doc_path.name
+        nodes = parse_markdown_nodes(doc_text)
 
-        for lineno, line in enumerate(lines, start=1):
-            stripped = line.strip()
-            if stripped.startswith("<!--") or "-->" in stripped:
+        for node in nodes:
+            if node.kind in ("comment", "fence", "code_block"):
                 continue
-            # Skip external tools
-            if is_external_tool_invocation(stripped):
+            inv = _extract_project_cli_invocation(
+                node.text,
+                node.kind,
+                allowed_commands,
+                cli_scripts,
+                has_manifest=has_manifest,
+            )
+            if inv is None:
                 continue
-            # Extract flags from the line
-            line_flags = re.findall(r"(--[a-zA-Z0-9][a-zA-Z0-9_-]*)", stripped)
-            if "python -m " in stripped and any(mod in stripped for mod in ("timeit", "pip", "pytest", "venv", "http.server", "json.tool")):
-                continue
-            # Check if this line looks like a CLI invocation
-            if "--" in stripped and any(kw in stripped for kw in ("$", ">", "run", "cli", "Usage:", "usage:", "python -m")):
-                for flag in line_flags:
-                    if flag not in flags_in_code and flag not in ("--help", "--version"):
-                        search_note = ", ".join(searched[:5]) + (f" and {len(searched) - 5} more" if len(searched) > 5 else "")
-                        findings.append(
-                            DriftFinding(
-                                kind="missing_cli_flag",
-                                path=flag,
-                                severity="high",
-                                message=(
-                                    f"CLI flag '{flag}' documented at {rel_doc}:{lineno} "
-                                    f"does not exist in code (searched in {search_note})"
-                                ),
-                                docs_file=rel_doc,
-                                docs_line=lineno,
-                            )
-                        )
+            _binary, subcmd, line_flags = inv
+            lineno = node.lineno
 
-            # Subcommand check
-            m = re.search(r"(?:^\s*[$>]\s*|`|^)\s*([a-zA-Z0-9_-]+)\s+([a-zA-Z0-9_-]+)\s+--", stripped)
-            if m:
-                tool_name = m.group(1).lower()
-                subcmd = m.group(2)
-                if tool_name in EXTERNAL_TOOLS or tool_name in ("run", "exec", "python", "node"):
-                    continue
-                if (
-                    subcmd
-                    and not subcmd.startswith("-")
-                    and subcmd not in commands_in_code
-                    and subcmd not in ("run", "exec", "python", "node")
-                    and subcmd not in EXTERNAL_TOOLS
-                ):
-                    search_note = ", ".join(searched[:5])
+            for flag in line_flags:
+                if flag not in flags_in_code and flag not in ("--help", "--version"):
+                    search_note = ", ".join(searched[:5]) + (f" and {len(searched) - 5} more" if len(searched) > 5 else "")
                     findings.append(
                         DriftFinding(
-                            kind="missing_cli_command",
-                            path=subcmd,
+                            kind="missing_cli_flag",
+                            path=flag,
                             severity="high",
                             message=(
-                                f"CLI subcommand '{subcmd}' documented at {rel_doc}:{lineno} "
+                                f"CLI flag '{flag}' documented at {rel_doc}:{lineno} "
                                 f"does not exist in code (searched in {search_note})"
                             ),
                             docs_file=rel_doc,
@@ -360,7 +497,75 @@ def check_cli_claims(docs_root: Path, project_root: Path) -> list[DriftFinding]:
                         )
                     )
 
+            if (
+                subcmd
+                and not subcmd.startswith("-")
+                and subcmd not in commands_in_code
+                and subcmd not in ("run", "exec", "python", "node")
+                and subcmd not in EXTERNAL_TOOLS
+            ):
+                search_note = ", ".join(searched[:5])
+                findings.append(
+                    DriftFinding(
+                        kind="missing_cli_command",
+                        path=subcmd,
+                        severity="high",
+                        message=(
+                            f"CLI subcommand '{subcmd}' documented at {rel_doc}:{lineno} "
+                            f"does not exist in code (searched in {search_note})"
+                        ),
+                        docs_file=rel_doc,
+                        docs_line=lineno,
+                    )
+                )
+
     return findings
+
+
+def _is_external_imported_object(obj_name: str, doc_text: str, project_root: Path) -> bool:
+    """Return True if obj_name is explicitly imported from a third-party/external package in doc_text."""
+    project_names: set[str] = {project_root.name.lower()}
+    pyproject = project_root / "pyproject.toml"
+    if pyproject.is_file():
+        try:
+            data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+            p_name = str(data.get("project", {}).get("name", "")).strip().lower()
+            if p_name:
+                project_names.add(p_name)
+                project_names.add(p_name.replace("-", "_"))
+        except Exception:
+            pass
+    pkg_json = project_root / "package.json"
+    if pkg_json.is_file():
+        try:
+            data = json.loads(pkg_json.read_text(encoding="utf-8"))
+            n_name = str(data.get("name", "")).strip().lower()
+            if n_name:
+                project_names.add(n_name)
+                project_names.add(n_name.split("/")[-1])
+        except Exception:
+            pass
+    for src in list_sources(project_root):
+        project_names.add(src.stem.lower())
+        project_names.add(src.parent.name.lower())
+
+    imported_pkgs: set[str] = set()
+    for m in re.finditer(rf"\bfrom\s+([a-zA-Z0-9_.-]+)\s+import\s+[^\n]*\b{re.escape(obj_name)}\b", doc_text):
+        imported_pkgs.add(m.group(1).split(".")[0].lower())
+    for m in re.finditer(rf"\bimport\s+([a-zA-Z0-9_.]+)(?:\s+as\s+{re.escape(obj_name)})?\b", doc_text):
+        full_mod = m.group(1)
+        if any((f"as {obj_name}" in m.group(0), full_mod.split(".")[0] == obj_name)):
+            imported_pkgs.add(full_mod.split(".")[0].lower())
+    for m in re.finditer(rf"\bimport\s+[^\n;]*\b{re.escape(obj_name)}\b[^\n;]*\bfrom\s+['\"]([^'\"]+)['\"]", doc_text):
+        imported_pkgs.add(m.group(1).lower().split("/")[0])
+    for m in re.finditer(rf"\b(?:const|let|var)\s+{re.escape(obj_name)}\s*=\s*require\(\s*['\"]([^'\"]+)['\"]\s*\)", doc_text):
+        imported_pkgs.add(m.group(1).lower().split("/")[0])
+
+    return any(
+        pkg not in project_names
+        for pkg in imported_pkgs
+        if not pkg.startswith(".")
+    )
 
 
 def check_call_form_claims(docs_root: Path, project_root: Path) -> list[DriftFinding]:
@@ -409,14 +614,16 @@ def check_call_form_claims(docs_root: Path, project_root: Path) -> list[DriftFin
             continue
         try:
             doc_text = doc_path.read_text(encoding="utf-8", errors="replace")
-            lines = doc_text.splitlines()
         except OSError:
             continue
 
         rel_doc = str(doc_path.relative_to(docs_root)).replace("\\", "/") if doc_path.is_relative_to(docs_root) else doc_path.name
 
-        for lineno, line in enumerate(lines, start=1):
-            line_clean = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", line)
+        for node in parse_markdown_nodes(doc_text):
+            if node.kind == "comment":
+                continue
+            lineno = node.lineno
+            line_clean = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", node.text)
             for m in call_form_re.finditer(line_clean):
                 obj_name, method_name = m.group(1), m.group(2)
                 if obj_name in COMMON_CALL_OBJECTS:
@@ -429,8 +636,10 @@ def check_call_form_claims(docs_root: Path, project_root: Path) -> list[DriftFin
                     continue
                 if is_commit_hash(method_name) or is_commit_hash(obj_name):
                     continue
-                # If illustrative code defined inside doc example, skip
+                # If illustrative code defined inside doc example or imported from external package, skip
                 if _is_doc_code_example_ident(method_name, doc_text) or _is_doc_code_example_ident(obj_name, doc_text):
+                    continue
+                if _is_external_imported_object(obj_name, doc_text, project_root):
                     continue
 
                 if method_name not in public_symbols:

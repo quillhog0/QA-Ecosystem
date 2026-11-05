@@ -54,6 +54,23 @@ def test_aria_token_matching_stems():
     assert "test_math.py::test_add" in covered
     assert score > 0
 
+    # Stop words in test name must NOT match even if keywords had a stop word stem (e.g. "uses" -> stem "use" in STOP_WORDS, or "sets" -> stem "set" in STOP_WORDS)
+    tests_stop_stem = [
+        ("test_stop.py::test_use_set", "test_use_set", "pass"),
+    ]
+    covered_ss, score_ss = aria._find_covering_tests_scored("uses sets", tests_stop_stem, words)
+    assert not covered_ss
+    assert score_ss == 0
+
+    # 2-letter part in test name (e.g. "do") must NOT match a 3-letter keyword whose stem is 2 letters (e.g. "dos" -> not stemmed since len<=3, or "ies" > 4)
+    # Also test that a 3-letter word in test name matches a plural claim keyword ("adds" -> stem "add" matches test_add)
+    tests_plural_claim = [
+        ("test_math.py::test_add", "test_add", "pass"),
+    ]
+    covered_pl, score_pl = aria._find_covering_tests_scored("adds values", tests_plural_claim, set())
+    assert "test_math.py::test_add" in covered_pl
+    assert score_pl == 3
+
     # Stop words alone must not produce stems or spurious matches
     tests_stop = [
         ("test_stop.py::test_for_from", "test_for_from", "pass"),

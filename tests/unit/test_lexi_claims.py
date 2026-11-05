@@ -343,4 +343,135 @@ def test_check_cli_claims_subcommands_and_comments(tmp_path: Path):
     assert "ci" not in cmd_findings
 
 
+def test_detect_project_cli_commands_manifests(tmp_path: Path):
+    """Verify manifest inspection across package.json, pyproject.toml, setup.cfg, and setup.py."""
+    from core.toolchain import detect_project_cli_commands
+
+    # 1. package.json with dict bin
+    p1 = tmp_path / "pkg_dict"
+    p1.mkdir()
+    (p1 / "package.json").write_text(
+        '{"name": "@scope/my-tool", "bin": {"my-cli": "./bin/cli.js", "my-helper": "./bin/helper.js"}}',
+        encoding="utf-8",
+    )
+    assert detect_project_cli_commands(p1) == {"my-cli", "my-helper"}
+
+    # 2. package.json with string bin
+    p2 = tmp_path / "pkg_str"
+    p2.mkdir()
+    (p2 / "package.json").write_text(
+        '{"name": "@scope/solo-cli", "bin": "./bin/index.js"}',
+        encoding="utf-8",
+    )
+    assert detect_project_cli_commands(p2) == {"solo-cli"}
+
+    # 3. pyproject.toml with project.scripts, gui-scripts, poetry.scripts
+    p3 = tmp_path / "pyproject_dir"
+    p3.mkdir()
+    (p3 / "pyproject.toml").write_text(
+        '[project.scripts]\nqa-run = "qa.cli:main"\n'
+        '[project.gui-scripts]\nqa-gui = "qa.gui:main"\n'
+        '[tool.poetry.scripts]\npoetry-cmd = "qa.poetry:main"\n',
+        encoding="utf-8",
+    )
+    assert detect_project_cli_commands(p3) == {"qa-run", "qa-gui", "poetry-cmd"}
+
+    # 4. setup.cfg and setup.py console_scripts
+    p4 = tmp_path / "setup_dir"
+    p4.mkdir()
+    (p4 / "setup.cfg").write_text(
+        "[options.entry_points]\nconsole_scripts =\n    cfg-tool = pkg.cli:main\n",
+        encoding="utf-8",
+    )
+    (p4 / "setup.py").write_text(
+        'from setuptools import setup\nsetup(name="x", entry_points={"console_scripts": ["py-tool = pkg.cli:run"]})\n',
+        encoding="utf-8",
+    )
+    assert detect_project_cli_commands(p4) == {"cfg-tool", "py-tool"}
+
+
+def test_check_cli_claims_manifest_allowlist_and_structured_blocks(tmp_path: Path):
+    """Only allow-listed project CLI commands in shell blocks / transcripts are checked; python code blocks and 3rd-party commands are ignored."""
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "acme-cli"\n[project.scripts]\nacme = "acme.cli:main"\n',
+        encoding="utf-8",
+    )
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "cli.py").write_text(
+        "import argparse\n"
+        "parser = argparse.ArgumentParser()\n"
+        "parser.add_argument('--verbose')\n",
+        encoding="utf-8",
+    )
+    (docs / "README.md").write_text(
+        "# Acme CLI\n\n"
+        "<!--\n"
+        "$ acme --commented-out-flag\n"
+        "-->\n\n"
+        "```python\n"
+        "# Illustrative python snippet, not a shell block\n"
+        "cmd = 'acme --python-snippet-flag'\n"
+        "```\n\n"
+        "```bash\n"
+        "unlisted-third-party-tool --some-external-flag\n"
+        "acme --verbose\n"
+        "acme --missing-project-flag\n"
+        "```\n",
+        encoding="utf-8",
+    )
+
+    findings = check_cli_claims(docs, tmp_path)
+    flags = [f.path for f in findings if f.kind == "missing_cli_flag"]
+    assert flags == ["--missing-project-flag"]
+
+
+def test_check_call_form_claims_external_imports_ignored(tmp_path: Path):
+    """Method calls on objects imported from external packages in README snippets are ignored."""
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "my-local-pkg"\n', encoding="utf-8")
+    (tmp_path / "package.json").write_text('{"name": "my-local-pkg"}\n', encoding="utf-8")
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "mod.py").write_text(
+        "class LocalService:\n"
+        "    def existing_action(self):\n"
+        "        pass\n",
+        encoding="utf-8",
+    )
+    (docs / "README.md").write_text(
+        "<!--\n"
+        "local_service.commented_missing_method()\n"
+        "-->\n"
+        "```python\n"
+        "from external_sdk import ExtClient\n"
+        "import another_lib as ext_alias\n"
+        "import third_party_mod\n"
+        "ExtClient.remote_Only_Call()\n"
+        "ext_alias.other_External_Call()\n"
+        "third_party_mod.mod_External_Call()\n"
+        "```\n"
+        "```ts\n"
+        "import { tsHelper } from 'external-npm-pkg';\n"
+        "const cjsHelper = require('other-npm-pkg');\n"
+        "tsHelper.tsExternalMethod();\n"
+        "cjsHelper.cjsExternalMethod();\n"
+        "local_service.nonexistent_project_method();\n"
+        "```\n",
+        encoding="utf-8",
+    )
+
+    findings = check_call_form_claims(docs, tmp_path)
+    flagged = [f.path for f in findings if f.kind == "missing_code"]
+    assert flagged == ["nonexistent_project_method"]
+
+    from agents.lexi_claims import _extract_project_cli_invocation
+    assert _extract_project_cli_invocation("python cli.py sub --flag", "shell_block", set(), {"cli.py"}) == ("cli.py", "sub", ["--flag"])
+
+
+
+
 

@@ -74,6 +74,10 @@ inputs:
     description: "Write a SARIF 2.1.0 document of the run's findings to $RUNNER_TEMP/qa-results.sarif (true/false)."
     required: false
     default: "false"
+  baseline:
+    description: "Path to a baseline findings JSON file (relative to workspace); recorded findings do not fail the gate."
+    required: false
+    default: ""
 
 outputs:
   verdict:
@@ -85,6 +89,9 @@ outputs:
   summary:
     description: "Path to the buyer-safe summary Markdown report."
     value: ${{ steps.run.outputs.summary }}
+  fix-brief:
+    description: "Path to the prompt-injection-safe fix-brief.md report."
+    value: ${{ steps.run.outputs.fix_brief }}
   sarif:
     description: "Path to the SARIF 2.1.0 document, when the sarif input is true; empty otherwise."
     value: ${{ steps.run.outputs.sarif }}
@@ -110,6 +117,7 @@ runs:
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
         fi
         python -m pip install -q -r "$GITHUB_ACTION_PATH/requirements.txt"
+        PYTHONPATH="$GITHUB_ACTION_PATH" python -c "from core.toolchain import ensure_ts_tooling; assert ensure_ts_tooling(allow_network=True)"
 
     - name: Run QA cycle
       id: run
@@ -128,6 +136,7 @@ runs:
         QA_SUMMARY: ${{ inputs.summary }}
         QA_LANGS: ${{ inputs.languages }}
         QA_ALLOW_NETWORK: ${{ inputs.allow-network }}
+        QA_BASELINE: ${{ inputs.baseline }}
       run: |
         args=(--project "$GITHUB_WORKSPACE/$QA_PROJECT" --docs "$GITHUB_WORKSPACE/$QA_DOCS"
               --sandbox "$QA_SANDBOX" --reports-dir "$RUNNER_TEMP/qa-reports"
@@ -139,6 +148,7 @@ runs:
         [ "$QA_IDENTITY_STRICT" = "true" ] && args+=(--identity-strict)
         [ -n "$QA_DIFF_BASE" ] && args+=(--diff "$QA_DIFF_BASE")
         [ -n "$QA_MIN_SCORE" ] && args+=(--mutation-min-score "$QA_MIN_SCORE")
+        [ -n "$QA_BASELINE" ] && args+=(--baseline "$GITHUB_WORKSPACE/$QA_BASELINE")
         sarif_path=""
         if [ "$QA_SARIF" = "true" ]; then
           sarif_path="$RUNNER_TEMP/qa-results.sarif"
@@ -151,12 +161,14 @@ runs:
         verdict=$(grep -m1 '^verdict=' "$RUNNER_TEMP/qa-out.txt" | cut -d= -f2)
         report=$(grep -m1 '^report=' "$RUNNER_TEMP/qa-out.txt" | cut -d= -f2-)
         summary_path=$(grep -m1 '^summary=' "$RUNNER_TEMP/qa-out.txt" | cut -d= -f2-)
+        fix_brief_path=$(grep -m1 '^fix_brief=' "$RUNNER_TEMP/qa-out.txt" | cut -d= -f2-)
         echo "verdict=$verdict" >> "$GITHUB_OUTPUT"
         if [ "$verdict" = "BLOCKED_ENV" ]; then
           echo "::warning title=QA environment blocked::The tests could not run because of an environment precondition (exit 2). The report names the exact cause; no defect is claimed against the project."
         fi
         echo "report=$report" >> "$GITHUB_OUTPUT"
         echo "summary=$summary_path" >> "$GITHUB_OUTPUT"
+        echo "fix_brief=$fix_brief_path" >> "$GITHUB_OUTPUT"
         if [ -n "$sarif_path" ] && [ -f "$sarif_path" ]; then
           echo "sarif=$sarif_path" >> "$GITHUB_OUTPUT"
         else

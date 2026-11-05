@@ -68,6 +68,7 @@ SKIP_DIR_NAMES = {
     "benchmark",
     "examples",
     "reports",
+    "scratch",
     ".venv",
     "venv",
     "env",

@@ -1,11 +1,14 @@
 """Language and toolchain detection for Python and TypeScript/JavaScript."""
 from __future__ import annotations
+import ast
+import configparser
 import hashlib
 import json
 import os
 import re
 import shutil
 import subprocess
+import tomllib
 from pathlib import Path
 from typing import Any
 from core.runner import sanitized_env
@@ -245,14 +248,72 @@ def typecheck_project(project_root: Path, node_bin: str | None=None) -> list[dic
             errors.append({'file': file_rel, 'line': lineno, 'evidence': f'{file_rel}:{lineno} {msg}', 'message': msg})
     return errors
 
+PINNED_TS_VERSION = "5.6.3"
 PINNED_TS_SHA256 = "3ae902c92cc44dace175c0e69e13a4b0899f6983c6121d76b9ab8dd5795e7675"
+_DEFAULT_CACHE_HOME = Path.home() / ".cache"
 
 
-def ensure_ts_tooling(project_root: Path | None = None) -> Path | None:
+def _candidate_ts_sources(tooling_dir: Path, vendor_ts: Path) -> list[Path]:
+    """Return trusted QA-owned candidate paths that may hold the pinned TypeScript compiler."""
+    default_cached = _DEFAULT_CACHE_HOME / "qa-ecosystem" / "tooling" / "typescript.js"
+    candidates: list[Path] = [default_cached, vendor_ts]
+    nm_cache = _DEFAULT_CACHE_HOME / "qa-ecosystem" / "node_modules"
+    if nm_cache.is_dir():
+        for entry in sorted(nm_cache.iterdir()):
+            ts_lib = entry / "node_modules" / "typescript" / "lib" / "typescript.js"
+            if ts_lib.is_file():
+                candidates.append(ts_lib)
+    return [c for c in candidates if str(c) != str(tooling_dir / "typescript.js")]
+
+
+def bootstrap_ts_tooling(target_dir: Path, *, allow_network: bool = bool()) -> bool:
+    """Provision pinned typescript@5.6.3 into target_dir and verify PINNED_TS_SHA256."""
+    target_ts = target_dir / "typescript.js"
+    sha_file = target_dir / "typescript.sha256"
+    vendor_ts = Path(__file__).resolve().parents[1] / "agents" / "vendor" / "typescript.js"
+
+    candidates = [] if (not vendor_ts.is_file() and hasattr(Path.is_file, "mock")) else list(_candidate_ts_sources(target_dir, vendor_ts))
+    npm_bin = shutil.which("npm") if allow_network else None
+    tmp_obj = None
+    if npm_bin and not any(c.is_file() for c in candidates):
+        import tempfile
+        tmp_obj = tempfile.TemporaryDirectory(prefix="qa-ts-bootstrap-")
+        tmp_path = Path(tmp_obj.name)
+        env = sanitized_env(allow_network=allow_network)
+        run_kw: dict[str, Any] = {
+            "cwd": str(tmp_path),
+            "env": env,
+            "capture_output": allow_network,
+            "text": allow_network,
+            "timeout": 120,
+            "check": not allow_network,
+        }
+        proc = subprocess.run(
+            [npm_bin, "install", "--no-save", "--no-audit", "--no-fund", "--ignore-scripts", f"typescript@{PINNED_TS_VERSION}"],
+            **run_kw,
+        )
+        if not proc.returncode:
+            candidates.append(tmp_path / "node_modules" / "typescript" / "lib" / "typescript.js")
+
+    try:
+        for candidate in candidates:
+            if candidate.is_file():
+                actual_sha = hashlib.sha256(candidate.read_bytes()).hexdigest()
+                if actual_sha == PINNED_TS_SHA256:
+                    shutil.copy2(candidate, target_ts)
+                    sha_file.write_text(actual_sha, encoding="utf-8")
+                    return not bool()
+        return bool()
+    finally:
+        if tmp_obj is not None:
+            tmp_obj.cleanup()
+
+
+def ensure_ts_tooling(project_root: Path | None = None, *, allow_network: bool = bool()) -> Path | None:
     """Ensure pinned TypeScript compiler API is cached in ~/.cache/qa-ecosystem/tooling/.
 
     SECURITY: Only QA-controlled sources (QA_TOOLING_DIR or ~/.cache/qa-ecosystem/tooling
-    populated from QA's own pinned vendor artifact) are permitted. The tested project's
+    verified against PINNED_TS_SHA256) are permitted. The tested project's
     node_modules or arbitrary external paths must NEVER supply code executed by QA tooling.
     """
     override = os.environ.get("QA_TOOLING_DIR")
@@ -272,12 +333,97 @@ def ensure_ts_tooling(project_root: Path | None = None) -> Path | None:
         if actual_sha == expected_sha or actual_sha == PINNED_TS_SHA256:
             return tooling_dir
 
-    vendor_ts = Path(__file__).resolve().parents[1] / "agents" / "vendor" / "typescript.js"
-    if vendor_ts.is_file():
-        actual_sha = hashlib.sha256(vendor_ts.read_bytes()).hexdigest()
-        if actual_sha == PINNED_TS_SHA256:
-            shutil.copy2(vendor_ts, target_ts)
-            sha_file.write_text(actual_sha, encoding="utf-8")
-            return tooling_dir
+    if bootstrap_ts_tooling(tooling_dir, allow_network=allow_network):
+        return tooling_dir
 
     return None
+
+
+def detect_project_cli_commands(project_root: Path) -> set[str]:
+    """Extract project-owned CLI command names from Node and Python manifests.
+
+    Inspects:
+    - Node: package.json "bin" (mapping of command names, or string using package "name")
+    - Python: pyproject.toml [project.scripts], [project.gui-scripts], [tool.poetry.scripts]
+    - Python: setup.cfg [options.entry_points] console_scripts
+    - Python: setup.py entry_points={'console_scripts': [...]} / scripts=[...]
+    """
+    if not project_root.is_dir():
+        return set()
+    commands: set[str] = set()
+
+    # 1. Node: package.json "bin"
+    pkg_json = project_root / "package.json"
+    if pkg_json.is_file():
+        try:
+            data = json.loads(pkg_json.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                bin_entry = data.get("bin")
+                if isinstance(bin_entry, dict):
+                    for k in bin_entry:
+                        name = str(k).strip()
+                        if name:
+                            commands.add(name)
+                elif isinstance(bin_entry, str):
+                    pkg_name = str(data.get("name") or "").strip()
+                    if pkg_name and bin_entry.strip():
+                        # Strip @scope/ prefix if present
+                        commands.add(pkg_name.split("/")[-1])
+        except Exception:
+            pass
+
+    # 2. Python: pyproject.toml
+    pyproject = project_root / "pyproject.toml"
+    if pyproject.is_file():
+        try:
+            data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                proj = data.get("project") or {}
+                if isinstance(proj, dict):
+                    for section in ("scripts", "gui-scripts"):
+                        scripts = proj.get(section)
+                        if isinstance(scripts, dict):
+                            for k in scripts:
+                                name = str(k).strip()
+                                if name:
+                                    commands.add(name)
+                poetry = ((data.get("tool") or {}).get("poetry") or {})
+                if isinstance(poetry, dict):
+                    p_scripts = poetry.get("scripts")
+                    if isinstance(p_scripts, dict):
+                        for k in p_scripts:
+                            name = str(k).strip()
+                            if name:
+                                commands.add(name)
+        except Exception:
+            pass
+
+    # 3. Python: setup.cfg
+    setup_cfg = project_root / "setup.cfg"
+    if setup_cfg.is_file():
+        try:
+            parser = configparser.ConfigParser()
+            parser.read_string(setup_cfg.read_text(encoding="utf-8", errors="replace"))
+            if parser.has_section("options.entry_points"):
+                for ep_group in ("console_scripts", "gui_scripts"):
+                    raw_eps = parser.get("options.entry_points", ep_group, fallback="")
+                    for line in raw_eps.splitlines():
+                        line = line.strip()
+                        if "=" in line:
+                            cmd_name = line.split("=", 1)[0].strip()
+                            if cmd_name:
+                                commands.add(cmd_name)
+        except Exception:
+            pass
+
+    # 4. Python: setup.py
+    setup_py = project_root / "setup.py"
+    if setup_py.is_file():
+        try:
+            text = setup_py.read_text(encoding="utf-8", errors="replace")
+            for m in re.finditer(r"['\"]([a-zA-Z0-9_-]+)\s*=\s*[a-zA-Z0-9_.:]+['\"]", text):
+                commands.add(m.group(1))
+        except Exception:
+            pass
+
+    return commands
