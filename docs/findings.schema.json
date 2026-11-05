@@ -23,6 +23,7 @@
       "items": {"type": "object"}
     },
     "false_positive_counts": {"type": "object"},
+    "downgraded_rules": {"type": "array", "items": {"type": "string"}},
     "workspaces": {
       "type": "array",
       "items": {"type": "object"}

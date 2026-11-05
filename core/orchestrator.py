@@ -278,6 +278,7 @@ class Vesper:
                     baseline=baseline_fps,
                     fail_on=fail_on,
                     write_brief=write_brief,
+                    feedback_export=bool(self.config.get("feedback_export", bool())),
                 )
         finally:
             release_isolation(isolation, keep=bool(self.config.get("keep_isolated_copy", False)))

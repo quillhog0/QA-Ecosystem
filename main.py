@@ -172,6 +172,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Disable generation of fix-brief.md",
     )
+    parser.add_argument(
+        "--feedback-export",
+        choices=["true", "false"],
+        default=None,
+        help="Opt-in anonymous feedback export (true/false; default false)",
+    )
     return parser.parse_args(argv)
 
 
@@ -229,6 +235,8 @@ def main(argv: list[str] | None = None) -> int:
         config["fix_brief"] = args.fix_brief == "true"
     if args.no_fix_brief:
         config["fix_brief"] = bool()
+    if args.feedback_export is not None:
+        config["feedback_export"] = args.feedback_export == "true"
     if args.no_dry_run:
         config["dry_run"] = False
     os.environ["QA_LANGUAGES"] = args.languages
@@ -339,6 +347,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"pr_comment_latest={findings_base / 'latest' / 'pr-comment.md'}")
     print(f"summary={findings_base / report.run_id / 'summary.md'}")
     print(f"summary_latest={findings_base / 'latest' / 'summary.md'}")
+    if config.get("feedback_export"):
+        print(f"feedback_export={findings_base / report.run_id / 'feedback-export.json'}")
     print(f"isolated_root={report.isolated_root}")
     if args.sarif:
         try:

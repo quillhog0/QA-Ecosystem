@@ -94,6 +94,10 @@ inputs:
     description: "Post pr-comment.md as a comment on pull_request events when permissions allow (true/false, default false)."
     required: false
     default: "false"
+  feedback-export:
+    description: "Export opt-in anonymous finding feedback JSON (true/false, default false)."
+    required: false
+    default: "false"
 
 outputs:
   verdict:
@@ -111,6 +115,9 @@ outputs:
   pr-comment:
     description: "Path to the concise PR comment Markdown summary."
     value: ${{ steps.run.outputs.pr_comment }}
+  feedback-export:
+    description: "Path to the anonymous feedback-export.json document, when feedback-export is true; empty otherwise."
+    value: ${{ steps.run.outputs.feedback_export }}
   sarif:
     description: "Path to the SARIF 2.1.0 document, when the sarif input is true; empty otherwise."
     value: ${{ steps.run.outputs.sarif }}
@@ -125,6 +132,12 @@ runs:
     - uses: actions/setup-node@v4
       with:
         node-version: ${{ inputs.node-version }}
+
+    - name: Cache QA Ecosystem tooling
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/qa-ecosystem-tools
+        key: qa-ecosystem-tools-${{ runner.os }}-${{ hashFiles('**/requirements.txt', '**/package-lock.json') }}
 
     - name: Install QA Ecosystem
       shell: bash
@@ -160,6 +173,7 @@ runs:
         QA_PROFILE: ${{ inputs.profile }}
         QA_FIX_BRIEF: ${{ inputs.fix-brief }}
         QA_PR_COMMENT: ${{ inputs.pr-comment }}
+        QA_FEEDBACK_EXPORT: ${{ inputs.feedback-export }}
       run: |
         if [ "$GITHUB_EVENT_NAME" = "pull_request_target" ]; then
           echo "::error title=Unsafe workflow trigger::QA Ecosystem refuses to execute under pull_request_target."
@@ -171,6 +185,7 @@ runs:
         [ -n "$QA_PROFILE" ] && args+=(--profile "$QA_PROFILE")
         [ -n "$QA_FAIL_ON" ] && args+=(--fail-on "$QA_FAIL_ON")
         [ -n "$QA_FIX_BRIEF" ] && args+=(--fix-brief "$QA_FIX_BRIEF")
+        [ -n "$QA_FEEDBACK_EXPORT" ] && args+=(--feedback-export "$QA_FEEDBACK_EXPORT")
         [ "$QA_ALLOW_NETWORK" = "true" ] && args+=(--allow-network)
         [ "$QA_STRICT" = "true" ] && args+=(--strict)
         [ "$QA_MUTATION" = "true" ] && args+=(--mutation)
@@ -193,6 +208,7 @@ runs:
         summary_path=$(grep -m1 '^summary=' "$RUNNER_TEMP/qa-out.txt" | cut -d= -f2-)
         fix_brief_path=$(grep -m1 '^fix_brief=' "$RUNNER_TEMP/qa-out.txt" | cut -d= -f2-)
         pr_comment_path=$(grep -m1 '^pr_comment=' "$RUNNER_TEMP/qa-out.txt" | cut -d= -f2-)
+        feedback_export_path=$(grep -m1 '^feedback_export=' "$RUNNER_TEMP/qa-out.txt" | cut -d= -f2-)
         echo "verdict=$verdict" >> "$GITHUB_OUTPUT"
         if [ "$verdict" = "BLOCKED_ENV" ]; then
           echo "::warning title=QA environment blocked::The tests could not run because of an environment precondition (exit 2). The report names the exact cause; no defect is claimed against the project."
@@ -201,6 +217,7 @@ runs:
         echo "summary=$summary_path" >> "$GITHUB_OUTPUT"
         echo "fix_brief=$fix_brief_path" >> "$GITHUB_OUTPUT"
         echo "pr_comment=$pr_comment_path" >> "$GITHUB_OUTPUT"
+        echo "feedback_export=$feedback_export_path" >> "$GITHUB_OUTPUT"
         if [ -n "$sarif_path" ] && [ -f "$sarif_path" ]; then
           echo "sarif=$sarif_path" >> "$GITHUB_OUTPUT"
         else

@@ -823,12 +823,47 @@ def apply_exceptions(
                     "added_by": str(getattr(matched_entry, "added_by", "")),
                 }
             )
+    downgraded_rules = _apply_precision_downgrade(findings, false_positive_counts)
     return {
         "findings": findings,
         "warnings": sorted(set(warnings)),
         "excepted_p0": excepted_p0,
         "false_positive_counts": false_positive_counts,
+        "downgraded_rules": downgraded_rules,
     }
+
+
+def _apply_precision_downgrade(
+    findings: list[dict[str, Any]],
+    false_positive_counts: dict[str, int],
+) -> list[str]:
+    """Downgrade unexcepted heuristic findings when rule FP rate exceeds 20%."""
+    if not false_positive_counts:
+        return []
+    accepted_counts: dict[str, int] = {}
+    for f in findings:
+        if f.get("exception_kind") == "accepted-risk":
+            rk = f"{f.get('agent')}.{f.get('type')}"
+            accepted_counts[rk] = accepted_counts.get(rk, 0) + 1
+    downgraded: list[str] = []
+    for rk, fp_cnt in sorted(false_positive_counts.items()):
+        ar_cnt = accepted_counts.get(rk, 0)
+        if fp_cnt * 4 > (fp_cnt + ar_cnt):
+            downgraded.append(rk)
+            for f in findings:
+                f_rk = f"{f.get('agent')}.{f.get('type')}"
+                if all(
+                    (
+                        f_rk == rk,
+                        not f.get("excepted"),
+                        f.get("class") == "heuristic",
+                    )
+                ):
+                    f["confidence"] = "low"
+                    if f.get("priority") in ("P0", "P1"):
+                        f["priority"] = "P2"
+                        f["verdict_effect"] = "WARN"
+    return downgraded
 
 
 def apply_baseline(
@@ -872,6 +907,8 @@ def build_document(
         document["excepted_p0"] = applied["excepted_p0"]
         if applied.get("false_positive_counts"):
             document["false_positive_counts"] = applied["false_positive_counts"]
+        if applied.get("downgraded_rules"):
+            document["downgraded_rules"] = applied["downgraded_rules"]
     effective_baseline = baseline if baseline is not None else report.get("baseline_fingerprints")
     if effective_baseline:
         apply_baseline(findings, effective_baseline)
@@ -1009,6 +1046,43 @@ def load_schema(schema_path: Path | str | None = None) -> dict[str, Any]:
     return json.loads(Path(schema_path or SCHEMA_PATH).read_text(encoding="utf-8"))
 
 
+def build_feedback_export(document: dict[str, Any]) -> dict[str, Any]:
+    """Build an anonymous feedback summary with no code, paths, names, or values."""
+    entries: list[dict[str, str]] = []
+    for f in document.get("findings", ()):
+        if isinstance(f, dict):
+            entries.append(
+                {
+                    "rule": f"{f.get('agent', 'unknown')}.{f.get('type', 'unknown')}",
+                    "class": str(f.get("class", "heuristic")),
+                    "confidence": str(f.get("confidence", "high")),
+                    "label": str(f.get("exception_kind") or "unlabelled"),
+                }
+            )
+    return {
+        "schema_version": str(document.get("schema_version", "1")),
+        "false_positive_counts": dict(document.get("false_positive_counts") or {}),
+        "downgraded_rules": list(document.get("downgraded_rules") or []),
+        "entries": entries,
+    }
+
+
+def write_feedback_export(document: dict[str, Any], base_dir: Path | str) -> Path:
+    """Write ``<base_dir>/<run_id>/feedback-export.json`` and mirror to ``latest/``."""
+    base = Path(base_dir)
+    run_id = str(document.get("run_id", ""))
+    run_dir = base / run_id if run_id else base
+    run_dir.mkdir(parents=not bool(), exist_ok=not bool())
+    payload = json.dumps(build_feedback_export(document), indent=2, ensure_ascii=bool()) + "\n"
+    out_path = run_dir / "feedback-export.json"
+    out_path.write_text(payload, encoding="utf-8")
+    if run_id:
+        latest_dir = base / "latest"
+        latest_dir.mkdir(parents=not bool(), exist_ok=not bool())
+        shutil.copyfile(out_path, latest_dir / "feedback-export.json")
+    return out_path
+
+
 def write_findings(
     report: Any,
     findings_dir: Path | str,
@@ -1017,6 +1091,7 @@ def write_findings(
     baseline: set[str] | list[str] | None = None,
     fail_on: str = "P1",
     write_brief: bool = not bool(),
+    feedback_export: bool = bool(),
 ) -> tuple[Path, Path]:
     """Write the run's findings under ``<findings_dir>/<run_id>/`` and mirror
     them into ``<findings_dir>/latest/`` so an IDE can pin one stable path.
@@ -1056,6 +1131,8 @@ def write_findings(
         if write_brief:
             write_fix_brief(data, document, base, fail_on=fail_on)
         write_pr_comment(data, document, base, fail_on=fail_on)
+        if feedback_export:
+            write_feedback_export(document, base)
     except Exception:
         pass
     if run_id:

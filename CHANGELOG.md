@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.8.0 (2026-11-05)
+
+### Added
+- **Content-hash analysis cache (`core/cache.py`)**: deterministic file-backed cache (`compute_content_hash`, `AnalysisCache`) keyed by core version, namespace, and file SHA-256 content hash.
+- **Controlled Node provisioning & lockfile-pinned tooling cache (`core/toolchain.py`, `action.yml`)**: `select_node_version` selects a supported Node major (`20`, `22`, `24`, default `22`) from `package.json` `engines.node`, `.nvmrc`, or `.node-version`, and `action.yml` caches `~/.cache/qa-ecosystem-tools` keyed on lockfiles.
+- **Container sandbox fallback (`core/sandbox.py`)**: `detect_container_runtime` (`podman` / `docker`), `wrap_container_command` (`--read-only`, `--tmpfs /tmp`, `--tmpfs /home/sandbox`, `--network none`), and `sandbox.fallback: container` support when `bwrap` is unavailable.
+- **Opt-in anonymous feedback export & rule precision downgrade (`core/findings.py`, `core/orchestrator.py`, `main.py`, `action.yml`)**: `--feedback-export true|false` emits `feedback-export.json` containing only rule IDs, finding classes, confidence levels, and feedback labels (`false-positive` / `accepted-risk`), and automatically downgrades unexcepted heuristic findings (`confidence: low`, capped at `P2`) when a rule's false-positive rate exceeds 20%.
+
 ## 0.7.0 (2026-11-05)
 
 ### Added

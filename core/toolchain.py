@@ -427,3 +427,41 @@ def detect_project_cli_commands(project_root: Path) -> set[str]:
             pass
 
     return commands
+
+
+SUPPORTED_NODE_MAJORS = ("22", "24", "20")
+
+
+def select_node_version(project_root: Path) -> str:
+    """Select a supported Node.js major ('20', '22', '24') satisfying project constraints."""
+    project_root = Path(project_root)
+    required_range = ""
+    pkg_json_path = project_root / "package.json"
+    if pkg_json_path.is_file():
+        try:
+            data = json.loads(pkg_json_path.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+        if isinstance(data, dict):
+            engines = data.get("engines")
+            if isinstance(engines, dict):
+                node_req = engines.get("node")
+                if node_req:
+                    required_range = str(node_req).strip()
+    if not required_range:
+        for rc_name in (".nvmrc", ".node-version"):
+            rc_path = project_root / rc_name
+            if rc_path.is_file():
+                lines = rc_path.read_text(encoding="utf-8", errors="replace").strip().splitlines()
+                if lines:
+                    required_range = lines[0].strip()
+                    break
+    if not required_range:
+        return "22"
+    for maj in SUPPORTED_NODE_MAJORS:
+        if semver_satisfies(f"{maj}.0.0", required_range):
+            return maj
+    parsed_maj = str(_parse_semver(required_range)[0])
+    if parsed_maj in SUPPORTED_NODE_MAJORS:
+        return parsed_maj
+    return "22"

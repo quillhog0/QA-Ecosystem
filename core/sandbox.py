@@ -82,6 +82,50 @@ def get_bwrap_path() -> str | None:
     return shutil.which("bwrap")
 
 
+def detect_container_runtime() -> str | None:
+    """Return 'podman' or 'docker' if a container runtime is available on PATH."""
+    for name in ("podman", "docker"):
+        if shutil.which(name) is not None:
+            return name
+    return None
+
+
+def wrap_container_command(
+    cmd: list[str],
+    *,
+    isolated_root: Path,
+    work_dir: Path,
+    runtime: str = "docker",
+    image: str = "python:3.12-slim",
+    allow_network: bool = bool(),
+) -> list[str]:
+    """Wrap command in a rootless/container sandbox when bwrap is unavailable."""
+    iso = isolated_root.resolve()
+    work = work_dir.resolve()
+    net_args = [] if allow_network else ["--network", "none"]
+    return [
+        runtime,
+        "run",
+        "--rm",
+        "--read-only",
+        "--tmpfs",
+        "/tmp",
+        "--tmpfs",
+        "/home/sandbox",
+        "-e",
+        "HOME=/home/sandbox",
+        "-v",
+        f"{iso}:{iso}:rw",
+        "-v",
+        f"{work}:{work}:ro",
+        "-w",
+        str(iso),
+        *net_args,
+        image,
+        *cmd,
+    ]
+
+
 def resolve_sandbox_mode(config: dict[str, Any] | None) -> str:
     """Resolve sandbox mode: auto (default), required, or off."""
     if not config:
@@ -134,6 +178,13 @@ def get_sandbox_status(config: dict[str, Any] | None) -> tuple[bool, str, str | 
 
     if available:
         return True, "bwrap", None
+
+    sb_cfg = config.get("sandbox") if isinstance(config, dict) else None
+    fallback = sb_cfg.get("fallback") if isinstance(sb_cfg, dict) else None
+    if fallback == "container":
+        rt = detect_container_runtime()
+        if rt is not None:
+            return not bool(), f"container:{rt}", None
 
     if probe_reason:
         status_label = f"unavailable (bwrap present but not usable: {probe_reason})"
