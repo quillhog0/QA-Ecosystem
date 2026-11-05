@@ -95,14 +95,15 @@ def _as_int(value: Any) -> int:
         return 0
 
 
-def verdict_effect_for(priority: str, evidence: str) -> str:
-    """The verdict rule: only P0/P1 with non-empty evidence may cause a VETO.
+def verdict_effect_for(priority: str, evidence: str, fail_on: str = "P1") -> str:
+    """The verdict rule: findings at or above fail_on with non-empty evidence may cause a VETO.
 
     Everything else reports WARN (still actionable) or INFO (a note). The
     control-plane verdict itself is decided by the roles, not here; this field
     tells an IDE whether the single finding would justify blocking a merge.
     """
-    if priority in ("P0", "P1") and (evidence or "").strip():
+    threshold = fail_on.upper() if fail_on.upper() in PRIORITY_LEVELS else "P1"
+    if (evidence or "").strip() and PRIORITY_LEVELS.index(priority) <= PRIORITY_LEVELS.index(threshold):
         return "VETO"
     if priority == "P3":
         return "INFO"
@@ -807,6 +808,7 @@ def build_document(
     exceptions: list[Any] | None = None,
     today: Any = None,
     baseline: set[str] | list[str] | None = None,
+    fail_on: str = "P1",
 ) -> dict[str, Any]:
     findings = build_findings(report)
     document: dict[str, Any] = {
@@ -827,6 +829,10 @@ def build_document(
     effective_baseline = baseline if baseline is not None else report.get("baseline_fingerprints")
     if effective_baseline:
         apply_baseline(findings, effective_baseline)
+    if fail_on.upper() != "P1":
+        for f in findings:
+            if not any((f.get("excepted"), f.get("baselined"))):
+                f["verdict_effect"] = verdict_effect_for(str(f["priority"]), str(f["evidence"]), fail_on=fail_on)
     document["counts"] = count_by_priority(findings)
     document["findings"] = findings
     return document
@@ -952,6 +958,8 @@ def write_findings(
     exceptions: list[Any] | None = None,
     today: Any = None,
     baseline: set[str] | list[str] | None = None,
+    fail_on: str = "P1",
+    write_brief: bool = not bool(),
 ) -> tuple[Path, Path]:
     """Write the run's findings under ``<findings_dir>/<run_id>/`` and mirror
     them into ``<findings_dir>/latest/`` so an IDE can pin one stable path.
@@ -968,7 +976,7 @@ def write_findings(
         if not callable(to_dict):
             raise TypeError("findings builder expects a mapping or an object with to_dict()")
         data = to_dict()
-    document = build_document(data, exceptions=exceptions, today=today, baseline=baseline)
+    document = build_document(data, exceptions=exceptions, today=today, baseline=baseline, fail_on=fail_on)
     base = Path(findings_dir)
     run_id = str(document.get("run_id") or "")
     run_dir = base / run_id if run_id else base
@@ -987,8 +995,10 @@ def write_findings(
     except Exception:
         summary_path = None
     try:
-        from core.brief import write_fix_brief
-        write_fix_brief(data, document, base)
+        from core.brief import write_fix_brief, write_pr_comment
+        if write_brief:
+            write_fix_brief(data, document, base, fail_on=fail_on)
+        write_pr_comment(data, document, base, fail_on=fail_on)
     except Exception:
         pass
     if run_id:

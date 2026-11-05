@@ -1,6 +1,6 @@
 # QA Agent Ecosystem
 
-Version 0.5.0. See CHANGELOG.md.
+Version 0.6.0. See CHANGELOG.md.
 
 Deterministic QA control plane with six roles. Give it documentation plus a Python, TypeScript, or JavaScript project (including mixed projects); it walks a fixed test cycle in an **isolated copy** and returns a structured report with a verdict: `CLEAR`, `BLOCKED_ENV`, `VETO`, or `ESCALATE`.
 
@@ -206,7 +206,7 @@ Add QA Ecosystem as a gate in any repository's workflow. The job fails when the 
 
 ```yaml
 - uses: actions/checkout@v4
-- uses: quillhog0/QA-Ecosystem@v0.5.0
+- uses: quillhog0/QA-Ecosystem@v0.6.0
   with:
     project: .
     docs: docs
@@ -215,7 +215,7 @@ Add QA Ecosystem as a gate in any repository's workflow. The job fails when the 
     strict: "true"
 ```
 
-Inputs: project, docs, languages (auto, python, ts or both), node-version (default 22, used when TS/JS is detected), diff-base (base ref for diff mode), clean-install, identity-strict, summary, allow-network (default false; the tested project's tests stay offline unless set to true), strict, mutation, mutation-min-score, sandbox (auto, required or off), allow-sysctl-userns, python-version and sarif (true/false, defaults to false). On GitHub's Ubuntu 24.04 runners the sandbox needs allow-sysctl-userns set to true, which relaxes a kernel security setting on the runner; without it the run is unsandboxed and the report says so. Outputs: verdict, report and sarif (path to the SARIF document, empty when the sarif input is false or the file was not written). The action writes the SARIF file; uploading it to a code-scanning service is left to the caller.
+Inputs: project, docs, languages (auto, python, ts or both), node-version (default 22, used when TS/JS is detected), diff-base (base ref for diff mode), clean-install, identity-strict, summary, fix-brief (default true), pr-comment (default false), fail-on (p0, p1, p2 or p3; default p1), profile (default or factory), baseline, allow-network (default false; the tested project's tests stay offline unless set to true), strict, mutation, mutation-min-score, sandbox (auto, required or off), allow-sysctl-userns, python-version and sarif (true/false, defaults to false). On GitHub's Ubuntu 24.04 runners the sandbox needs allow-sysctl-userns set to true, which relaxes a kernel security setting on the runner; without it the run is unsandboxed and the report says so. Outputs: verdict, report, summary, fix-brief, pr-comment and sarif (path to the SARIF document, empty when the sarif input is false or the file was not written). The action writes the SARIF file; uploading it to a code-scanning service is left to the caller. Execution under `pull_request_target` is refused.
 
 ## SARIF output
 

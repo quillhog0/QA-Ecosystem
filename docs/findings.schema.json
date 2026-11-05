@@ -2,7 +2,7 @@
   "type": "object",
   "required": ["schema_version", "run_id", "verdict", "generated_at", "counts", "findings"],
   "properties": {
-    "schema_version": {"type": "string", "enum": ["1"]},
+    "schema_version": {"type": "string", "enum": ["1", "1.0.0"]},
     "run_id": {"type": "string"},
     "verdict": {"type": "string", "enum": ["CLEAR", "VETO", "BLOCKED_ENV"]},
     "generated_at": {"type": "string"},

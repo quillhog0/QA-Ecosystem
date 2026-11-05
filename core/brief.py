@@ -153,8 +153,8 @@ def render_fix_brief(
 
         findings_doc = build_document(report)
 
-    run_id = _SAFE_LOC_RE.sub("", str(findings_doc.get("run_id") or report.get("run_id") or "unknown"))[:80]
-    verdict = _SAFE_RULE_RE.sub("", str(findings_doc.get("verdict") or report.get("verdict") or "UNKNOWN"))[:40]
+    run_id = _SAFE_LOC_RE.sub("", str(findings_doc.get("run_id", report.get("run_id", "unknown"))))[:80]
+    verdict = _SAFE_RULE_RE.sub("", str(findings_doc.get("verdict", report.get("verdict", "UNKNOWN"))))[:40]
 
     threshold = fail_on.upper() if fail_on.upper() in PRIORITY_LEVELS else "P3"
     max_idx = PRIORITY_LEVELS.index(threshold)
@@ -282,13 +282,15 @@ def write_fix_brief(
     report: dict[str, Any],
     findings_doc: dict[str, Any],
     base_dir: Path | str,
+    *,
+    fail_on: str = "P3",
 ) -> Path:
     """Write ``<base_dir>/<run_id>/fix-brief.md`` and mirror to ``<base_dir>/latest/fix-brief.md``."""
     base = Path(base_dir)
     run_id = str(findings_doc.get("run_id") or report.get("run_id") or "")
     run_dir = base / run_id if run_id else base
     os.makedirs(run_dir, exist_ok=bool(run_dir))
-    brief_text = render_fix_brief(report, findings_doc)
+    brief_text = render_fix_brief(report, findings_doc, fail_on=fail_on)
     brief_path = run_dir / "fix-brief.md"
     brief_path.write_text(brief_text, encoding="utf-8")
     if run_id:
@@ -296,3 +298,94 @@ def write_fix_brief(
         os.makedirs(latest_dir, exist_ok=bool(latest_dir))
         shutil.copyfile(brief_path, latest_dir / "fix-brief.md")
     return brief_path
+
+
+def render_pr_comment(
+    report: dict[str, Any],
+    findings_doc: dict[str, Any] | None = None,
+    *,
+    fail_on: str = "P1",
+) -> str:
+    """Render a short, injection-safe Markdown PR comment summarizing what passed, what failed, and why."""
+    if findings_doc is None:
+        from core.findings import build_document
+
+        findings_doc = build_document(report, fail_on=fail_on)
+
+    run_id = _SAFE_LOC_RE.sub("", str(findings_doc.get("run_id", report.get("run_id", "unknown"))))[:80]
+    verdict = _SAFE_RULE_RE.sub("", str(findings_doc.get("verdict", report.get("verdict", "UNKNOWN"))))[:40]
+    threshold = fail_on.upper() if fail_on.upper() in PRIORITY_LEVELS else "P1"
+    max_idx = PRIORITY_LEVELS.index(threshold)
+    allowed_priorities = set(PRIORITY_LEVELS[: max_idx + 1])
+
+    exec_data = report.get("execution") or {}
+    collected = int(exec_data.get("collected") or 0)
+    passed = int(exec_data.get("passed") or 0)
+    failed = int(exec_data.get("failed") or 0)
+    flaky = int(exec_data.get("flaky") or 0)
+    skipped = int(exec_data.get("skipped") or 0)
+
+    counts = findings_doc.get("counts") or {}
+    actionable = [
+        f
+        for f in (findings_doc.get("findings") or [])
+        if isinstance(f, dict)
+        and not any((f.get("excepted"), f.get("baselined"), str(f.get("priority", "P3")) not in allowed_priorities))
+    ]
+
+    lines: list[str] = [
+        f"## QA Gate: `{verdict}`",
+        "",
+        f"- **Run ID:** `{run_id}` | **Fail threshold:** `{threshold}`",
+        f"- **Tests:** {collected} collected, {passed} passed, {failed} failed, {flaky} flaky, {skipped} skipped",
+        f"- **Findings:** P0={counts.get('P0', 0)}, P1={counts.get('P1', 0)}, P2={counts.get('P2', 0)}, P3={counts.get('P3', 0)} ({counts.get('total', 0)} total)",
+        "",
+    ]
+
+    if not actionable:
+        lines.append(f"All checks at or above `{threshold}` passed.")
+    else:
+        lines.extend(
+            [
+                f"### Blocking / Actionable Findings (`>= {threshold}`)",
+                "",
+                "| ID | Priority | Class | Location | Why |",
+                "|---|---|---|---|---|",
+            ]
+        )
+        for finding in actionable[:10]:
+            fid = _SAFE_RULE_RE.sub("", str(finding.get("id", "F-000")))[:20]
+            prio = _SAFE_RULE_RE.sub("", str(finding.get("priority", "P2")))[:10]
+            fclass = _SAFE_RULE_RE.sub("", str(finding.get("class", "heuristic")))[:20]
+            conf = _SAFE_RULE_RE.sub("", str(finding.get("confidence", "high")))[:10]
+            loc = _safe_location(finding.get("file"), finding.get("line"))
+            ftype = str(finding.get("type", "drift"))
+            tpl = _TEMPLATES.get(ftype, _TEMPLATES["default"])
+            why = tpl["why"].replace("|", "/")
+            lines.append(f"| `{fid}` | `{prio}` | `{fclass} ({conf})` | `{loc}` | {why} |")
+        lines.append("")
+        lines.append("See `fix-brief.md` for self-contained, copy-ready remediation instructions.")
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def write_pr_comment(
+    report: dict[str, Any],
+    findings_doc: dict[str, Any],
+    base_dir: Path | str,
+    *,
+    fail_on: str = "P1",
+) -> Path:
+    """Write ``<base_dir>/<run_id>/pr-comment.md`` and mirror to ``<base_dir>/latest/pr-comment.md``."""
+    base = Path(base_dir)
+    run_id = str(findings_doc.get("run_id") or report.get("run_id") or "")
+    run_dir = base / run_id if run_id else base
+    os.makedirs(run_dir, exist_ok=bool(run_dir))
+    comment_text = render_pr_comment(report, findings_doc, fail_on=fail_on)
+    comment_path = run_dir / "pr-comment.md"
+    comment_path.write_text(comment_text, encoding="utf-8")
+    if run_id:
+        latest_dir = base / "latest"
+        os.makedirs(latest_dir, exist_ok=bool(latest_dir))
+        shutil.copyfile(comment_path, latest_dir / "pr-comment.md")
+    return comment_path

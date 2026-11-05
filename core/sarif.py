@@ -304,15 +304,24 @@ def _safe_rel_path(value: Any) -> str | None:
     return posix
 
 
-def _make_location(rel_uri: str) -> dict[str, Any]:
-    return {
-        "physicalLocation": {
-            "artifactLocation": {
-                "uri": rel_uri,
-                "uriBaseId": "%SRCROOT%",
-            }
+def _positive_line(val: Any) -> int | None:
+    if isinstance(val, int):
+        if val > 0:
+            return val
+    return None
+
+
+def _make_location(rel_uri: str, line: int | None = None) -> dict[str, Any]:
+    phys: dict[str, Any] = {
+        "artifactLocation": {
+            "uri": rel_uri,
+            "uriBaseId": "%SRCROOT%",
         }
     }
+    pos_line = _positive_line(line)
+    if pos_line is not None:
+        phys["region"] = {"startLine": pos_line}
+    return {"physicalLocation": phys}
 
 
 # --- result assembly --------------------------------------------------------
@@ -323,6 +332,7 @@ def _append_result(
     level: str,
     message: str,
     location_uri: str | None,
+    line: int | None = None,
 ) -> None:
     entry: dict[str, Any] = {
         "ruleId": rule_id,
@@ -332,7 +342,7 @@ def _append_result(
     }
     safe_uri = _safe_rel_path(location_uri) if location_uri else None
     if safe_uri:
-        entry["locations"] = [_make_location(safe_uri)]
+        entry["locations"] = [_make_location(safe_uri, line=line)]
     results.append(entry)
 
 
@@ -367,6 +377,8 @@ def _add_lexi(results: list[dict[str, Any]], report: dict[str, Any]) -> None:
         level = _severity_to_level(str(finding.get("severity") or "medium"))
         message = str(finding.get("message") or kind or rule_id)
         path_value = finding.get("path")
+        if not path_value:
+            path_value = finding.get("docs_file")
         safe_path = _safe_rel_path(path_value)
         location_uri = safe_path if safe_path and safe_path in known_files else None
         _append_result(
@@ -375,6 +387,7 @@ def _add_lexi(results: list[dict[str, Any]], report: dict[str, Any]) -> None:
             level=level,
             message=message,
             location_uri=location_uri,
+            line=_positive_line(finding.get("docs_line")),
         )
 
 
@@ -519,6 +532,12 @@ def _add_nova(results: list[dict[str, Any]], report: dict[str, Any]) -> None:
             location_uri=None,
         )
         return
+    line_by_node: dict[str, int] = {}
+    for f_entry in execution.get("failures", ()):
+        if isinstance(f_entry, dict):
+            f_line = _positive_line(f_entry.get("line"))
+            if f_line is not None:
+                line_by_node[str(f_entry.get("node", ""))] = f_line
     for node, safe_uri, msg in entries:
         body = f"{node}: {msg}" if msg else node
         _append_result(
@@ -527,6 +546,7 @@ def _add_nova(results: list[dict[str, Any]], report: dict[str, Any]) -> None:
             level="error",
             message=body,
             location_uri=safe_uri,
+            line=line_by_node.get(node),
         )
 
 

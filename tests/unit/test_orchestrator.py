@@ -676,3 +676,70 @@ def test_a_required_sandbox_that_cannot_start_still_vetoes_dangerous_code(tmp_pa
     preflight = [item for item in report.role_results if item.role == "sable" and item.stage == "preflight"]
     assert preflight[0].verdict == Verdict.BLOCK.value
 
+
+def test_profile_and_fail_on_validation_and_verdict_override(tmp_path: Path, monkeypatch):
+    import pytest
+    from core.orchestrator import apply_profile
+    import main as main_mod
+
+    with pytest.raises(ValueError, match="invalid profile"):
+        apply_profile({"profile": "unknown"})
+    with pytest.raises(ValueError, match="invalid fail_on"):
+        apply_profile({"fail_on": "P9"})
+
+    factory_cfg = apply_profile({"profile": "factory"})
+    assert factory_cfg["profile"] == "factory"
+    assert factory_cfg["fail_on"] == "P2"
+    assert factory_cfg["identity_strict"] is True
+    assert factory_cfg["mutation"]["enabled"] is True
+
+    # Explicit overrides preserved under factory profile
+    override_cfg = apply_profile({"profile": "factory", "fail_on": "p0", "identity_strict": False, "mutation": {"enabled": False}})
+    assert override_cfg["fail_on"] == "P0"
+    assert override_cfg["identity_strict"] is False
+    assert override_cfg["mutation"]["enabled"] is False
+
+    # pull_request_target security guard in main.py
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "pull_request_target")
+    assert main_mod.main(["--self-test"]) == 2
+    monkeypatch.delenv("GITHUB_EVENT_NAME", raising=False)
+
+    # CLI flags parsing and wiring
+    project = mini_project(tmp_path / "proj")
+    reports_dir = tmp_path / "reports_cli"
+    rc = main_mod.main([
+        "--project", str(project),
+        "--docs", str(project / "docs"),
+        "--reports-dir", str(reports_dir),
+        "--profile", "default",
+        "--fail-on", "p2",
+        "--fix-brief", "false",
+    ])
+    assert rc in (0, 1)
+    assert not (reports_dir / "latest" / "fix-brief.md").exists()
+    assert (reports_dir / "latest" / "pr-comment.md").is_file()
+
+    # fail_on="P0" downgrades a P1 drift VETO to CLEAR when tests pass
+    (project / "docs" / "extra.md").write_text("# Extra\n\nCall `missing_func_xyz()` now.\n", encoding="utf-8")
+    rep_p0 = Vesper({
+        "dry_run": True,
+        "allow_network": False,
+        "reports_dir": str(tmp_path / "rep_p0"),
+        "isolation_method": "copy",
+        "fail_on": "P0",
+        "lexi": {"veto_on_missing_code": True},
+    }).run(project, project / "docs")
+    assert rep_p0.verdict == Verdict.CLEAR.value
+
+    # fail_on="P2" upgrades a run that had only a P2 drift finding (veto_on_missing_code=False) from CLEAR to VETO
+    rep_p2 = Vesper({
+        "dry_run": True,
+        "allow_network": False,
+        "reports_dir": str(tmp_path / "rep_p2"),
+        "isolation_method": "copy",
+        "fail_on": "P2",
+        "lexi": {"veto_on_missing_code": False},
+    }).run(project, project / "docs")
+    assert rep_p2.verdict == Verdict.VETO.value
+
+

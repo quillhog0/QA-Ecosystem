@@ -575,3 +575,18 @@ def test_finding_class_and_low_confidence_heuristic_p2_cap() -> None:
     assert high_heur["priority"] == "P3"
 
 
+def test_verdict_effect_for_fail_on_levels_and_schema_v1_0_0() -> None:
+    assert findings.verdict_effect_for("P0", "ev", fail_on="P0") == "VETO"
+    assert findings.verdict_effect_for("P1", "ev", fail_on="P0") == "WARN"
+    assert findings.verdict_effect_for("P2", "ev", fail_on="P2") == "VETO"
+    assert findings.verdict_effect_for("P3", "ev", fail_on="P2") == "INFO"
+    assert findings.verdict_effect_for("P3", "ev", fail_on="P3") == "VETO"
+    assert findings.verdict_effect_for("P0", "", fail_on="P0") == "WARN"
+
+    doc_p2 = findings.build_document(_many_findings(2), fail_on="P2")
+    assert all(f["verdict_effect"] == "VETO" for f in doc_p2["findings"])
+    doc_v100 = dict(doc_p2, schema_version="1.0.0")
+    assert findings.validate_schema(doc_v100, findings.load_schema()) == []
+
+
+

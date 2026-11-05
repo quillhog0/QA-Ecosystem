@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.6.0 (2026-11-05)
+
+### Added
+- **Action UX inputs and profiles (`main.py`, `action.yml`, `core/orchestrator.py`, `core/findings.py`)**:
+  - `fail-on: p0|p1|p2|p3` (default `p1`): findings at or above the configured priority trigger `VETO`; lower priorities are emitted as annotations (`WARN` / `INFO`).
+  - `profile: default|factory` (default `default`): `factory` enables `fail-on: p2`, `identity-strict: true`, and `mutation: true` while allowing explicit CLI/Action inputs to override profile defaults.
+  - `fix-brief: true|false` (default `true`): controls whether `fix-brief.md` is generated.
+  - `pr-comment: true|false` (default `false`): generates `reports/<run>/pr-comment.md` and `reports/latest/pr-comment.md` with a concise, prompt-injection-safe PR comment summary and optionally posts it on `pull_request` events.
+- **SARIF 2.1.0 inline annotations at `file:line` (`core/sarif.py`)**: populates `physicalLocation.region.startLine` when positive line numbers are present on findings or test failures.
+- **Versioned findings schema (`docs/findings.schema.json`)**: supports `schema_version` `"1"` and `"1.0.0"`.
+- **Action permissions and trigger hardening (`main.py`, `action.yml`, `.github/workflows/ci.yml`)**: refuses execution under `pull_request_target` and declares minimal `permissions: contents: read` in workflows.
+
 ## 0.5.0 (2026-11-05)
 
 ### Added

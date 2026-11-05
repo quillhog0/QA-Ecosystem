@@ -173,3 +173,49 @@ def test_fix_brief_blocked_env_and_all_finding_types() -> None:
     assert "Flaky test execution at `tests/test_f.py:4`" in text
     assert "Weak or assertion-free test at `tests/test_w.py`" in text
 
+
+def test_pr_comment_rendering_and_write(tmp_path: Path) -> None:
+    rep = _sample_report(
+        verdict="VETO",
+        execution={"collected": 5, "passed": 4, "failed": 1, "flaky": 1, "skipped": 0},
+        drift={
+            "findings": [
+                {
+                    "kind": "missing_cli_flag",
+                    "path": "--dry-run",
+                    "severity": "high",
+                    "message": "CLI flag '--dry-run' missing",
+                    "docs_file": "README.md",
+                    "docs_line": 42,
+                }
+            ]
+        },
+        post_audit={
+            "riley": {"gaps": ["weak test: tests/test_w.py::test_noop (no assertions)"]},
+        },
+    )
+    comment = brief.render_pr_comment(rep, fail_on="P1")
+    assert "## QA Gate: `VETO`" in comment
+    assert "**Fail threshold:** `P1`" in comment
+    assert "5 collected, 4 passed, 1 failed, 1 flaky, 0 skipped" in comment
+    assert "### Blocking / Actionable Findings (`>= P1`)" in comment
+    assert "`README.md:42`" in comment
+    assert "See `fix-brief.md` for self-contained, copy-ready remediation instructions." in comment
+
+    # Clear comment with no findings
+    clear_rep = _sample_report(verdict="CLEAR", execution={"collected": 3, "passed": 3, "failed": 0})
+    clear_comment = brief.render_pr_comment(clear_rep)
+    assert "All checks at or above `P1` passed." in clear_comment
+    assert brief.render_pr_comment(clear_rep, {"run_id": "r", "verdict": "CLEAR", "findings": ["not-a-dict"]})
+
+    # Write pr-comment.md directly and via write_findings (including write_brief=False)
+    direct_path = brief.write_pr_comment(rep, findings.build_document(rep), tmp_path / "direct_pr")
+    assert direct_path == tmp_path / "direct_pr" / "run-brief-01" / "pr-comment.md"
+    assert (tmp_path / "direct_pr" / "latest" / "pr-comment.md").is_file()
+
+    findings.write_findings(rep, tmp_path / "no_brief", fail_on="P2", write_brief=False)
+    assert not (tmp_path / "no_brief" / "run-brief-01" / "fix-brief.md").exists()
+    assert (tmp_path / "no_brief" / "run-brief-01" / "pr-comment.md").is_file()
+    assert (tmp_path / "no_brief" / "latest" / "pr-comment.md").is_file()
+
+

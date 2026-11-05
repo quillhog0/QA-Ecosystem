@@ -578,3 +578,49 @@ def test_sarif_clear_never_emits_vesper003() -> None:
         post_audit={"root_cause": "missing dependency: something"},
     )
     assert "VESPER003" not in _results_by_rule(sarif.build_sarif(report))
+
+
+def test_sarif_populates_start_line_for_lexi_and_nova() -> None:
+    report = _minimal_report(
+        verdict="VETO",
+        drift={
+            "code_files": ["src/app.py"],
+            "test_files": ["tests/test_app.py"],
+            "docs_files": ["README.md"],
+            "findings": [
+                {
+                    "kind": "missing_code",
+                    "path": "README.md",
+                    "docs_line": 17,
+                    "severity": "high",
+                    "message": "missing symbol at line 17",
+                },
+                {
+                    "kind": "missing_code",
+                    "path": "src/app.py",
+                    "docs_line": 0,
+                    "severity": "medium",
+                    "message": "zero line omits region",
+                },
+            ],
+        },
+        execution={
+            "exit_code": 1,
+            "failed": 1,
+            "stdout": "FAILED tests/test_app.py::test_boom - AssertionError",
+            "failures": [
+                {
+                    "node": "tests/test_app.py::test_boom",
+                    "line": 29,
+                }
+            ],
+        },
+    )
+    doc = sarif.build_sarif(report)
+    by_rule = _results_by_rule(doc)
+    lexi_res = by_rule["LEXI001"]
+    assert lexi_res[0]["locations"][0]["physicalLocation"]["region"] == {"startLine": 17}
+    assert "region" not in lexi_res[1]["locations"][0]["physicalLocation"]
+    nova_res = by_rule["NOVA001"][0]
+    assert nova_res["locations"][0]["physicalLocation"]["region"] == {"startLine": 29}
+

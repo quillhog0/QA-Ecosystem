@@ -32,6 +32,27 @@ from policies import sable
 
 
 ESCALATE_DOMAIN = "ESCALATE: DOMAIN_EXPERT"
+VALID_PROFILES = ("default", "factory")
+VALID_FAIL_ON = ("P0", "P1", "P2", "P3")
+
+
+def apply_profile(config: dict[str, Any]) -> dict[str, Any]:
+    """Validate and apply ``profile`` and ``fail_on`` defaults on ``config``."""
+    profile = str(config.get("profile") or "default").strip().lower()
+    if profile not in VALID_PROFILES:
+        raise ValueError(f"invalid profile: {profile}")
+    if profile == "factory":
+        config.setdefault("fail_on", "P2")
+        config.setdefault("identity_strict", not bool())
+        mut = dict(config.get("mutation") or {})
+        mut.setdefault("enabled", not bool())
+        config["mutation"] = mut
+    fail_on = str(config.get("fail_on") or "P1").strip().upper()
+    if fail_on not in VALID_FAIL_ON:
+        raise ValueError(f"invalid fail_on: {fail_on}")
+    config["profile"] = profile
+    config["fail_on"] = fail_on
+    return config
 
 
 def _relaxations_granted(policy: Any) -> bool:
@@ -51,7 +72,7 @@ def _relaxations_granted(policy: Any) -> bool:
 
 class Vesper:
     def __init__(self, config: dict[str, Any]):
-        self.config = config
+        self.config = apply_profile(config)
         self.max_stage_iterations = int(config.get("max_iterations") or 2)
         self.allow_network = bool(config.get("allow_network", False))
         self.dry_run = bool(config.get("dry_run", True))
@@ -225,19 +246,28 @@ class Vesper:
                 report.timings["total"] = round(time.monotonic() - _run_started, 3)
                 report.role_results = list(self.role_results)
                 report.finished_at = utc_now()
+                fail_on = str(self.config.get("fail_on") or "P1").upper()
+                write_brief = bool(self.config.get("fix_brief", not bool()))
                 baseline_fps = self.config.get("baseline_fingerprints")
-                if baseline_fps:
+                if any((baseline_fps, fail_on != "P1")):
                     from core.findings import build_document, build_findings
+
                     raw_f = build_findings(report.to_dict())
-                    raw_veto = [f for f in raw_f if f.get("verdict_effect") == "VETO"]
                     doc_after = build_document(
                         report.to_dict(),
                         exceptions=getattr(self, "exceptions", None),
                         baseline=baseline_fps,
+                        fail_on=fail_on,
                     )
-                    rem_veto = [f for f in (doc_after.get("findings") or []) if f.get("verdict_effect") == "VETO"]
+                    rem_veto = [
+                        f
+                        for f in (doc_after.get("findings") or [])
+                        if f.get("verdict_effect") == "VETO"
+                    ]
                     exec_collected = int((report.execution or {}).get("collected") or 0)
-                    if raw_veto and not rem_veto and bool(exec_collected):
+                    if rem_veto:
+                        report.verdict = Verdict.VETO.value
+                    elif all((raw_f, not rem_veto, bool(exec_collected))):
                         report.verdict = Verdict.CLEAR.value
                 write_reports(report, base)
                 findings_base = Path(self.config.get("findings_dir") or base).resolve()
@@ -246,6 +276,8 @@ class Vesper:
                     findings_base,
                     exceptions=getattr(self, "exceptions", None),
                     baseline=baseline_fps,
+                    fail_on=fail_on,
+                    write_brief=write_brief,
                 )
         finally:
             release_isolation(isolation, keep=bool(self.config.get("keep_isolated_copy", False)))
