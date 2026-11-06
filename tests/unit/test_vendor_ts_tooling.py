@@ -20,12 +20,16 @@ def _git(*args: str) -> str:
     return subprocess.run(["git", *args], cwd=REPO, capture_output=True, text=True, check=True).stdout
 
 
-def test_vendor_typescript_is_not_tracked_in_git():
+def test_vendor_typescript_is_tracked_and_pinned():
     if not (REPO / ".git").exists() or shutil.which("git") is None:
         pytest.skip("not a git checkout")
     tracked = _git("ls-files", "--", VENDOR_REL).split()
-    assert tracked == [], "vendored typescript.js must be removed from git tracking in v0.5.0"
-    assert not (REPO / VENDOR_REL).exists()
+    assert tracked == [VENDOR_REL], "pinned typescript.js must be tracked so the released action contains it"
+    # Content as stored in the index (what `git archive` / the action ships), not the working tree.
+    blob = __import__("subprocess").run(
+        ["git", "show", f":{VENDOR_REL}"], cwd=REPO, capture_output=True, check=True
+    ).stdout
+    assert hashlib.sha256(blob).hexdigest() == toolchain.PINNED_TS_SHA256
 
 
 def test_vendor_license_is_apache():
@@ -86,7 +90,8 @@ def test_bootstrap_ts_tooling_candidates_and_network_fallback(tmp_path: Path, mo
     cands = toolchain._candidate_ts_sources(default_tooling, tmp_path / "vendor.js")
     assert (default_tooling / "typescript.js") not in cands
 
-    # Offline with no candidates -> returns False
+    # Offline with no candidates -> returns False (hide vendor/cache via empty candidate list)
+    monkeypatch.setattr(toolchain, "_candidate_ts_sources", lambda *a, **k: [])
     assert toolchain.bootstrap_ts_tooling(target, allow_network=False) is False
 
     # Network enabled, npm install fails -> returns False

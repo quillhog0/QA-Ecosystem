@@ -18,6 +18,7 @@ def test_ensure_ts_tooling_never_loads_or_caches_project_node_modules(tmp_path: 
     cache_dir = tmp_path / "cache"
     tooling_dir = cache_dir / "tooling"
     monkeypatch.setenv("QA_TOOLING_DIR", str(tooling_dir))
+    monkeypatch.setattr(toolchain, "_DEFAULT_CACHE_HOME", tmp_path / "empty_default_cache")
 
     proj = tmp_path / "malicious_proj"
     malicious_ts = proj / "node_modules" / "typescript" / "lib" / "typescript.js"
@@ -80,6 +81,7 @@ def test_ts_missing_tooling_returns_blocked_env(tmp_path: Path, monkeypatch):
     empty_tooling = tmp_path / "empty_tooling"
     empty_tooling.mkdir()
     monkeypatch.setenv("QA_TOOLING_DIR", str(empty_tooling))
+    monkeypatch.setattr(toolchain, "_DEFAULT_CACHE_HOME", tmp_path / "empty_default_cache")
 
     with patch("pathlib.Path.is_file", autospec=True) as mock_is_file:
         def custom_is_file(self):
@@ -96,6 +98,7 @@ def test_ensure_ts_tooling_size_and_sha_branches(tmp_path: Path, monkeypatch):
     tooling_dir = tmp_path / "tooling"
     tooling_dir.mkdir()
     monkeypatch.setenv("QA_TOOLING_DIR", str(tooling_dir))
+    monkeypatch.setattr(toolchain, "_DEFAULT_CACHE_HOME", tmp_path / "empty_default_cache")
 
     target_ts = tooling_dir / "typescript.js"
     sha_file = tooling_dir / "typescript.sha256"

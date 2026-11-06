@@ -272,7 +272,7 @@ def bootstrap_ts_tooling(target_dir: Path, *, allow_network: bool = bool()) -> b
     sha_file = target_dir / "typescript.sha256"
     vendor_ts = Path(__file__).resolve().parents[1] / "agents" / "vendor" / "typescript.js"
 
-    candidates = [] if (not vendor_ts.is_file() and hasattr(Path.is_file, "mock")) else list(_candidate_ts_sources(target_dir, vendor_ts))
+    candidates = list(_candidate_ts_sources(target_dir, vendor_ts))
     npm_bin = shutil.which("npm") if allow_network else None
     tmp_obj = None
     if npm_bin and not any(c.is_file() for c in candidates):

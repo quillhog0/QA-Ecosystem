@@ -152,6 +152,7 @@ def test_toolchain_ensure_ts_tooling_project_and_cache(tmp_path: Path, monkeypat
     cache_dir = tmp_path / "cache"
     tooling_dir = cache_dir / "tooling"
     monkeypatch.setenv("QA_TOOLING_DIR", str(tooling_dir))
+    monkeypatch.setattr(toolchain, "_DEFAULT_CACHE_HOME", tmp_path / "empty_default_cache")
 
     # Calling twice on existing directory must succeed without FileExistsError (exist_ok=True)
     assert toolchain.ensure_ts_tooling() == tooling_dir

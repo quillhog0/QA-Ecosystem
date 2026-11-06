@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.1 (2026-11-06)
+
+### Fixed
+- **Restored shipped pinned TypeScript compiler** (`agents/vendor/typescript.js`): regression from 0.5.0 that removed the tracked artifact caused `BLOCKED_ENV` ("missing TypeScript tooling") on every fresh offline runner (GitHub Actions default `allow-network: false`). The pinned `typescript@5.6.3` file (SHA-256 `3ae902c9…e7675`, Apache-2.0) is tracked again; `ensure_ts_tooling` uses it offline and keeps the npm-download path only as a fallback when `allow_network` is true.
+- **README version string**: corrected stale "Version 0.7.0" banner and action pin examples to `@v0.8.1`.
+
 ## 0.8.0 (2026-11-05)
 
 ### Added
