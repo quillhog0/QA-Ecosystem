@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.2 (2026-11-10)
 
 ### Fixed
 - **Sable unsandboxed test operations are an environment stop, not a product VETO.** When bubblewrap is unavailable, operations the sandbox would confine (subprocess, eval, deletes, and test-local network helpers) return `BLOCKED_ENV` (exit 2) instead of `VETO`. Tests are never executed unsandboxed. The report includes a ready-to-paste `sable.allow_in_tests` YAML block. Hits that would still block under the sandbox (for example `os.system` in production source) remain a `VETO`.
