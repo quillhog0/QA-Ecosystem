@@ -18,6 +18,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from agents import aria, inventory, riley
+from agents.riley import WeakTestHit
 from core import toolchain
 from core.packets import ExecutionResult, Scenario, TestPlan, Verdict
 from policies import sable
@@ -199,13 +200,13 @@ def test_riley_weak_tests_deterministic_sorting():
         ]
     )
     weak_tests = {
-        "tests/test_b.py::test_b": "vacuous",
-        "tests/test_z.py::test_z": "no assertions",
-        "tests/test_a.py::test_a": "vacuous",
-        "tests/test_m.py::test_m": "tautology",
+        "tests/test_b.py::test_b": WeakTestHit(reason="vacuous"),
+        "tests/test_z.py::test_z": WeakTestHit(reason="no assertions", priority="P1"),
+        "tests/test_a.py::test_a": WeakTestHit(reason="vacuous"),
+        "tests/test_m.py::test_m": WeakTestHit(reason="tautology"),
     }
 
-    with patch("agents.riley.detect_weak_tests", return_value=weak_tests):
+    with patch("agents.riley.detect_weak_test_hits", return_value=weak_tests):
         # 1. Default config: veto_on_uncovered_claims is False -> uncovered claims not in gaps
         review = riley.review_plan(plan, config={"llm": {"provider": "none"}}, project_root=Path("."))
         gap_weak_entries = [g for g in review.gaps if g.startswith("weak test:")]
@@ -213,7 +214,7 @@ def test_riley_weak_tests_deterministic_sorting():
             "weak test: tests/test_a.py::test_a (vacuous)",
             "weak test: tests/test_b.py::test_b (vacuous)",
             "weak test: tests/test_m.py::test_m (tautology)",
-            "weak test: tests/test_z.py::test_z (no assertions)",
+            "weak test: tests/test_z.py::test_z ([P1] no assertions)",
         ]
         assert not any("uncovered claims" in g for g in review.gaps)
         assert any("claim C1 is covered only by weak test" in g for g in review.gaps)
@@ -238,7 +239,7 @@ def test_riley_weak_tests_deterministic_sorting():
         # Strong test must NOT be flagged as weak
         assert not any("claim C2 is covered only by weak test" in g for g in res_review.gaps)
 
-    with patch("agents.riley.detect_weak_tests", return_value={}):
+    with patch("agents.riley.detect_weak_test_hits", return_value={}):
         strict_cfg = {"llm": {"provider": "none"}, "riley": {"veto_on_uncovered_claims": True}}
         clean_plan = TestPlan(
             scenarios=[
@@ -247,10 +248,10 @@ def test_riley_weak_tests_deterministic_sorting():
             ]
         )
         strict_res_review = riley.review_results(clean_plan, asdict(exec_res), config=strict_cfg, project_root=Path("."))
-        assert strict_res_review.verdict == Verdict.VETO.value
-        assert "uncovered claims: C2" in strict_res_review.root_cause
+        # Uncovered claims stay P2 WARN and must not VETO on their own.
+        assert strict_res_review.verdict != Verdict.VETO.value
+        assert any("claim not covered by tests: C2" in g for g in strict_res_review.gaps)
 
-        # When veto_on_uncovered_claims is False and no weak tests exist, verdict is not uncovered claims VETO
         lax_res_review = riley.review_results(clean_plan, asdict(exec_res), config={"llm": {"provider": "none"}}, project_root=Path("."))
         assert lax_res_review.verdict != Verdict.VETO.value
 
@@ -278,8 +279,10 @@ def test_riley_and_sable_ts_tooling_and_subprocess(tmp_path: Path):
         assert kwargs.get("text") is True
         assert kwargs.get("check") is False
         assert "QA_TOOLING_DIR" in kwargs.get("env", {})
-        assert riley_res["t1"] == "[P2] empty"
-        assert riley_res["t1_name"] == "[P2] empty"
+        assert riley_res["t1"].reason == "empty"
+        assert riley_res["t1"].priority == "P2"
+        assert riley_res["t1_name"].reason == "empty"
+        assert riley_res["t1_name"].priority == "P2"
 
         mock_subproc2 = MagicMock(
             returncode=0,

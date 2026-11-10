@@ -126,6 +126,8 @@ class Scenario:
     covered_by: list[str] = field(default_factory=list)
     score: int = 0
     covered_by_weak: list[str] = field(default_factory=list)
+    docs_file: str | None = None
+    docs_line: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

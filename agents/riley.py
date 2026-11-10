@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+from dataclasses import dataclass
 from typing import Any
 
 from agents.adapters import complete_with_status, format_llm_error, load_prompt, parse_yaml_block
@@ -26,6 +27,94 @@ MAX_REPORTED_FAILURE_LINES = 40
 
 # pytest default collection: files named test_*.py or *_test.py.
 _PYTEST_COLLECTED_FILE_RE = re.compile(r"^(?:test_.*|.*_test)\.py$")
+
+
+# Hollow tests that can never fail, plus a leftover ``.only`` that hides the
+# rest of the suite. These match the TypeScript analyzer's P1 reasons so
+# Python and TS use the same ladder. Other weak patterns (skip, trivial
+# assertions, snapshots) stay P2 unless they uniquely guard a security,
+# privacy or payment claim.
+_P1_WEAK_FRAGMENTS = (
+    "assertion failures swallowed",
+    "tautology assertion",
+    "no assertions",
+    "committed .only focus flag",
+)
+
+_SECURITY_PRIVACY_PAYMENT_TERMS = (
+    "payment", "refund", "charge", "payout", "withdraw", "deposit",
+    "fee", "coupon", "invoice", "billing", "price", "discount",
+    "currency", "ledger", "money",
+    "secret", "credential", "password", "api key", "private key", "token",
+    "sandbox", "escape", "data loss", "corrupt", "wipe", "exfil",
+    "privacy", "plaintext", "pii", "gdpr", "email", "personal data",
+    "confidential", "authentication", "authorization",
+)
+
+
+def _normalize_term_text(text: str) -> str:
+    return " " + re.sub(r"[^a-z0-9]+", " ", (text or "").lower()) + " "
+
+
+def mentions_security_privacy_payment(text: str) -> bool:
+    """True when *text* (test id, body, or claim) is about security, privacy or payment."""
+    blob = _normalize_term_text(text)
+    return any(f" {term} " in blob for term in _SECURITY_PRIVACY_PAYMENT_TERMS)
+
+
+def weak_priority_for(reason: str, *, text: str = "") -> str:
+    low = (reason or "").lower()
+    if any(fragment in low for fragment in _P1_WEAK_FRAGMENTS) or "[p1]" in low:
+        return "P1"
+    if mentions_security_privacy_payment(f"{reason} {text}"):
+        return "P1"
+    return "P2"
+
+
+@dataclass
+class WeakTestHit:
+    reason: str
+    file: str = ""
+    line: int | None = None
+    priority: str = "P2"
+
+    def tagged_reason(self) -> str:
+        if self.priority == "P1" and "[p1]" not in self.reason.lower():
+            return f"[{self.priority}] {self.reason}"
+        return self.reason
+
+
+def format_weak_gap(test_id: str, hit: WeakTestHit) -> str:
+    loc = f" @ {hit.file}:{hit.line}" if hit.file and hit.line else ""
+    return f"weak test: {test_id} ({hit.tagged_reason()}){loc}"
+
+
+def upgrade_hits_for_plan(hits: dict[str, WeakTestHit], plan: TestPlan) -> None:
+    """Promote a P2 weak test to P1 when it is the coverage for a security/privacy/payment claim.
+
+    Skipped, trivial, and snapshot-only tests stay P2 — a skip does not
+    guard a claim, even if the docs mention sandbox or payment.
+    """
+    stay_p2 = ("skipped test", "only trivial assertions", "snapshot-only test")
+    claim_blobs: dict[str, list[str]] = {}
+    for scenario in plan.scenarios:
+        blob = " ".join(
+            [scenario.title, scenario.id]
+            + list(scenario.acceptance or [])
+            + list(scenario.steps or [])
+        )
+        for tid in list(scenario.covered_by or []) + list(scenario.covered_by_weak or []):
+            claim_blobs.setdefault(tid, []).append(blob)
+            claim_blobs.setdefault(tid.split("::")[-1], []).append(blob)
+    for tid, hit in hits.items():
+        if hit.priority == "P1":
+            continue
+        if hit.reason in stay_p2 or "skipped" in hit.reason.lower():
+            continue
+        extra = " ".join(claim_blobs.get(tid, []))
+        name = tid.split("::")[-1]
+        if mentions_security_privacy_payment(f"{name} {hit.reason} {extra}"):
+            hit.priority = "P1"
 
 
 def _observes_code(fn_node: ast.AST | None) -> bool:
@@ -426,7 +515,7 @@ def is_weak_test_node(
 def _detect_ts_weak_tests(
     project_root: Path | None,
     only_paths: set[str] | None = None,
-) -> dict[str, str]:
+) -> dict[str, WeakTestHit]:
     if not project_root or not project_root.is_dir():
         return {}
     analyzer_js = Path(__file__).resolve().parent / "ts_analyzer.js"
@@ -452,30 +541,41 @@ def _detect_ts_weak_tests(
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60, check=False, env=env)
         if proc.returncode == 0 and proc.stdout.strip():
             data = json.loads(proc.stdout)
-            results: dict[str, str] = {}
+            results: dict[str, WeakTestHit] = {}
             for item in data.get("weak_tests") or []:
-                tid = item.get("test_id")
-                reason = item.get("reason", "weak test")
-                priority = item.get("priority", "P1")
-                tagged = f"[{priority}] {reason}"
-                results[tid] = tagged
-                results[item.get("name")] = tagged
+                tid = str(item.get("test_id") or "")
+                name = str(item.get("name") or "")
+                reason = str(item.get("reason") or "weak test")
+                file_name = str(item.get("file") or "")
+                line = item.get("line")
+                try:
+                    line_no = int(line) if line is not None else None
+                except (TypeError, ValueError):
+                    line_no = None
+                priority = str(item.get("priority") or weak_priority_for(reason, text=f"{tid} {name}"))
+                if priority != "P1" and mentions_security_privacy_payment(f"{name} {reason}"):
+                    priority = "P1"
+                hit = WeakTestHit(reason=reason, file=file_name, line=line_no, priority=priority)
+                if tid:
+                    results[tid] = hit
+                if name:
+                    results[name] = hit
             return results
     except Exception:
         pass
     return {}
 
 
-def detect_weak_tests(
+def detect_weak_test_hits(
     project_root: Path | None,
     only_paths: set[str] | None = None,
-) -> dict[str, str]:
-    weak_tests: dict[str, str] = {}
+) -> dict[str, WeakTestHit]:
+    hits: dict[str, WeakTestHit] = {}
     if not project_root or not project_root.is_dir():
-        return weak_tests
+        return hits
 
     # TS / JS tests
-    weak_tests.update(_detect_ts_weak_tests(project_root, only_paths=only_paths))
+    hits.update(_detect_ts_weak_tests(project_root, only_paths=only_paths))
 
     helper_cache: dict[Path, frozenset[str]] = {}
     for path in project_root.rglob("*.py"):
@@ -512,9 +612,28 @@ def detect_weak_tests(
                     is_weak, reason = is_weak_test_node(node, helper_names, module_helpers)
                     if is_weak:
                         test_id = f"{rel}::{node.name}"
-                        weak_tests[test_id] = reason
-                        weak_tests[node.name] = reason
-    return weak_tests
+                        # Term matching uses the function name only — a path
+                        # like tests/unit/test_sandbox.py must not promote a
+                        # skipped test to P1 just because the file name has
+                        # a security word.
+                        priority = weak_priority_for(reason, text=node.name)
+                        hit = WeakTestHit(
+                            reason=reason,
+                            file=rel,
+                            line=int(node.lineno) if getattr(node, "lineno", None) else None,
+                            priority=priority,
+                        )
+                        hits[test_id] = hit
+                        hits[node.name] = hit
+    return hits
+
+
+def detect_weak_tests(
+    project_root: Path | None,
+    only_paths: set[str] | None = None,
+) -> dict[str, str]:
+    """Map of test id / function name to the raw weak-test reason (no priority tag)."""
+    return {key: hit.reason for key, hit in detect_weak_test_hits(project_root, only_paths=only_paths).items()}
 
 
 def review_plan(
@@ -538,11 +657,12 @@ def review_plan(
     if any("network" in " ".join(s.steps).lower() for s in plan.scenarios):
         gaps.append("plan steps appear to require network")
 
-    weak_tests = detect_weak_tests(project_root, only_paths=only_paths)
+    hits = detect_weak_test_hits(project_root, only_paths=only_paths)
+    upgrade_hits_for_plan(hits, plan)
     claims_covered_by_weak: list[str] = []
     for s in plan.scenarios:
         if s.id.startswith("C") and s.covered_by:
-            strong = [t for t in s.covered_by if t not in weak_tests and t.split("::")[-1] not in weak_tests]
+            strong = [t for t in s.covered_by if t not in hits and t.split("::")[-1] not in hits]
             if not strong:
                 claims_covered_by_weak.append(s.id)
                 s.covered_by_weak = list(s.covered_by)
@@ -551,9 +671,9 @@ def review_plan(
     for cid in claims_covered_by_weak:
         gaps.append(f"claim {cid} is covered only by weak test (not counted as covered)")
 
-    for tid in sorted(weak_tests):
+    for tid in sorted(hits):
         if "::" in tid:
-            gaps.append(f"weak test: {tid} ({weak_tests[tid]})")
+            gaps.append(format_weak_gap(tid, hits[tid]))
 
     veto_uncovered = bool((config.get("riley") or {}).get("veto_on_uncovered_claims", False))
     uncovered_claims = [s.id for s in plan.scenarios if s.id.startswith("C") and not s.covered_by]
@@ -740,7 +860,12 @@ def review_results(
     if not plan.scenarios:
         gaps.append("no plan to compare against results")
 
-    weak_tests = detect_weak_tests(project_root, only_paths=only_paths)
+    hits = detect_weak_test_hits(project_root, only_paths=only_paths)
+    upgrade_hits_for_plan(hits, plan)
+    veto_weak = bool((config.get("riley") or {}).get("veto_on_weak_tests", False))
+    if veto_weak:
+        for hit in hits.values():
+            hit.priority = "P1"
     claims_covered_by_weak: list[str] = []
     for s in plan.scenarios:
         if s.id.startswith("C"):
@@ -750,7 +875,7 @@ def review_results(
             elif s.covered_by:
                 strong = [
                     t for t in s.covered_by
-                    if t not in weak_tests and (t.split("::")[-1] not in weak_tests if "::" not in t else True)
+                    if t not in hits and (t.split("::")[-1] not in hits if "::" not in t else True)
                 ]
                 if not strong:
                     claims_covered_by_weak.append(s.id)
@@ -760,9 +885,9 @@ def review_results(
     for cid in claims_covered_by_weak:
         gaps.append(f"claim {cid} is covered only by weak test (not counted as covered)")
 
-    for tid in sorted(weak_tests):
+    for tid in sorted(hits):
         if "::" in tid:
-            gaps.append(f"weak test: {tid} ({weak_tests[tid]})")
+            gaps.append(format_weak_gap(tid, hits[tid]))
 
     veto_uncovered = bool((config.get("riley") or {}).get("veto_on_uncovered_claims", False))
     uncovered_claims = [s.id for s in plan.scenarios if s.id.startswith("C") and not s.covered_by]
@@ -770,11 +895,20 @@ def review_results(
         if s.id.startswith("C") and not s.covered_by:
             gaps.append(f"claim not covered by tests: {s.id}")
 
-    p1_ts_weak_tests = [k for k, r in weak_tests.items() if "[p1]" in r.lower() and "::" in k]
-    veto_weak = bool((config.get("riley") or {}).get("veto_on_weak_tests", False))
-    flagged_weak = [k for k in weak_tests if "::" in k] if veto_weak else p1_ts_weak_tests
-    if claims_covered_by_weak or flagged_weak:
-        weak_list = ", ".join(flagged_weak or [k for k in weak_tests if "::" in k])
+    # An environmental stop is not an accusation: do not let a hollow
+    # test outrank a run that never got a real chance to witness the plan.
+    # A product failure keeps env_cause as None (classify_execution).
+    env_cause = classify_execution(execution, project_root=project_root)
+    if env_cause is None:
+        env_cause = environment_failure_cause(execution)
+
+    # Verdict follows findings: only a P1 weak test (hollow or
+    # security/privacy/payment) can VETO, and only when the suite actually
+    # ran. Uncovered or weak-only claims stay in the gaps as P2 warnings
+    # and never set VETO on their own.
+    flagged_weak = [k for k, hit in hits.items() if "::" in k and hit.priority == "P1"]
+    if flagged_weak and env_cause is None:
+        weak_list = ", ".join(flagged_weak)
         return _maybe_llm(
             RedTeamReview(
                 verdict=Verdict.VETO.value,
@@ -782,19 +916,6 @@ def review_results(
                 required_changes=[f"replace weak tests ({weak_list}) with meaningful assertions"],
                 root_cause=f"weak test detected: {weak_list}",
                 notes="tests without meaningful assertions cannot verify claims",
-            ),
-            {"phase": "results", "plan": plan.to_dict(), "execution": _small_exec(execution)},
-            config,
-        )
-
-    if veto_uncovered and uncovered_claims:
-        return _maybe_llm(
-            RedTeamReview(
-                verdict=Verdict.VETO.value,
-                gaps=gaps,
-                required_changes=[f"add test coverage for claims: {', '.join(uncovered_claims)}"],
-                root_cause=f"uncovered claims: {', '.join(uncovered_claims)}",
-                notes="strict claims coverage enabled: all claims must have covering tests",
             ),
             {"phase": "results", "plan": plan.to_dict(), "execution": _small_exec(execution)},
             config,
@@ -810,14 +931,7 @@ def review_results(
         failure_cause = "pytest failures: " + "; ".join(
             detail_lines[:MAX_REPORTED_FAILURE_LINES]
         )
-    # An environmental stop is not an accusation: the tests never got the chance
-    # to witness the plan. The quality vetoes above still outrank it, and a real
-    # test failure always keeps the VETO (classify_execution returns None then).
-    env_cause = classify_execution(execution, project_root=project_root)
-    if env_cause is None:
-        # Failures inside a run that did execute: environmental only when every
-        # one of them was proved to be, one by one.
-        env_cause = environment_failure_cause(execution)
+    # env_cause was already classified above (before any weak-test VETO).
     technical_verdict = Verdict.BLOCKED_ENV.value if env_cause else Verdict.VETO.value
     blocked_note = "environment blocked: the tests could not run"
 

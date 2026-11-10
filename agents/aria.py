@@ -13,6 +13,39 @@ from agents.inventory import doc_tokens, list_python, list_sources, public_names
 from core.packets import Scenario, TestPlan
 
 
+_DOC_SUFFIXES = {".md", ".rst", ".txt", ".adoc"}
+
+
+def locate_claim_in_docs(docs_root: Path, claim: str) -> tuple[str | None, int | None]:
+    """Return ``(relative_path, line)`` of the first doc line that carries *claim*."""
+    needle = (claim or "").strip()
+    if not needle or not docs_root.exists():
+        return None, None
+    stripped = needle.lstrip("-* ").strip()
+    paths: list[Path] = []
+    if docs_root.is_file():
+        paths = [docs_root]
+        root = docs_root.parent
+    else:
+        root = docs_root
+        paths = sorted(
+            path for path in docs_root.rglob("*")
+            if path.is_file() and path.suffix.lower() in _DOC_SUFFIXES
+        )
+    for path in paths:
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        for index, line in enumerate(lines, start=1):
+            if needle in line or (stripped and stripped in line):
+                try:
+                    rel = str(path.relative_to(root)).replace("\\", "/")
+                except ValueError:
+                    rel = path.name
+                return rel, index
+    return None, None
+
 
 STOP_WORDS = {
     "the", "and", "for", "all", "not", "are", "can", "any", "has", "had",
@@ -206,6 +239,7 @@ def _heuristic_plan(
 
     for i, claim in enumerate(claims, start=1):
         covered, top_score = _find_covering_tests_scored(claim, tests, common_body_words)
+        doc_file, doc_line = locate_claim_in_docs(docs_root, claim)
         scenario = Scenario(
             id=f"C{i}",
             title=claim,
@@ -213,6 +247,8 @@ def _heuristic_plan(
             acceptance=["Claim is true"],
             negative=False,
             covered_by=covered,
+            docs_file=doc_file,
+            docs_line=doc_line,
         )
         scenario.score = top_score
         scenarios.append(scenario)
@@ -328,6 +364,9 @@ def _from_llm(data: dict[str, Any], fallback: TestPlan) -> TestPlan:
     scenarios: list[Scenario] = []
     fallback_map = {s.id: s.covered_by for s in fallback.scenarios if s.covered_by}
     fallback_score = {s.id: getattr(s, "score", 0) for s in fallback.scenarios}
+    fallback_loc = {
+        s.id: (s.docs_file, s.docs_line) for s in fallback.scenarios if s.docs_file
+    }
     for idx, item in enumerate(data.get("scenarios") or [], start=1):
         if not isinstance(item, dict):
             continue
@@ -335,6 +374,9 @@ def _from_llm(data: dict[str, Any], fallback: TestPlan) -> TestPlan:
         covered = [str(c) for c in (item.get("covered_by") or [])]
         if not covered and sc_id in fallback_map:
             covered = fallback_map[sc_id]
+        loc = fallback_loc.get(sc_id, (None, None))
+        docs_file = item.get("docs_file") or loc[0]
+        docs_line = item.get("docs_line") if item.get("docs_line") is not None else loc[1]
         sc = Scenario(
             id=sc_id,
             title=str(item.get("title") or f"Scenario {idx}"),
@@ -342,6 +384,8 @@ def _from_llm(data: dict[str, Any], fallback: TestPlan) -> TestPlan:
             acceptance=[str(s) for s in (item.get("acceptance") or [])],
             negative=bool(item.get("negative")),
             covered_by=covered,
+            docs_file=str(docs_file) if docs_file else None,
+            docs_line=int(docs_line) if docs_line else None,
         )
         sc.score = int(item.get("score") or fallback_score.get(sc_id, 0))
         scenarios.append(sc)

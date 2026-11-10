@@ -152,9 +152,9 @@ def test_riley_weak_test_gap_carries_the_node_file() -> None:
         "riley": {"gaps": ["weak test: tests/test_login.py::test_ok (no assertions)"]},
     })
     finding = _find(build, agent="riley", ftype="weak_test")
-    assert finding["priority"] == "P2"
+    assert finding["priority"] == "P1"
     assert finding["file"] == "tests/test_login.py"
-    assert finding["verdict_effect"] == "WARN"
+    assert finding["verdict_effect"] == "VETO"
 
 
 def test_riley_aggregate_repeats_are_skipped() -> None:
@@ -429,12 +429,12 @@ def test_markdown_has_the_documented_shape() -> None:
     lines = text.splitlines()
     assert lines[0].startswith("# Findings - run ")
     assert "| priority | count |" in lines
-    assert "| P2 | 3 |" in lines
+    assert "| P1 | 3 |" in lines
     assert "## Top 3 findings" in lines
     for line in lines:
         if line.startswith("- [F-"):
             assert "`tests/test_" in line
-            assert line.endswith("(WARN)")
+            assert line.endswith("(VETO)")
 
 
 def test_markdown_caps_at_max_lines_with_a_hint() -> None:
@@ -480,8 +480,8 @@ def test_findings_dir_flag_defaults_to_empty_and_parses() -> None:
 def test_counts_match_the_findings_list() -> None:
     doc = findings.build_document(_many_findings(5))
     assert doc["counts"]["total"] == len(doc["findings"]) == 5
-    assert doc["counts"]["P2"] == 5
-    assert doc["counts"]["P0"] == doc["counts"]["P1"] == doc["counts"]["P3"] == 0
+    assert doc["counts"]["P1"] == 5
+    assert doc["counts"]["P0"] == doc["counts"]["P2"] == doc["counts"]["P3"] == 0
 
 
 def test_finding_class_and_low_confidence_heuristic_p2_cap() -> None:
@@ -590,3 +590,77 @@ def test_verdict_effect_for_fail_on_levels_and_schema_v1_0_0() -> None:
 
 
 
+
+
+def test_swallowed_privacy_weak_test_is_p1_with_file_line() -> None:
+    build = _report(post_audit={
+        "riley": {"gaps": [
+            "weak test: tests/test_fulfillment.py::test_privacy_no_plaintext_email_anywhere "
+            "([P1] assertion failures swallowed by try/except) @ tests/test_fulfillment.py:12"
+        ]},
+    })
+    finding = _find(build, agent="riley", ftype="weak_test")
+    assert finding["priority"] == "P1"
+    assert finding["verdict_effect"] == "VETO"
+    assert finding["file"] == "tests/test_fulfillment.py"
+    assert finding["line"] == 12
+
+
+def test_skipped_weak_test_stays_p2() -> None:
+    build = _report(post_audit={
+        "riley": {"gaps": ["weak test: tests/test_x.py::test_skip (skipped test) @ tests/test_x.py:4"]},
+    })
+    finding = _find(build, agent="riley", ftype="weak_test")
+    assert finding["priority"] == "P2"
+    assert finding["verdict_effect"] == "WARN"
+    assert finding["line"] == 4
+
+
+def test_claim_findings_carry_docs_file_line_and_never_veto() -> None:
+    build = _report(
+        plan={"scenarios": [{
+            "id": "C3",
+            "title": "must never store a plaintext email",
+            "covered_by": [],
+            "docs_file": "docs/README.md",
+            "docs_line": 4,
+        }]},
+        post_audit={"riley": {"gaps": ["claim C3 is covered only by weak test (not counted as covered)"]}},
+        verdict="CLEAR",
+    )
+    aria_claims = [f for f in _by_type("claim", findings.build_findings(build)) if f["agent"] == "aria"]
+    riley_claims = [f for f in _by_type("claim", findings.build_findings(build)) if f["agent"] == "riley"]
+    assert aria_claims and aria_claims[0]["file"] == "docs/README.md"
+    assert aria_claims[0]["line"] == 4
+    assert riley_claims and riley_claims[0]["file"] == "docs/README.md"
+    assert riley_claims[0]["line"] == 4
+    doc = findings.build_document(build, fail_on="P2")
+    assert all(f["verdict_effect"] == "WARN" for f in doc["findings"] if f["type"] == "claim")
+
+
+def test_verdict_from_findings_and_consistency_invariant() -> None:
+    veto_finding = {
+        "verdict_effect": "VETO",
+        "priority": "P1",
+        "evidence": "swallowed",
+    }
+    warn_finding = {"verdict_effect": "WARN", "priority": "P2", "evidence": "claim C1"}
+    assert findings.verdict_from_findings("CLEAR", [veto_finding]) == "VETO"
+    assert findings.verdict_from_findings("VETO", [warn_finding]) == "CLEAR"
+    assert findings.verdict_from_findings("BLOCKED_ENV", [warn_finding]) == "BLOCKED_ENV"
+    assert findings.verdict_from_findings("BLOCKED_ENV", [veto_finding]) == "BLOCKED_ENV"
+    assert findings.verdict_from_findings("ESCALATE", [warn_finding]) == "ESCALATE"
+    findings.check_verdict_consistent("VETO", [veto_finding])
+    findings.check_verdict_consistent("CLEAR", [warn_finding])
+    try:
+        findings.check_verdict_consistent("VETO", [warn_finding])
+    except findings.VerdictInconsistent as exc:
+        assert "without a VETO finding" in str(exc)
+    else:
+        raise AssertionError("expected VerdictInconsistent")
+    try:
+        findings.check_verdict_consistent("CLEAR", [veto_finding])
+    except findings.VerdictInconsistent as exc:
+        assert "verdict is CLEAR" in str(exc)
+    else:
+        raise AssertionError("expected VerdictInconsistent")

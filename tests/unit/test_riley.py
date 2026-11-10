@@ -228,7 +228,7 @@ def test_riley_monotonic_veto_llm_cannot_override_to_clear(monkeypatch):
     assert review.root_cause
 
 
-def test_riley_vetoes_on_uncovered_claims_when_configured():
+def test_riley_does_not_veto_on_uncovered_claims_even_when_configured():
     plan = TestPlan(
         scenarios=[
             Scenario(id="C1", title="claim without test", steps=["verify"], acceptance=["pass"], negative=False, covered_by=[]),
@@ -244,18 +244,18 @@ def test_riley_vetoes_on_uncovered_claims_when_configured():
         "stdout": "1 passed",
         "stderr": "",
     }
-    # When false (default): CLEAR
     review_clear = review_results(
         plan, execution, config={"riley": {"veto_on_uncovered_claims": False}, "llm": {"provider": "none"}, "dry_run": True}
     )
     assert review_clear.verdict == Verdict.CLEAR.value
 
-    # When true: VETO
-    review_veto = review_results(
+    # Uncovered claims stay P2 WARN and must not VETO on their own,
+    # including when the historical strict flag is on.
+    review_strict = review_results(
         plan, execution, config={"riley": {"veto_on_uncovered_claims": True}, "llm": {"provider": "none"}, "dry_run": True}
     )
-    assert review_veto.verdict == Verdict.VETO.value
-    assert "uncovered claims" in review_veto.root_cause
+    assert review_strict.verdict == Verdict.CLEAR.value
+    assert any("claim not covered by tests: C1" in g for g in review_strict.gaps)
 
 
 def test_riley_review_plan_does_not_flag_uncovered_claims_by_default():

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.8.4 (2026-11-10)
+
+### Fixed
+- **Run verdict is derived only from findings.** A `VETO` is issued if and only if a finding has `verdict_effect=VETO` (a P0/P1 finding with evidence, subject to `fail-on`). Riley post-audit can no longer VETO on its own when every finding is P2 `WARN`. A `VETO` verdict without a `VETO` finding is impossible, and a `VETO` finding always yields `VETO`. `BLOCKED_ENV` and `ESCALATE` are preserved when no such finding exists.
+- **Swallowed, tautological, or assertion-free tests are P1 with `file:line`.** This matches the TypeScript analyzer. A leftover `.only` stays P1. Skipped, trivial, and snapshot-only tests stay P2, including when a loosely matched docs claim mentions security or the sandbox. Uncovered or weak-only claims stay P2 `WARN` and never VETO, even under `--strict` / `veto_on_uncovered_claims`. Claim findings now carry the docs `file:line` when it can be located.
+- **A mutation score below `--mutation-min-score`** is a P1 mutation finding, so that VETO is always backed by a finding.
+
+### Added
+- Benchmark seed `privacy_swallowed_test` (KeyHive-shaped privacy test whose `try/except` swallows assertions): `VETO` with a P1 `weak_test` on `tests/test_fulfillment.py:4`.
+
+
 ## 0.8.3 (2026-11-10)
 
 ### Fixed

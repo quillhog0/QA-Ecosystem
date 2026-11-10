@@ -249,34 +249,30 @@ class Vesper:
                 fail_on = str(self.config.get("fail_on") or "P1").upper()
                 write_brief = bool(self.config.get("fix_brief", not bool()))
                 baseline_fps = self.config.get("baseline_fingerprints")
-                llm_cfg = self.config.get("llm") or {}
-                llm_on = str(llm_cfg.get("provider") or "none").lower() not in {"", "none", "off", "heuristic"}
-                if any((baseline_fps, fail_on != "P1", llm_on)):
-                    from core.findings import build_document, build_findings
+                from core.findings import (
+                    build_document,
+                    check_verdict_consistent,
+                    verdict_from_findings,
+                )
 
-                    raw_f = build_findings(report.to_dict())
-                    doc_after = build_document(
-                        report.to_dict(),
-                        exceptions=getattr(self, "exceptions", None),
-                        baseline=baseline_fps,
-                        fail_on=fail_on,
-                        config=self.config,
-                        isolated_root=isolation.isolated_root,
-                    )
-                    rem_veto = [
-                        f
-                        for f in (doc_after.get("findings") or [])
-                        if f.get("verdict_effect") == "VETO"
-                    ]
-                    exec_collected = int((report.execution or {}).get("collected") or 0)
-                    if rem_veto:
-                        report.verdict = Verdict.VETO.value
-                    elif all((raw_f, not rem_veto, bool(exec_collected))):
-                        # Triage may downgrade the last P1, but never a P0 that
-                        # still has evidence (those stay VETO). BLOCKED_ENV is
-                        # left as an environment stop, not flipped to CLEAR.
-                        if report.verdict != Verdict.BLOCKED_ENV.value:
-                            report.verdict = Verdict.CLEAR.value
+                doc_after = build_document(
+                    report.to_dict(),
+                    exceptions=getattr(self, "exceptions", None),
+                    baseline=baseline_fps,
+                    fail_on=fail_on,
+                    config=self.config,
+                    isolated_root=isolation.isolated_root,
+                )
+                # The run verdict is derived only from findings: VETO if and
+                # only if a finding has verdict_effect=VETO (P0/P1 with
+                # evidence, subject to fail-on). Riley/Lexi role verdicts
+                # cannot VETO on their own. BLOCKED_ENV and ESCALATE stay
+                # when no such finding exists.
+                report.verdict = verdict_from_findings(
+                    report.verdict, doc_after.get("findings") or []
+                )
+                doc_after["verdict"] = report.verdict
+                check_verdict_consistent(report.verdict, doc_after.get("findings") or [])
                 write_reports(report, base)
                 findings_base = Path(self.config.get("findings_dir") or base).resolve()
                 write_findings(

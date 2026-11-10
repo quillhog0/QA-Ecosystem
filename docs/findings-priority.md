@@ -11,8 +11,8 @@ Riley post-audit) remains the only authority on CLEAR / VETO / BLOCKED_ENV.
 | Priority | Meaning | Where it comes from |
 |---|---|---|
 | P0 | data loss, money or security | Sable failures of the secret/secret-files/live-tree/isolated-target/AST/network checks; a failing product test whose name or message mentions a money/security term (`payment`, `refund`, `charge`, `payout`, `withdraw`, `deposit`, `secret`, `credential`, `password`, `api_key`, `private_key`, `sandbox`, `escape`, `data_loss`, `corrupt`, `wipe`, `exfil`) |
-| P1 | product test failure or code-shaped high drift | any Nova failure classified as product that is not P0; Sable `pytest_only` / `isolated_exists` failures; Lexi drift with severity `high` |
-| P2 | medium drift, weak test, unproven claim | Lexi drift `medium`; Riley weak-test and plan-quality gaps; Riley claim gaps and Aria claims with no covering test; Nova failures classified as environment; Nova pip-install failures; Sable non-blocking check failures (`collected_gt_zero`) |
+| P1 | product test failure, high drift, or a hollow test that cannot fail | any Nova failure classified as product that is not P0; Sable `pytest_only` / `isolated_exists` failures; Lexi drift with severity `high`; a weak test whose assertions are swallowed, tautological, or missing (it can never fail), a leftover `.only` focus flag, or any weaker test that uniquely guards a security, privacy or payment claim — always with `file:line` evidence |
+| P2 | medium drift, ordinary weak test, unproven claim | Lexi drift `medium`; Riley skip/trivial/snapshot weak tests and plan-quality gaps; Riley claim gaps and Aria claims with no covering test (these never VETO); Nova failures classified as environment; Nova pip-install failures; Sable non-blocking check failures (`collected_gt_zero`) |
 | P3 | low or historical items and nits | Lexi drift `low` (historical records, vocabulary notes); Sable warnings (sandbox-conditional relaxations) |
 
 Environment findings always use `type=environment` and are never P0 or P1: a
@@ -30,12 +30,17 @@ weakly covered), `weak_test` (a test that does not really check behaviour),
 
 ## Verdict rule
 
-A finding's `verdict_effect` is `VETO` only when its priority is P0 or P1
-*and* its `evidence` is non-empty. P3 findings are `INFO`; everything else is
-`WARN`. This label tells an IDE whether the single finding would justify
-blocking a merge; it does not feed back into the run verdict, so existing
-benchmark guards (doc drift, malicious conftest, cheating agent, live-tree
-guard) keep exactly the verdicts they have today.
+A finding's `verdict_effect` is `VETO` only when its priority is at or above
+`fail-on` (default P1, so P0/P1) *and* its `evidence` is non-empty. P3 findings
+are `INFO`; everything else is `WARN`. Claim findings (`type=claim`) stay
+`WARN` even when `fail-on` is P2: an uncovered or weak-only claim alone must
+not VETO.
+
+The run verdict is derived only from findings: `VETO` if and only if at least
+one finding has `verdict_effect=VETO`. A `VETO` verdict without a `VETO`
+finding is impossible, and a `VETO` finding always yields `VETO`.
+`BLOCKED_ENV` and `ESCALATE` are kept when no such finding exists. Role-level
+verdicts (including Riley post-audit) cannot set `VETO` on their own.
 
 ## Determinism
 

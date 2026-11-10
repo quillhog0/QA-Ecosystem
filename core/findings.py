@@ -70,6 +70,18 @@ _PY_PATH_RE = re.compile(rf"(?P<file>(?:[\w./-]+/)?[\w.-]+?{_EXT_PATTERN})")
 _WEAK_TEST_PREFIX = "weak test: "
 _CLAIM_WEAK_FRAGMENT = "covered only by weak test"
 _CLAIM_UNCOVERED_PREFIXES = ("claim not covered by tests:", "uncovered claims:")
+_WEAK_LOC_RE = re.compile(
+    rf"@ (?P<file>[\w./\-]+?{_EXT_PATTERN}):(?P<line>\d+)\s*$"
+)
+_CLAIM_ID_RE = re.compile(r"\b(C\d+)\b")
+# Hollow / hide-the-suite patterns: same ladder as the TypeScript analyzer (P1).
+_P1_WEAK_FRAGMENTS = (
+    "assertion failures swallowed",
+    "tautology assertion",
+    "no assertions",
+    "committed .only focus flag",
+    "[p1]",
+)
 # Riley gaps that restate a Nova failure or a Lexi signal verbatim; projecting
 # them again would only duplicate findings that already carry better evidence.
 RILEY_SKIPPED_PREFIXES = (
@@ -109,6 +121,51 @@ def verdict_effect_for(priority: str, evidence: str, fail_on: str = "P1") -> str
     if priority == "P3":
         return "INFO"
     return "WARN"
+
+
+def _claims_stay_warn(findings: list[dict[str, Any]]) -> None:
+    """Uncovered or weak-only claims are always WARN; they must not VETO alone."""
+    for finding in findings:
+        if finding.get("type") == "claim" and finding.get("verdict_effect") == "VETO":
+            finding["verdict_effect"] = "WARN"
+
+
+def weak_test_priority_from_gap(gap: str) -> str:
+    low = (gap or "").lower()
+    if any(fragment in low for fragment in _P1_WEAK_FRAGMENTS):
+        return "P1"
+    return "P2"
+
+
+def verdict_from_findings(current: str, findings: list[dict[str, Any]]) -> str:
+    """Final run verdict: VETO iff a finding has verdict_effect=VETO.
+
+    An environment stop (BLOCKED_ENV) is never rewritten to VETO or CLEAR —
+    the suite was not allowed to judge the product. ESCALATE is kept when no
+    VETO finding exists. Everything else becomes CLEAR. fail-on is already
+    applied on each finding's verdict_effect.
+    """
+    if current == "BLOCKED_ENV":
+        return "BLOCKED_ENV"
+    if any((f or {}).get("verdict_effect") == "VETO" for f in findings):
+        return "VETO"
+    if current == "ESCALATE":
+        return "ESCALATE"
+    return "CLEAR"
+
+
+class VerdictInconsistent(AssertionError):
+    """Raised when a VETO verdict has no VETO finding, or the reverse."""
+
+
+def check_verdict_consistent(verdict: str, findings: list[dict[str, Any]]) -> None:
+    """Invariant: a VETO verdict without a VETO finding is impossible, and a
+    VETO finding always yields VETO."""
+    has_veto = any((f or {}).get("verdict_effect") == "VETO" for f in findings)
+    if verdict == "VETO" and not has_veto:
+        raise VerdictInconsistent("VETO verdict without a VETO finding")
+    if has_veto and verdict != "VETO":
+        raise VerdictInconsistent(f"VETO finding present but verdict is {verdict}")
 
 
 def fingerprint_for(agent: str, ftype: str, file: str | None, term: str | None) -> str:
@@ -313,6 +370,9 @@ def _collect_aria(builder: _FindingBuilder, plan: dict[str, Any] | None) -> None
             continue
         title = str(scenario.get("title") or sid)
         acceptance = scenario.get("acceptance") or ["the documented outcome holds"]
+        docs_file = scenario.get("docs_file") or None
+        docs_line = scenario.get("docs_line")
+        line = _as_int(docs_line) or None if docs_line is not None else None
         builder.add(
             agent="aria",
             ftype="claim",
@@ -323,13 +383,34 @@ def _collect_aria(builder: _FindingBuilder, plan: dict[str, Any] | None) -> None
                 f"Add `test_claim_{sid.lower()}` that exercises “{str(acceptance[0])}” "
                 "and asserts the documented outcome; it fails today."
             ),
+            file=str(docs_file) if docs_file else None,
+            line=line,
             term=sid,
             fclass="heuristic",
             confidence="low",
         )
 
 
-def _collect_riley(builder: _FindingBuilder, review: dict[str, Any] | None, agent: str = "riley") -> None:
+def _claim_location_from_plan(plan: dict[str, Any] | None, gap: str) -> tuple[str | None, int | None]:
+    found = _CLAIM_ID_RE.search(gap or "")
+    if not found or not isinstance(plan, dict):
+        return None, None
+    cid = found.group(1)
+    for scenario in plan.get("scenarios") or []:
+        if isinstance(scenario, dict) and scenario.get("id") == cid:
+            docs_file = scenario.get("docs_file") or None
+            docs_line = scenario.get("docs_line")
+            line = _as_int(docs_line) or None if docs_line is not None else None
+            return (str(docs_file) if docs_file else None, line)
+    return None, None
+
+
+def _collect_riley(
+    builder: _FindingBuilder,
+    review: dict[str, Any] | None,
+    agent: str = "riley",
+    plan: dict[str, Any] | None = None,
+) -> None:
     for gap in (review or {}).get("gaps") or []:
         if not isinstance(gap, str) or not gap.strip():
             continue
@@ -337,8 +418,12 @@ def _collect_riley(builder: _FindingBuilder, review: dict[str, Any] | None, agen
             rest = gap[len(_WEAK_TEST_PREFIX):].strip()
             node = rest.split(" ", 1)[0]
             file_name, line = _node_location(node)
-            is_p1 = "[P1]" in gap
-            priority = "P1" if is_p1 else "P2"
+            loc = _WEAK_LOC_RE.search(gap)
+            if loc:
+                file_name = file_name or loc.group("file")
+                line = line or (_as_int(loc.group("line")) or None)
+            priority = weak_test_priority_from_gap(gap)
+            is_p1 = priority == "P1"
             builder.add(
                 agent=agent,
                 ftype="weak_test",
@@ -354,6 +439,7 @@ def _collect_riley(builder: _FindingBuilder, review: dict[str, Any] | None, agen
             )
             continue
         if _CLAIM_WEAK_FRAGMENT in gap or gap.startswith(_CLAIM_UNCOVERED_PREFIXES):
+            docs_file, docs_line = _claim_location_from_plan(plan, gap)
             builder.add(
                 agent=agent,
                 ftype="claim",
@@ -361,6 +447,8 @@ def _collect_riley(builder: _FindingBuilder, review: dict[str, Any] | None, agen
                 impact="A documented claim is not proven by a strong test, so it may be false.",
                 evidence=gap,
                 red_test="Add or strengthen a test that proves the claim and fails when the behaviour regresses.",
+                file=docs_file,
+                line=docs_line,
                 term=_stable_term(gap),
                 fclass="heuristic",
                 confidence="low",
@@ -620,6 +708,35 @@ def _collect_blocked_env(builder: _FindingBuilder, report: dict[str, Any]) -> No
         )
 
 
+def _collect_empty_collection(builder: _FindingBuilder, report: dict[str, Any]) -> None:
+    """An unexplained empty suite is a product VETO and must carry a VETO finding."""
+    if str(report.get("verdict") or "") == "BLOCKED_ENV":
+        return
+    execution = report.get("execution")
+    if not isinstance(execution, dict) or not execution:
+        return
+    if _as_int(execution.get("collected")) > 0:
+        return
+    if _as_int(execution.get("failed")) or _as_int(execution.get("errors")):
+        return
+    evidence = str(
+        ((report.get("post_audit") or {}).get("root_cause"))
+        or execution.get("stdout")
+        or "collected tests == 0"
+    )
+    builder.add(
+        agent="nova",
+        ftype="weak_test",
+        priority="P1",
+        impact="The suite collected zero tests, so nothing witnesses the documented behaviour.",
+        evidence=evidence,
+        red_test="Add at least one pytest that is collected and asserts the documented outcome.",
+        term="__empty_collection__",
+        fclass="hard",
+        confidence="high",
+    )
+
+
 def build_findings(report: dict[str, Any]) -> list[dict[str, Any]]:
     """Project a finished report dictionary into the findings list.
 
@@ -634,7 +751,7 @@ def build_findings(report: dict[str, Any]) -> list[dict[str, Any]]:
         _collect_lexi(builder, post.get("lexi"))
     _collect_aria(builder, report.get("plan"))
     if isinstance(post.get("riley"), dict):
-        _collect_riley(builder, post.get("riley"))
+        _collect_riley(builder, post.get("riley"), plan=report.get("plan"))
     for entry in report.get("role_results") or []:
         if (
             isinstance(entry, dict)
@@ -642,10 +759,11 @@ def build_findings(report: dict[str, Any]) -> list[dict[str, Any]]:
             and entry.get("stage") == "adversarial_plan"
             and isinstance(entry.get("details"), dict)
         ):
-            _collect_riley(builder, entry["details"])
+            _collect_riley(builder, entry["details"], plan=report.get("plan"))
     _collect_sable(builder, report.get("policy"))
     _collect_nova(builder, report.get("execution"))
     _collect_blocked_env(builder, report)
+    _collect_empty_collection(builder, report)
     _collect_identity(builder, report.get("identity_leaks") or post.get("identity_leaks"))
     _collect_clean_install(builder, report.get("clean_install") or post.get("clean_install"))
     _collect_deleted_tests(builder, report.get("deleted_tests") or post.get("deleted_tests"))
@@ -735,6 +853,30 @@ def _collect_weakened_tests(builder: _FindingBuilder, weakened_tests: list[str] 
 
 def _collect_diff_mutants(builder: _FindingBuilder, mutation: dict[str, Any] | None) -> None:
     if isinstance(mutation, dict):
+        try:
+            score = float(mutation.get("score") or 0)
+            min_score = float(mutation.get("min_score") or 0)
+        except (TypeError, ValueError):
+            score, min_score = 0.0, 0.0
+        if min_score > 0 and score < min_score:
+            evidence = str(
+                mutation.get("reason")
+                or f"mutation score {score:.2f} is below minimum required score {min_score:.2f}"
+            )
+            builder.add(
+                agent="riley",
+                ftype="mutation",
+                priority="P1",
+                impact=(
+                    f"Mutation score {score:.2f} is below the required minimum "
+                    f"{min_score:.2f}, so the suite may not catch defects."
+                ),
+                evidence=evidence,
+                red_test="Add assertions that kill the surviving mutants named in the mutation report.",
+                term="mutation_score",
+                fclass="hard",
+                confidence="high",
+            )
         if mutation.get("diff_scoped"):
             for surv in mutation.get("survived_mutants", ()):
                 if isinstance(surv, dict):
@@ -971,6 +1113,14 @@ def build_document(
         for f in findings:
             if not any((f.get("excepted"), f.get("baselined"))):
                 f["verdict_effect"] = verdict_effect_for(str(f["priority"]), str(f["evidence"]), fail_on=fail_on)
+    _claims_stay_warn(findings)
+    # An environment stop is not an accusation. Demote VETO effects so a
+    # hollow test (or similar P1) cannot rewrite BLOCKED_ENV, and the
+    # "VETO finding always yields VETO" invariant still holds.
+    if str(report.get("verdict") or "") == "BLOCKED_ENV":
+        for finding in findings:
+            if finding.get("verdict_effect") == "VETO":
+                finding["verdict_effect"] = "WARN"
     post = report.get("post_audit") if isinstance(report.get("post_audit"), dict) else {}
     workspaces = report.get("workspaces", post.get("workspaces"))
     if isinstance(workspaces, list):
