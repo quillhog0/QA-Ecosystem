@@ -74,11 +74,12 @@ _WEAK_LOC_RE = re.compile(
     rf"@ (?P<file>[\w./\-]+?{_EXT_PATTERN}):(?P<line>\d+)\s*$"
 )
 _CLAIM_ID_RE = re.compile(r"\b(C\d+)\b")
-# Hollow / hide-the-suite patterns: same ladder as the TypeScript analyzer (P1).
+# Truly hollow / hide-the-suite patterns (P1). Untagged "no assertions"
+# stays P2: only a pass-only body is tagged [P1] by Riley.
 _P1_WEAK_FRAGMENTS = (
     "assertion failures swallowed",
     "tautology assertion",
-    "no assertions",
+    "pass-only",
     "committed .only focus flag",
     "[p1]",
 )

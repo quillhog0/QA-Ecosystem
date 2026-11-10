@@ -189,3 +189,97 @@ def test_skipped_test_stays_p2_even_when_a_sandbox_claim_points_at_it(tmp_path: 
         project_root=tmp_path,
     )
     assert review.verdict != Verdict.VETO.value
+
+
+def _hits_for(tmp_path: Path, name: str, source: str):
+    from agents.riley import detect_weak_test_hits
+
+    tests = tmp_path / "tests"
+    tests.mkdir(parents=True, exist_ok=True)
+    (tests / "__init__.py").write_text("", encoding="utf-8")
+    (tests / name).write_text(source, encoding="utf-8")
+    return detect_weak_test_hits(tmp_path)
+
+
+def test_unicode_decode_error_around_assert_is_not_p1(tmp_path: Path) -> None:
+    """KeyHive pattern: a narrow except does not swallow AssertionError."""
+    hits = _hits_for(
+        tmp_path,
+        "test_fulfillment.py",
+        "def test_privacy_no_plaintext_email_anywhere():\n"
+        "    for p in []:\n"
+        "        try:\n"
+        "            assert b'secret@buyer.test' not in p.read_bytes()\n"
+        "        except UnicodeDecodeError:\n"
+        "            pass\n",
+    )
+    node = "tests/test_fulfillment.py::test_privacy_no_plaintext_email_anywhere"
+    assert node not in hits or hits[node].priority != "P1"
+
+
+def test_moneyed_call_without_assert_is_not_p1(tmp_path: Path) -> None:
+    """A test that calls production code can fail by raising, even with no assert."""
+    hits = _hits_for(
+        tmp_path,
+        "test_moneyed_classes.py",
+        "class ExtendedMoney:\n"
+        "    def __mul__(self, other):\n"
+        "        return self\n"
+        "    def do_my_behaviour(self):\n"
+        "        pass\n"
+        "\n"
+        "def test_can_call_subclass_method_after_arithmetic_operations():\n"
+        "    extended_money = ExtendedMoney()\n"
+        "    extended_money.do_my_behaviour()\n"
+        "    (1 * extended_money).do_my_behaviour()\n",
+    )
+    node = "tests/test_moneyed_classes.py::test_can_call_subclass_method_after_arithmetic_operations"
+    assert node in hits
+    assert hits[node].reason == "no assertions"
+    assert hits[node].priority == "P2"
+
+
+def test_pass_only_body_is_p1(tmp_path: Path) -> None:
+    hits = _hits_for(
+        tmp_path,
+        "test_empty.py",
+        "def test_convert_to_default():\n"
+        "    # conversions are not implemented yet\n"
+        "    pass\n",
+    )
+    node = "tests/test_empty.py::test_convert_to_default"
+    assert hits[node].reason == "no assertions"
+    assert hits[node].priority == "P1"
+
+
+def test_except_exception_around_assert_is_p1(tmp_path: Path) -> None:
+    hits = _hits_for(
+        tmp_path,
+        "test_swallowed.py",
+        "def stored_payload():\n"
+        "    return 'contact user@example.com'\n"
+        "\n"
+        "def test_privacy_swallowed():\n"
+        "    try:\n"
+        "        assert 'user@example.com' not in stored_payload()\n"
+        "    except Exception:\n"
+        "        pass\n",
+    )
+    node = "tests/test_swallowed.py::test_privacy_swallowed"
+    assert hits[node].priority == "P1"
+    assert "swallowed" in hits[node].reason
+
+
+def test_except_assertion_error_around_assert_is_p1(tmp_path: Path) -> None:
+    hits = _hits_for(
+        tmp_path,
+        "test_swallowed_ae.py",
+        "def test_swallowed_assertion_error():\n"
+        "    try:\n"
+        "        assert False\n"
+        "    except AssertionError:\n"
+        "        pass\n",
+    )
+    node = "tests/test_swallowed_ae.py::test_swallowed_assertion_error"
+    assert hits[node].priority == "P1"
+    assert "swallowed" in hits[node].reason

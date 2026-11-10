@@ -152,9 +152,22 @@ def test_riley_weak_test_gap_carries_the_node_file() -> None:
         "riley": {"gaps": ["weak test: tests/test_login.py::test_ok (no assertions)"]},
     })
     finding = _find(build, agent="riley", ftype="weak_test")
-    assert finding["priority"] == "P1"
+    # Untagged "no assertions" is P2: only a pass-only body is tagged [P1].
+    assert finding["priority"] == "P2"
     assert finding["file"] == "tests/test_login.py"
+    assert finding["verdict_effect"] == "WARN"
+
+
+def test_tagged_pass_only_no_assertions_is_p1() -> None:
+    build = _report(post_audit={
+        "riley": {"gaps": [
+            "weak test: tests/test_login.py::test_ok ([P1] no assertions) @ tests/test_login.py:4"
+        ]},
+    })
+    finding = _find(build, agent="riley", ftype="weak_test")
+    assert finding["priority"] == "P1"
     assert finding["verdict_effect"] == "VETO"
+    assert finding["line"] == 4
 
 
 def test_riley_aggregate_repeats_are_skipped() -> None:
@@ -429,12 +442,12 @@ def test_markdown_has_the_documented_shape() -> None:
     lines = text.splitlines()
     assert lines[0].startswith("# Findings - run ")
     assert "| priority | count |" in lines
-    assert "| P1 | 3 |" in lines
+    assert "| P2 | 3 |" in lines
     assert "## Top 3 findings" in lines
     for line in lines:
         if line.startswith("- [F-"):
             assert "`tests/test_" in line
-            assert line.endswith("(VETO)")
+            assert line.endswith("(WARN)")
 
 
 def test_markdown_caps_at_max_lines_with_a_hint() -> None:
@@ -480,8 +493,8 @@ def test_findings_dir_flag_defaults_to_empty_and_parses() -> None:
 def test_counts_match_the_findings_list() -> None:
     doc = findings.build_document(_many_findings(5))
     assert doc["counts"]["total"] == len(doc["findings"]) == 5
-    assert doc["counts"]["P1"] == 5
-    assert doc["counts"]["P0"] == doc["counts"]["P2"] == doc["counts"]["P3"] == 0
+    assert doc["counts"]["P2"] == 5
+    assert doc["counts"]["P0"] == doc["counts"]["P1"] == doc["counts"]["P3"] == 0
 
 
 def test_finding_class_and_low_confidence_heuristic_p2_cap() -> None:

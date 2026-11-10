@@ -29,15 +29,13 @@ MAX_REPORTED_FAILURE_LINES = 40
 _PYTEST_COLLECTED_FILE_RE = re.compile(r"^(?:test_.*|.*_test)\.py$")
 
 
-# Hollow tests that can never fail, plus a leftover ``.only`` that hides the
-# rest of the suite. These match the TypeScript analyzer's P1 reasons so
-# Python and TS use the same ladder. Other weak patterns (skip, trivial
-# assertions, snapshots) stay P2 unless they uniquely guard a security,
-# privacy or payment claim.
+# Truly hollow tests that can never fail, plus a leftover ``.only``.
+# "no assertions" is P1 only when the body is pass / ... / a docstring;
+# a test that calls code (and can raise) stays P2 even without an assert.
 _P1_WEAK_FRAGMENTS = (
     "assertion failures swallowed",
     "tautology assertion",
-    "no assertions",
+    "pass-only",
     "committed .only focus flag",
 )
 
@@ -62,9 +60,11 @@ def mentions_security_privacy_payment(text: str) -> bool:
     return any(f" {term} " in blob for term in _SECURITY_PRIVACY_PAYMENT_TERMS)
 
 
-def weak_priority_for(reason: str, *, text: str = "") -> str:
+def weak_priority_for(reason: str, *, text: str = "", pass_only: bool = False) -> str:
     low = (reason or "").lower()
     if any(fragment in low for fragment in _P1_WEAK_FRAGMENTS) or "[p1]" in low:
+        return "P1"
+    if reason == "no assertions" and pass_only:
         return "P1"
     if mentions_security_privacy_payment(f"{reason} {text}"):
         return "P1"
@@ -95,7 +95,7 @@ def upgrade_hits_for_plan(hits: dict[str, WeakTestHit], plan: TestPlan) -> None:
     Skipped, trivial, and snapshot-only tests stay P2 — a skip does not
     guard a claim, even if the docs mention sandbox or payment.
     """
-    stay_p2 = ("skipped test", "only trivial assertions", "snapshot-only test")
+    stay_p2 = ("skipped test", "only trivial assertions", "snapshot-only test", "no assertions")
     claim_blobs: dict[str, list[str]] = {}
     for scenario in plan.scenarios:
         blob = " ".join(
@@ -155,6 +155,15 @@ def is_tautology_assert(stmt: ast.Assert, *, fn_node: ast.AST | None = None) -> 
     if isinstance(test_node, ast.UnaryOp) and isinstance(test_node.op, ast.Not):
         if isinstance(test_node.operand, ast.Constant) and not bool(test_node.operand.value):
             return True
+    if isinstance(test_node, ast.Compare) and len(test_node.ops) == 1:
+        left, right = test_node.left, test_node.comparators[0]
+        if (
+            isinstance(test_node.ops[0], (ast.Eq, ast.Is))
+            and isinstance(left, ast.Constant)
+            and isinstance(right, ast.Constant)
+            and left.value == right.value
+        ):
+            return True
     if isinstance(test_node, ast.Compare):
         if len(test_node.ops) == 1 and isinstance(test_node.ops[0], ast.IsNot):
             # A None-check only vacuums when nothing in the test could have
@@ -195,8 +204,71 @@ def is_skipped_test(fn_node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
     return False
 
 
+_SWALLOWING_EXC_NAMES = frozenset({"AssertionError", "Exception", "BaseException"})
+
+
+def _exc_type_names(node: ast.AST | None) -> set[str]:
+    """Simple names of exception types in an ``except`` clause (including tuples)."""
+    names: set[str] = set()
+    if node is None:
+        return names
+    if isinstance(node, ast.Name):
+        names.add(node.id)
+    elif isinstance(node, ast.Attribute):
+        names.add(node.attr)
+    elif isinstance(node, ast.Tuple):
+        for elt in node.elts:
+            names |= _exc_type_names(elt)
+    return names
+
+
+def _handler_body_is_silent(handler: ast.ExceptHandler) -> bool:
+    """True when the handler does not re-raise or fail — only pass/continue/a constant."""
+    if not handler.body:
+        return True
+    return all(
+        isinstance(b, (ast.Pass, ast.Continue))
+        or (isinstance(b, ast.Expr) and isinstance(b.value, ast.Constant))
+        for b in handler.body
+    )
+
+
 def _handler_swallows(handler: ast.ExceptHandler) -> bool:
-    return all(isinstance(b, (ast.Pass, ast.Continue)) or (isinstance(b, ast.Expr) and isinstance(b.value, ast.Constant)) for b in handler.body)
+    """True only when a silent handler would catch an assertion failure.
+
+    A bare ``except:`` or one that names ``AssertionError``, ``Exception``,
+    ``BaseException``, or a tuple including those, and that does not re-raise
+    or fail, swallows asserts. A narrow ``except UnicodeDecodeError: pass``
+    (or KeyError, OSError, …) does not.
+    """
+    if not _handler_body_is_silent(handler):
+        return False
+    if handler.type is None:
+        return True
+    return bool(_exc_type_names(handler.type) & _SWALLOWING_EXC_NAMES)
+
+
+def _is_pass_only_body(fn_node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    """True when the body is only ``pass``, ``...``, and/or a docstring — it can never fail."""
+    stmts = list(fn_node.body)
+    if (
+        stmts
+        and isinstance(stmts[0], ast.Expr)
+        and isinstance(stmts[0].value, ast.Constant)
+        and isinstance(stmts[0].value.value, str)
+    ):
+        stmts = stmts[1:]
+    if not stmts:
+        return True
+
+    def _hollow(stmt: ast.stmt) -> bool:
+        if isinstance(stmt, ast.Pass):
+            return True
+        if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant):
+            return stmt.value.value is Ellipsis or stmt.value.value is ...
+        return False
+
+    return all(_hollow(stmt) for stmt in stmts)
 
 
 def has_swallowed_assertions(fn_node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
@@ -615,8 +687,13 @@ def detect_weak_test_hits(
                         # Term matching uses the function name only — a path
                         # like tests/unit/test_sandbox.py must not promote a
                         # skipped test to P1 just because the file name has
-                        # a security word.
-                        priority = weak_priority_for(reason, text=node.name)
+                        # a security word. "no assertions" is P1 only when
+                        # the body cannot raise (pass / ... / docstring).
+                        priority = weak_priority_for(
+                            reason,
+                            text=node.name,
+                            pass_only=_is_pass_only_body(node),
+                        )
                         hit = WeakTestHit(
                             reason=reason,
                             file=rel,

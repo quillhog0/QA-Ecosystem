@@ -70,8 +70,13 @@ def test_handler_running_a_call_is_not_swallowed():
 
 
 def test_handler_with_only_pass_is_swallowed():
-    handler = _except_handler("try:\n    x()\nexcept ValueError:\n    pass\n")
+    handler = _except_handler("try:\n    x()\nexcept Exception:\n    pass\n")
     assert _handler_swallows(handler) is True
+
+
+def test_handler_narrow_valueerror_pass_is_not_swallowed():
+    handler = _except_handler("try:\n    x()\nexcept ValueError:\n    pass\n")
+    assert _handler_swallows(handler) is False
 
 
 # --- agents/riley.py:623 -----------------------------------------------------

@@ -294,6 +294,9 @@ function analyzeSourceFile(fileInfo, sf, allTestHelpers) {
     let activeSwallowedTryDepth = 0;
 
     function isCatchSwallowing(catchClause) {
+      // A JS/TS `catch` always catches every thrown value (types are erased),
+      // so it is analogous to a Python bare `except:` / `except Exception`.
+      // A handler that rethrows or calls assert.fail / expect.fail does not swallow.
       if (!catchClause || !catchClause.block) return true;
       let rethrowsOrFails = false;
       function check(n) {
@@ -438,13 +441,16 @@ function analyzeSourceFile(fileInfo, sf, allTestHelpers) {
     }
 
     if (assertionCalls.length === 0) {
+      // P1 only when the body cannot raise (no calls at all, e.g. empty
+      // or comments only). A test that calls production code can fail
+      // by throwing, so it stays P2 even without an expect().
       weakTests.push({
         test_id: testId,
         file: relPath,
         line: lineNum,
         name: testName,
         reason: "no assertions",
-        priority: "P1",
+        priority: callsOutsideExpect > 0 ? "P2" : "P1",
       });
       return;
     }
