@@ -334,5 +334,8 @@ def test_cli_feedback_export_flag(
     )
     assert rc2 == 0
     out2 = capsys.readouterr().out
-    assert "feedback_export=" not in out2
+    # The key is always printed (empty value) so Action wrappers can grep it
+    # under `set -e`. The export file itself is not written when the flag is off.
+    export_lines = [ln for ln in out2.splitlines() if ln.startswith("feedback_export=")]
+    assert export_lines and export_lines[0] == "feedback_export="
     assert not (rep_dir2 / "latest" / "feedback-export.json").exists()

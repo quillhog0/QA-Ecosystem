@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.3 (2026-11-10)
+
+### Fixed
+- **GitHub Action wrapper no longer dies before writing outputs on a normal VETO.** After `main.py` prints the verdict, the wrapper (under GitHub's `bash -eo pipefail`) grepped `^feedback_export=`, a line that is only emitted when the `feedback-export` input is true (default false). `grep` exited 1, the step aborted before `GITHUB_OUTPUT` or the report artifact, and a VETO looked like a silent failure. `scripts/gha_finish.sh` now treats missing keys as empty, always writes outputs, prints P0/P1 findings (file:line and reason) to the step log and summary, then exits with the cycle code (0/1/2). The Action also uploads `qa-reports/` with `if: always()`. `main.py` always prints `feedback_export=` (empty when the flag is off).
+
+
 ## 0.8.2 (2026-11-10)
 
 ### Fixed

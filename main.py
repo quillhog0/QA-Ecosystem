@@ -347,8 +347,11 @@ def main(argv: list[str] | None = None) -> int:
     print(f"pr_comment_latest={findings_base / 'latest' / 'pr-comment.md'}")
     print(f"summary={findings_base / report.run_id / 'summary.md'}")
     print(f"summary_latest={findings_base / 'latest' / 'summary.md'}")
+    # Always emit the key so the Action wrapper can grep it under `set -e`.
     if config.get("feedback_export"):
         print(f"feedback_export={findings_base / report.run_id / 'feedback-export.json'}")
+    else:
+        print("feedback_export=")
     print(f"isolated_root={report.isolated_root}")
     if args.sarif:
         try:

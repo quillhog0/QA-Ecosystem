@@ -199,36 +199,21 @@ runs:
           sarif_path="$RUNNER_TEMP/qa-results.sarif"
           args+=(--sarif "$sarif_path")
         fi
+        # Capture the cycle exit (1 VETO, 2 BLOCKED_ENV) without aborting:
+        # GitHub's bash is `set -eo pipefail`. gha_finish.sh then writes
+        # outputs, the step summary, and P0/P1 findings, and only afterwards
+        # exits with that code so a later "if: always()" upload still runs.
         set +e
         python "$GITHUB_ACTION_PATH/main.py" "${args[@]}" | tee "$RUNNER_TEMP/qa-out.txt"
         code=${PIPESTATUS[0]}
         set -e
-        verdict=$(grep -m1 '^verdict=' "$RUNNER_TEMP/qa-out.txt" | cut -d= -f2)
-        report=$(grep -m1 '^report=' "$RUNNER_TEMP/qa-out.txt" | cut -d= -f2-)
-        summary_path=$(grep -m1 '^summary=' "$RUNNER_TEMP/qa-out.txt" | cut -d= -f2-)
-        fix_brief_path=$(grep -m1 '^fix_brief=' "$RUNNER_TEMP/qa-out.txt" | cut -d= -f2-)
-        pr_comment_path=$(grep -m1 '^pr_comment=' "$RUNNER_TEMP/qa-out.txt" | cut -d= -f2-)
-        feedback_export_path=$(grep -m1 '^feedback_export=' "$RUNNER_TEMP/qa-out.txt" | cut -d= -f2-)
-        echo "verdict=$verdict" >> "$GITHUB_OUTPUT"
-        if [ "$verdict" = "BLOCKED_ENV" ]; then
-          echo "::warning title=QA environment blocked::The tests could not run because of an environment precondition (exit 2). The report names the exact cause; no defect is claimed against the project."
-        fi
-        echo "report=$report" >> "$GITHUB_OUTPUT"
-        echo "summary=$summary_path" >> "$GITHUB_OUTPUT"
-        echo "fix_brief=$fix_brief_path" >> "$GITHUB_OUTPUT"
-        echo "pr_comment=$pr_comment_path" >> "$GITHUB_OUTPUT"
-        echo "feedback_export=$feedback_export_path" >> "$GITHUB_OUTPUT"
-        if [ -n "$sarif_path" ] && [ -f "$sarif_path" ]; then
-          echo "sarif=$sarif_path" >> "$GITHUB_OUTPUT"
-        else
-          echo "sarif=" >> "$GITHUB_OUTPUT"
-        fi
-        if [ "$QA_SUMMARY" = "true" ] && [ -n "$summary_path" ] && [ -f "$summary_path" ]; then
-          cat "$summary_path" >> "$GITHUB_STEP_SUMMARY"
-        elif [ -n "$report" ] && [ -f "$report" ]; then
-          cat "$report" >> "$GITHUB_STEP_SUMMARY"
-        fi
-        if [ "$QA_PR_COMMENT" = "true" ] && [ "$GITHUB_EVENT_NAME" = "pull_request" ] && [ -n "$pr_comment_path" ] && [ -f "$pr_comment_path" ]; then
-          gh pr comment --body-file "$pr_comment_path" || true
-        fi
-        exit $code
+        QA_SARIF_PATH="$sarif_path" bash "$GITHUB_ACTION_PATH/scripts/gha_finish.sh" "$RUNNER_TEMP/qa-out.txt" "$code"
+
+    - name: Upload QA report
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: qa-report
+        if-no-files-found: warn
+        path: |
+          ${{ runner.temp }}/qa-reports/
