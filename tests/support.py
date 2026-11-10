@@ -126,6 +126,7 @@ def mini_project(
     with_tests: bool = True,
     failing: bool = False,
     dangerous: bool = False,
+    source_dangerous: bool = False,
     docs: str | dict[str, str] | None = None,
     code: dict[str, str] | None = None,
     secret: bool = False,
@@ -133,8 +134,11 @@ def mini_project(
     root.mkdir(parents=True, exist_ok=True)
     write_calculator(root, with_divide=with_divide)
     write_tests(root, failing=failing, dangerous=dangerous, include=with_tests)
-    if code:
-        write_code(root, code)
+    extra = dict(code or {})
+    if source_dangerous:
+        extra["worker.py"] = "import os\n\ndef run():\n    os.system('echo hi')\n"
+    if extra:
+        write_code(root, extra)
     default_docs = (
         "# Sample calculator\n\n"
         "Python helpers `add` and `divide`.\n\n"

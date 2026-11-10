@@ -70,6 +70,24 @@ EXTERNAL_TOOLS = frozenset({
     "node", "npx", "bun", "deno", "python", "python3", "brew", "cargo", "go", "pip3", "gem",
 })
 
+
+_INSTALL_TOOL_PREFIXES = (
+    "pytest-", "sphinx", "coverage", "pre-commit", "flake8", "mypy", "ruff",
+    "black", "isort", "tox", "nox", "hatch", "poetry", "pdm", "flit", "twine",
+    "codecov", "hypothesis", "doctest",
+)
+
+
+def _is_third_party_install_package(pkg: str) -> bool:
+    """True when a pip/npm install names a tool, not this project."""
+    name = (pkg or "").lower().replace("_", "-")
+    if not name:
+        return False
+    if name in EXTERNAL_TOOLS:
+        return True
+    return any(name == pre.rstrip("-") or name.startswith(pre) for pre in _INSTALL_TOOL_PREFIXES)
+
+
 DOT_EXTENSIONS = frozenset({
     "js", "ts", "mjs", "cjs", "jsx", "tsx", "py", "json", "yaml", "yml", "md", "html", "css",
     "io", "org", "com", "net", "sh", "txt", "wasm", "map", "sql", "db",
@@ -165,13 +183,39 @@ _ENV_EXAMPLE_NAMES = (".env.example", ".env.sample", ".env.template", "env.examp
 _ENV_EXAMPLE_KEY_RE = re.compile(r"^\s*(?:export\s+)?([A-Z][A-Z0-9_]*)\s*=", re.MULTILINE)
 
 
+
+_ENV_NAME_SUFFIX_RE = re.compile(
+    r"(?:KEY|TOKEN|SECRET|PASSWORD|PASS|PWD|URL|URI|PATH|HOME|PORT|HOST|USER|ADDR|DSN|API)$"
+)
+
+
+def _looks_like_env_name(name: str) -> bool:
+    """True when a $NAME token itself looks like an environment variable."""
+    if "_" in name:
+        return True
+    return bool(_ENV_NAME_SUFFIX_RE.search(name))
+
+
+_ENV_LINE_HINT_RE = re.compile(
+    r"\b(?:env(?:ironment)?(?:\s+var(?:iable)?)?|export|getenv|environ|dotenv|\.env)\b",
+    re.IGNORECASE,
+)
+_DOC_ENV_DOLLAR = next(p for p in _DOC_ENV_PATTERNS if p.pattern.startswith(r"\$"))
+
+
 def doc_env_candidates(line: str) -> list[str]:
     """Env-var names a docs line names in an env context (in order, unique)."""
     found: list[str] = []
+    has_env_hint = bool(_ENV_LINE_HINT_RE.search(line))
     for pattern in _DOC_ENV_PATTERNS:
         for m in pattern.finditer(line):
             name = m.group(1)
             if not name.isupper() or name in found:
+                continue
+            # A bare $NAME (e.g. "($DEITY forbid)") is not an environment
+            # variable unless the line talks about the environment, or the
+            # name itself looks like one (underscore or a typical suffix).
+            if pattern is _DOC_ENV_DOLLAR and not has_env_hint and not _looks_like_env_name(name):
                 continue
             found.append(name)
     return found
@@ -796,7 +840,7 @@ def check_install_instructions(docs_root: Path, project_root: Path) -> list[Drif
             if m_pip and expected_py_name:
                 pkg = m_pip.group(1).lower().replace("_", "-")
                 norm_exp = expected_py_name.lower().replace("_", "-")
-                if pkg not in (norm_exp, ".", "-e", "-r"):
+                if pkg not in (norm_exp, ".", "-e", "-r") and not _is_third_party_install_package(pkg):
                     findings.append(
                         DriftFinding(
                             kind="install_instruction_mismatch",
@@ -816,7 +860,7 @@ def check_install_instructions(docs_root: Path, project_root: Path) -> list[Drif
             if m_npm and expected_node_name:
                 pkg = m_npm.group(1).lower()
                 norm_exp = expected_node_name.lower()
-                if pkg != norm_exp and not pkg.startswith("-"):
+                if pkg != norm_exp and not pkg.startswith("-") and not _is_third_party_install_package(pkg):
                     findings.append(
                         DriftFinding(
                             kind="install_instruction_mismatch",

@@ -66,8 +66,8 @@ def test_historical_only_finding_still_anchors_to_its_line(tmp_path: Path) -> No
         encoding="utf-8",
     )
     anchors = _drift(docs, tmp_path)
-    # severity stays low (Task 11) but the anchor exists for the IDE jump
-    assert anchors.get("calculate_platform_fee_lamports") == ("incidents/INCIDENTS.md", 3)
+    # Historical-only mentions are omitted (not a current API promise).
+    assert "calculate_platform_fee_lamports" not in anchors
 
 
 def test_code_fence_does_not_shift_the_anchor_line(tmp_path: Path) -> None:

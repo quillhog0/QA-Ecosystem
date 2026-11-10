@@ -353,6 +353,47 @@ def valid_allow_entries(raw: Any) -> list[dict[str, str]]:
     return entries
 
 
+_HIT_PARSE_RE = re.compile(
+    r"^(?P<path>[^:]+): (?:import (?P<imp>\S+)|from (?P<frm>\S+) import|"
+    r"call (?P<call>\S+)|network call (?P<net>\S+))"
+)
+ALLOWLIST_REASON = "requires the sandbox or an explicit allow_in_tests entry"
+
+
+def allowlist_entries_from_hits(hits: list[str]) -> list[dict[str, str]]:
+    """Turn Sable AST hit messages into ready-to-paste allow_in_tests entries."""
+    entries: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for hit in hits:
+        msg = str(hit).split(" [in ", 1)[0].strip()
+        match = _HIT_PARSE_RE.match(msg)
+        if not match:
+            continue
+        path = _normalize_rel(match.group("path") or "")
+        call = (match.group("imp") or match.group("frm") or match.group("call") or match.group("net") or "").strip()
+        if not path or not call:
+            continue
+        key = (path, call)
+        if key in seen:
+            continue
+        seen.add(key)
+        entries.append({"path": path, "call": call, "reason": ALLOWLIST_REASON})
+    return entries
+
+
+def format_allow_in_tests_yaml(entries: list[dict[str, str]]) -> str:
+    """Operator-facing YAML block for config.yaml (``sable.allow_in_tests``)."""
+    lines = ["sable:", "  allow_in_tests:"]
+    if not entries:
+        lines.append("    []")
+        return "\n".join(lines)
+    for item in entries:
+        lines.append(f"    - path: {item['path']}")
+        lines.append(f"      call: {item['call']}")
+        lines.append(f"      reason: {item['reason']}")
+    return "\n".join(lines)
+
+
 def _match_allow(rel: str, call: str, allows: list[dict[str, str]]) -> dict[str, str] | None:
     rel_n = _normalize_rel(rel)
     for entry in allows:
@@ -571,19 +612,64 @@ def _scan_ts_for_risks(
 
 
 RUNTIME_GUARD_MODULE = '''\
-"""Injected by Sable. Blocks outbound sockets during isolated pytest."""
+"""Injected by Sable. Blocks outbound sockets during isolated pytest.
+
+Loopback destinations (127.0.0.1, ::1, other loopback addresses, and the
+conventional localhost names) stay reachable so in-process HTTP tests can
+talk to a local server. External destinations remain blocked while
+NO_NETWORK=1. This module never opens the wider network.
+"""
 
 from __future__ import annotations
 
+import ipaddress
 import os
 import socket
 
+_LOOPBACK_NAMES = {"localhost", "localhost.localdomain", "ip6-localhost", "ip6-loopback"}
+
+
+def _addr_host(address):
+    if isinstance(address, tuple) and address:
+        return address[0]
+    if isinstance(address, str):
+        return address
+    return None
+
+
+def _is_loopback_host(host):
+    if not host or not isinstance(host, str):
+        return False
+    name = host.split("%")[0].strip().lower().strip("[]")
+    if name in _LOOPBACK_NAMES:
+        return True
+    if name.startswith("::ffff:"):
+        name = name[7:]
+    try:
+        return ipaddress.ip_address(name).is_loopback
+    except ValueError:
+        return False
+
+
 if os.environ.get("NO_NETWORK") == "1":
+    _orig_connect = socket.socket.connect
+    _orig_connect_ex = socket.socket.connect_ex
+
     def _blocked(*_args, **_kwargs):
         raise RuntimeError("Sable: socket.connect is blocked in the isolated copy")
 
-    socket.socket.connect = _blocked
-    socket.socket.connect_ex = _blocked
+    def _guarded_connect(self, address):
+        if _is_loopback_host(_addr_host(address)):
+            return _orig_connect(self, address)
+        _blocked()
+
+    def _guarded_connect_ex(self, address):
+        if _is_loopback_host(_addr_host(address)):
+            return _orig_connect_ex(self, address)
+        _blocked()
+
+    socket.socket.connect = _guarded_connect
+    socket.socket.connect_ex = _guarded_connect_ex
 '''
 
 
@@ -643,9 +729,32 @@ def evaluate_preflight(
     ast_hits, allowed, ast_warnings = scan_tests_for_risks(
         isolated_root, allow_in_tests=allow_in_tests, sandboxed=sandboxed, only_paths=only_paths
     )
-    checks["tests_ast_clean"] = len(ast_hits) == 0
-    if ast_hits:
-        blocked.append("dangerous operations in isolated copy: " + "; ".join(ast_hits[:8]))
+    allowlist_yaml = ""
+    environment_reasons: list[str] = []
+    if (not sandboxed) and ast_hits:
+        # Classify hits the way an active bwrap sandbox would: anything it
+        # would confine (test subprocess/eval/unlink, source eval) is an
+        # environment stop, not a product VETO. Hits that would still block
+        # under the sandbox (for example os.system in non-test source) stay
+        # blocking. Tests are never executed unsandboxed.
+        relaxed_hits, _, _relaxed_warnings = scan_tests_for_risks(
+            isolated_root, allow_in_tests=allow_in_tests, sandboxed=True, only_paths=only_paths
+        )
+        still_block = list(relaxed_hits)
+        env_only = [hit for hit in ast_hits if hit not in set(still_block)]
+        if still_block:
+            checks["tests_ast_clean"] = len(still_block) == 0
+            blocked.append("dangerous operations in isolated copy: " + "; ".join(still_block[:8]))
+        else:
+            checks["tests_ast_clean"] = True
+        if env_only:
+            checks["tests_need_sandbox"] = True
+            environment_reasons = env_only
+            allowlist_yaml = format_allow_in_tests_yaml(allowlist_entries_from_hits(env_only))
+    else:
+        checks["tests_ast_clean"] = len(ast_hits) == 0
+        if ast_hits:
+            blocked.append("dangerous operations in isolated copy: " + "; ".join(ast_hits[:8]))
     if ast_warnings:
         checks["tests_ast_warned"] = True
 
@@ -660,14 +769,28 @@ def evaluate_preflight(
     else:
         checks["network_denied"] = True
 
-    verdict = Verdict.BLOCK.value if blocked else Verdict.CLEAR.value
+    if blocked:
+        verdict = Verdict.BLOCK.value
+        blocked_reasons = blocked
+    elif environment_reasons:
+        verdict = Verdict.BLOCKED_ENV.value
+        blocked_reasons = [
+            "sandbox unavailable; tests were not executed because they use operations "
+            "that the sandbox would confine. Enable bubblewrap, or add the following "
+            "to the operator config and re-run:\n" + allowlist_yaml
+        ]
+    else:
+        verdict = Verdict.CLEAR.value
+        blocked_reasons = blocked
     return PolicyDecision(
         verdict=verdict,
-        blocked_reasons=blocked,
+        blocked_reasons=blocked_reasons,
         checks=checks,
         command=list(command),
         allowed=allowed,
         warnings=ast_warnings,
+        allowlist_yaml=allowlist_yaml,
+        environment_reasons=environment_reasons,
     )
 
 

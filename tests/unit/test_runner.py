@@ -35,6 +35,8 @@ def test_sanitized_env_strips_secrets_and_sets_proxy(monkeypatch):
     assert env["HTTPS_PROXY"] == "http://127.0.0.1:9"
     assert env["ALL_PROXY"] == "http://127.0.0.1:9"
     assert env.get("NO_NETWORK") == "1"
+    assert env["NO_PROXY"] == "127.0.0.1,::1,localhost"
+    assert env["no_proxy"] == "127.0.0.1,::1,localhost"
 
 
 def test_sanitized_env_allow_network_omits_dead_proxy(monkeypatch):

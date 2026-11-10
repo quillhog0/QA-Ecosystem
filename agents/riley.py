@@ -941,42 +941,15 @@ def _maybe_llm(
         raw = None
 
     review.llm_status = llm_status
-    if not raw:
-        return review
-    parsed = parse_yaml_block(raw)
-    if not parsed:
-        review.llm_status = "fallback: invalid YAML"
-        return review
-    verdict = str(parsed.get("verdict") or review.verdict).upper()
-    if verdict not in {Verdict.CLEAR.value, Verdict.VETO.value}:
-        verdict = review.verdict
-    if review.verdict == Verdict.VETO.value:
-        verdict = Verdict.VETO.value
-    root = str(parsed.get("root_cause") or "")
-    if verdict == Verdict.VETO.value and not root:
-        root = review.root_cause or "unspecified technical defect"
-    elif verdict == Verdict.VETO.value and review.root_cause and root and root != review.root_cause:
-        root = f"{review.root_cause}; {root}"
-
-    gaps = list(review.gaps)
-    for g in parsed.get("gaps") or []:
-        sg = str(g)
-        if sg not in gaps:
-            gaps.append(sg)
-    required_changes = list(review.required_changes)
-    for c in parsed.get("required_changes") or []:
-        sc = str(c)
-        if sc not in required_changes:
-            required_changes.append(sc)
-
-    return RedTeamReview(
-        verdict=verdict,
-        gaps=gaps,
-        required_changes=required_changes,
-        root_cause=root if verdict == Verdict.VETO.value else "",
-        notes=str(parsed.get("notes") or review.notes),
-        llm_status="ok",
-    )
+    # Do not add gaps or upgrade a CLEAR to VETO from the LLM. Ambiguous
+    # findings are triaged later (downgrade or annotate only).
+    if raw:
+        parsed = parse_yaml_block(raw)
+        if not parsed:
+            review.llm_status = "fallback: invalid YAML"
+        else:
+            review.llm_status = "ok"
+    return review
 
 
 def audit_mutations(

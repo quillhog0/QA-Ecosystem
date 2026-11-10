@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- **Sable unsandboxed test operations are an environment stop, not a product VETO.** When bubblewrap is unavailable, operations the sandbox would confine (subprocess, eval, deletes, and test-local network helpers) return `BLOCKED_ENV` (exit 2) instead of `VETO`. Tests are never executed unsandboxed. The report includes a ready-to-paste `sable.allow_in_tests` YAML block. Hits that would still block under the sandbox (for example `os.system` in production source) remain a `VETO`.
+- **Sable runtime guard allows loopback-only sockets.** With `allow_network` false, `socket.connect` to `127.0.0.1`, `::1`, other loopback addresses, and conventional `localhost` names is permitted so in-process HTTP tests can talk to a local server. External destinations still raise. `NO_PROXY`/`no_proxy` now include `127.0.0.1,::1,localhost` so urllib is not sent to the dead proxy on loopback.
+- **Lexi drops documented-but-not-API noise.** Sphinx inventory references (`genindex`, `modindex`, a Sphinx `:ref:` search link), dunder methods, prose placeholders and example identifiers (including `rowIDs`), historical-only changelog mentions (`DEFAULT_CURRENCY` in `CHANGES.rst`), and `$DEITY`-style dollar words that are not environment variables are no longer findings. `pip install pytest-*` and other tool packages are not install-instruction mismatches. Promised APIs such as a documented `divide` that is missing from code are still reported.
+- **Mutation on a red baseline** records the failing node ids in the skip reason. When some tests passed and mutation is enabled, mutation runs on the passing subset (`pytest --deselect=`). The overall verdict stays `VETO` for the red tests.
+- **Likely-equivalent mutants** (a `return` value unused by every caller, e.g. a helper that only mutates and returns its input) are marked, listed separately, and excluded from the score penalty. If later killed they still count as killed. Tests are never skipped or xfailed to hide a survivor.
+
+### Added
+- **Optional LLM triage** of already-emitted ambiguous findings (doc drift, claims, likely-equivalent mutants). The model may only downgrade or annotate, never create or upgrade a finding, and never clear a P0 that has evidence. When the LLM is off or unavailable the deterministic result is unchanged. A `mock` provider (`llm.provider: mock`, `llm.mock_response`) is available for tests. Lexi, Aria, and Riley no longer merge model output into their heuristic results.
+
 ## 0.8.1 (2026-11-06)
 
 ### Fixed

@@ -85,8 +85,7 @@ def test_lexi_prose_placeholder_is_not_high(tmp_path: Path):
         config={"llm": {"provider": "none"}, "dry_run": True},
     )
     row_findings = [f for f in report.findings if f.path == "rowIDs"]
-    assert row_findings, "expected rowIDs to still be reported"
-    assert all(f.severity != "high" for f in row_findings)
+    assert row_findings == [], "prose placeholders like rowIDs must not be reported"
     assert report.verdict != Verdict.VETO.value
 
 

@@ -445,6 +445,25 @@ def _collect_sable(builder: _FindingBuilder, policy: dict[str, Any] | None) -> N
                 fclass="hard",
                 confidence="high",
             )
+    yaml_block = str(policy.get("allowlist_yaml") or "")
+    env_reasons = policy.get("environment_reasons") or []
+    if yaml_block or env_reasons or str(policy.get("verdict") or "") == "BLOCKED_ENV":
+        evidence = "; ".join(str(r) for r in env_reasons[:8]) if env_reasons else ""
+        if yaml_block:
+            evidence = (evidence + "\n" if evidence else "") + yaml_block
+        if not evidence:
+            evidence = "sandbox unavailable; tests were not executed"
+        builder.add(
+            agent="sable",
+            ftype="environment",
+            priority="P3",
+            impact="Tests were not executed because the sandbox is unavailable. This is not a product defect.",
+            evidence=evidence,
+            red_test="Enable bubblewrap, or paste sable.allow_in_tests into the operator config and re-run.",
+            term="tests_need_sandbox",
+            fclass="hard",
+            confidence="high",
+        )
 
 
 def _product_impact(node: str, message: str) -> tuple[str, str]:
@@ -736,6 +755,27 @@ def _collect_diff_mutants(builder: _FindingBuilder, mutation: dict[str, Any] | N
                         fclass="heuristic",
                         confidence="high",
                     )
+        for equiv in mutation.get("equivalent_mutants", ()) or ():
+            if not isinstance(equiv, dict):
+                continue
+            loc = str(equiv.get("location", ""))
+            file_part, _, line_str = loc.partition(":")
+            orig = str(equiv.get("original", ""))
+            mut = str(equiv.get("mutated", ""))
+            reason = str(equiv.get("reason") or "return value unused by callers")
+            builder.add(
+                agent="riley",
+                ftype="mutation",
+                priority="P3",
+                impact=f"Likely equivalent mutant at {loc} ({equiv.get('type')}: {orig} -> {mut}); {reason}.",
+                evidence=f"likely-equivalent mutant {equiv.get('id')} at {loc}: {orig} -> {mut} ({reason})",
+                red_test="None; this mutant is marked likely-equivalent and excluded from the score penalty.",
+                file=file_part if file_part else None,
+                line=_as_int(line_str) if line_str else None,
+                term=loc,
+                fclass="heuristic",
+                confidence="medium",
+            )
 
 
 def count_by_priority(findings: list[dict[str, Any]]) -> dict[str, int]:
@@ -890,14 +930,29 @@ def build_document(
     today: Any = None,
     baseline: set[str] | list[str] | None = None,
     fail_on: str = "P1",
+    config: dict[str, Any] | None = None,
+    isolated_root: Any = None,
 ) -> dict[str, Any]:
     findings = build_findings(report)
+    triage_meta = None
+    if config:
+        from agents.triage import apply_triage
+
+        findings, triage_meta = apply_triage(
+            findings,
+            config=config,
+            report=report,
+            isolated_root=isolated_root,
+            fail_on=fail_on,
+        )
     document: dict[str, Any] = {
         "schema_version": "1",
         "run_id": str(report.get("run_id") or ""),
         "verdict": str(report.get("verdict") or ""),
         "generated_at": str(report.get("finished_at") or ""),
     }
+    if triage_meta:
+        document["triage"] = triage_meta
     if exceptions:
         from datetime import date as _date
 
@@ -1092,6 +1147,8 @@ def write_findings(
     fail_on: str = "P1",
     write_brief: bool = not bool(),
     feedback_export: bool = bool(),
+    config: dict[str, Any] | None = None,
+    isolated_root: Any = None,
 ) -> tuple[Path, Path]:
     """Write the run's findings under ``<findings_dir>/<run_id>/`` and mirror
     them into ``<findings_dir>/latest/`` so an IDE can pin one stable path.
@@ -1108,7 +1165,15 @@ def write_findings(
         if not callable(to_dict):
             raise TypeError("findings builder expects a mapping or an object with to_dict()")
         data = to_dict()
-    document = build_document(data, exceptions=exceptions, today=today, baseline=baseline, fail_on=fail_on)
+    document = build_document(
+        data,
+        exceptions=exceptions,
+        today=today,
+        baseline=baseline,
+        fail_on=fail_on,
+        config=config,
+        isolated_root=isolated_root,
+    )
     base = Path(findings_dir)
     run_id = str(document.get("run_id") or "")
     run_dir = base / run_id if run_id else base

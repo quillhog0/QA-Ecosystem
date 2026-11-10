@@ -34,8 +34,10 @@ class Mutant:
     original: str
     mutated: str
     node_index: int
-    status: str = "pending"  # killed, survived, timeout, error
+    status: str = "pending"  # killed, survived, timeout, error, equivalent
     details: str = ""
+    likely_equivalent: bool = False
+    equivalent_reason: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -370,7 +372,104 @@ def _resolve_mutation_workers(mutation_cfg: dict[str, Any]) -> int:
     return workers
 
 
+
+def _enclosing_function_name(source: str, lineno: int) -> str | None:
+    """Return the function that contains ``lineno``, or None."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return None
+    found: str | None = None
+    found_depth = -1
+
+    def walk(node: ast.AST, depth: int) -> None:
+        nonlocal found, found_depth
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            start = getattr(node, "lineno", None)
+            end = getattr(node, "end_lineno", None) or start
+            if start is not None and end is not None and start <= lineno <= end and depth >= found_depth:
+                found = node.name
+                found_depth = depth
+        for child in ast.iter_child_nodes(node):
+            walk(child, depth + 1)
+
+    walk(tree, 0)
+    return found
+
+
+def _call_func_name(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    return None
+
+
+def function_return_unused_by_callers(project_root: Path, func_name: str) -> bool:
+    """True when every call site of ``func_name`` discards the return value.
+
+    A function with no call sites is left unmarked (unknown). This is a
+    conservative static pass used to flag likely-equivalent return_value mutants.
+    """
+    if not func_name:
+        return False
+    skip_dirs = SKIP_DIR_NAMES - {"tests", "test"}
+    callers = 0
+    used = 0
+    for path in project_root.rglob("*.py"):
+        try:
+            rel = path.relative_to(project_root)
+        except ValueError:
+            continue
+        if any(part in skip_dirs for part in rel.parts):
+            continue
+        try:
+            source = path.read_text(encoding="utf-8", errors="replace")
+            tree = ast.parse(source)
+        except (OSError, SyntaxError):
+            continue
+        parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            name = _call_func_name(node.func)
+            if name != func_name:
+                continue
+            callers += 1
+            parent = parents.get(node)
+            if parent is not None and not isinstance(parent, ast.Expr):
+                used += 1
+    return callers > 0 and used == 0
+
+
+def annotate_equivalent_mutants(project_root: Path, mutants: list[Mutant]) -> None:
+    """Mark return_value mutants whose return value is unused by all callers."""
+    source_cache: dict[str, str] = {}
+    unused_cache: dict[str, bool] = {}
+    for mutant in mutants:
+        if mutant.mutation_type != "return_value":
+            continue
+        rel = mutant.file_path
+        if rel not in source_cache:
+            path = project_root / rel
+            try:
+                source_cache[rel] = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                source_cache[rel] = ""
+        func = _enclosing_function_name(source_cache[rel], mutant.lineno)
+        if not func:
+            continue
+        if func not in unused_cache:
+            unused_cache[func] = function_return_unused_by_callers(project_root, func)
+        if unused_cache[func]:
+            mutant.likely_equivalent = True
+            mutant.equivalent_reason = (
+                f"return value of {func}() is unused by callers"
+            )
+
+
 def run_mutation_testing(
+
     isolated_root: Path,
     *,
     work_dir: Path,
@@ -403,6 +502,8 @@ def run_mutation_testing(
             "mutants": [],
         }
     selected = select_mutants(all_mutants, max_mutants=max_mutants, seed=seed)
+    annotate_equivalent_mutants(isolated_root, all_mutants)
+    annotate_equivalent_mutants(isolated_root, selected)
 
     if not selected:
         return {
@@ -488,7 +589,8 @@ def run_mutation_testing(
                 timeout=timeout_per_mutant,
                 python=python,
                 config=config,
-                extra_args=["-x", "-q"],
+                extra_args=["-x", "-q"]
+                + [f"--deselect={node}" for node in (mutation_cfg.get("deselect") or []) if str(node).strip()],
             )
 
             active_count = res.collected or (res.passed + res.failed + res.skipped + res.errors)
@@ -497,8 +599,6 @@ def run_mutation_testing(
                 mutant.details = f"timed out after {timeout_per_mutant}s"
                 return ("timeout", None)
             elif res.exit_code == 0 and res.failed == 0 and (active_count > 0 or res.passed > 0):
-                mutant.status = "survived"
-                mutant.details = f"passed ({res.passed} passed)"
                 survivor = {
                     "id": mutant.id,
                     "location": f"{mutant.file_path}:{mutant.lineno}",
@@ -506,6 +606,14 @@ def run_mutation_testing(
                     "original": mutant.original,
                     "mutated": mutant.mutated,
                 }
+                if mutant.likely_equivalent:
+                    mutant.status = "equivalent"
+                    mutant.details = mutant.equivalent_reason or "likely equivalent mutant (return value unused by callers)"
+                    survivor["likely_equivalent"] = True
+                    survivor["reason"] = mutant.details
+                    return ("equivalent", survivor)
+                mutant.status = "survived"
+                mutant.details = f"passed ({res.passed} passed)"
                 return ("survived", survivor)
             elif res.failed > 0 or res.errors > 0 or (res.exit_code != 0 and active_count > 0):
                 mutant.status = "killed"
@@ -557,19 +665,26 @@ def run_mutation_testing(
     survived = 0
     timeout_count = 0
     error_count = 0
+    equivalent_count = 0
     survived_list: list[dict[str, Any]] = []
+    equivalent_list: list[dict[str, Any]] = []
     for kind, survivor in outcomes:
         if kind == "killed":
             killed += 1
         elif kind == "survived":
             survived += 1
             survived_list.append(survivor)
+        elif kind == "equivalent":
+            equivalent_count += 1
+            equivalent_list.append(survivor)
         elif kind == "timeout":
             timeout_count += 1
         else:
             error_count += 1
 
     evaluated = len(selected)
+    # Likely-equivalent mutants are reported but do not lower the score:
+    # changing an unused return cannot be witnessed by any caller.
     active = killed + survived
     score = (killed / active) if active > 0 else 0.0
 
@@ -577,11 +692,17 @@ def run_mutation_testing(
         verdict = Verdict.VETO.value
         reason = (
             f"mutation score {score:.2f} is below minimum required score {min_score:.2f} "
-            f"({killed} killed, {survived} survived)"
+            f"({killed} killed, {survived} survived"
+            + (f", {equivalent_count} likely-equivalent" if equivalent_count else "")
+            + ")"
         )
     else:
         verdict = Verdict.CLEAR.value
-        reason = f"mutation score {score:.2f} ({killed} killed, {survived} survived)"
+        reason = (
+            f"mutation score {score:.2f} ({killed} killed, {survived} survived"
+            + (f", {equivalent_count} likely-equivalent" if equivalent_count else "")
+            + ")"
+        )
 
     return {
         "status": "completed",
@@ -593,9 +714,11 @@ def run_mutation_testing(
         "evaluated": evaluated,
         "killed": killed,
         "survived": survived,
+        "equivalent": equivalent_count,
         "timeout": timeout_count,
         "error": error_count,
         "reason": reason,
         "survived_mutants": survived_list,
+        "equivalent_mutants": equivalent_list,
         "mutants": [m.to_dict() for m in selected],
     }

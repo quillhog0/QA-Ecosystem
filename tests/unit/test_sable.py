@@ -111,8 +111,11 @@ def test_sable_blocks_dangerous_ast_in_tests(tmp_path: Path):
         env={},
         cwd=iso,
     )
-    assert decision.verdict == Verdict.BLOCK.value
-    joined = " ".join(decision.blocked_reasons)
+    assert decision.verdict == Verdict.BLOCKED_ENV.value
+    assert decision.checks.get("tests_ast_clean") is True
+    assert decision.checks.get("tests_need_sandbox") is True
+    assert decision.allowlist_yaml
+    joined = " ".join(decision.environment_reasons)
     assert "rmtree" in joined or "urllib" in joined
 
 
@@ -172,7 +175,7 @@ def test_sable_allow_in_tests_requires_path_call_and_reason(tmp_path: Path):
         cwd=iso,
         allow_in_tests=[{k: v for k, v in complete.items() if k != "reason"}],
     )
-    assert missing_reason.verdict == Verdict.BLOCK.value
+    assert missing_reason.verdict == Verdict.BLOCKED_ENV.value
 
     wrong_path = evaluate_preflight(
         command=cmd,
@@ -183,7 +186,7 @@ def test_sable_allow_in_tests_requires_path_call_and_reason(tmp_path: Path):
         cwd=iso,
         allow_in_tests=[{**complete, "path": "tests/unit/other.py"}],
     )
-    assert wrong_path.verdict == Verdict.BLOCK.value
+    assert wrong_path.verdict == Verdict.BLOCKED_ENV.value
 
     wrong_call = evaluate_preflight(
         command=cmd,
@@ -194,7 +197,7 @@ def test_sable_allow_in_tests_requires_path_call_and_reason(tmp_path: Path):
         cwd=iso,
         allow_in_tests=[{**complete, "call": "subprocess.Popen"}],
     )
-    assert wrong_call.verdict == Verdict.BLOCK.value
+    assert wrong_call.verdict == Verdict.BLOCKED_ENV.value
 
 
 def test_sable_substring_nc_in_path_is_false_positive(tmp_path: Path):
@@ -284,8 +287,9 @@ def test_sable_scans_conftest_py(tmp_path: Path):
         env={},
         cwd=iso,
     )
-    assert decision.verdict == Verdict.BLOCK.value
-    assert any("subprocess" in r for r in decision.blocked_reasons)
+    assert decision.verdict == Verdict.BLOCKED_ENV.value
+    assert any("subprocess" in r for r in decision.environment_reasons)
+    assert decision.allowlist_yaml
 
 
 def test_sable_arg_looks_tmp_checks_segments_not_substring(tmp_path: Path):
@@ -318,7 +322,8 @@ def test_sable_runtime_guard_blocks_socket_only_when_no_network(tmp_path: Path):
 
     content = guard.read_text(encoding="utf-8")
     assert 'os.environ.get("NO_NETWORK") == "1"' in content
-    assert "socket.socket.connect = _blocked" in content
+    assert "socket.socket.connect = _guarded_connect" in content
+    assert "_is_loopback_host" in content
     assert "Sable: socket.connect is blocked in the isolated copy" in content
 
     tree = ast.parse(content)
@@ -424,7 +429,8 @@ def test_sable_sandboxed_downgrades_dangerous_to_warnings(tmp_path: Path):
 
 
 def test_sable_unsandboxed_blocks_same_inputs(tmp_path: Path):
-    """Cause 1: without an active sandbox the same ops still BLOCK (unchanged)."""
+    """Without a sandbox, test/source ops the sandbox would confine become
+    BLOCKED_ENV (not a product VETO). Tests are never executed unsandboxed."""
     iso, live = _sandbox_tree(tmp_path)
     decision = evaluate_preflight(
         command=_pytest_cmd(iso),
@@ -435,10 +441,13 @@ def test_sable_unsandboxed_blocks_same_inputs(tmp_path: Path):
         cwd=iso,
         sandboxed=False,
     )
-    assert decision.verdict == Verdict.BLOCK.value
-    assert decision.warnings == []
-    joined = " ".join(decision.blocked_reasons)
+    assert decision.verdict == Verdict.BLOCKED_ENV.value
+    assert decision.checks.get("tests_ast_clean") is True
+    assert decision.checks.get("tests_need_sandbox") is True
+    assert decision.allowlist_yaml
+    joined = " ".join(decision.environment_reasons)
     assert "subprocess" in joined and "eval" in joined
+    assert "allow_in_tests" in decision.allowlist_yaml
 
 
 def test_sable_role_label_distinguishes_tests_from_source(tmp_path: Path):
@@ -641,3 +650,113 @@ def test_evaluate_post_execution_collected_zero():
 
 
 
+
+
+def test_sable_unsandboxed_source_os_system_still_blocks(tmp_path: Path):
+    """os.system in non-test source still BLOCKs when unsandboxed (and when sandboxed)."""
+    iso = tmp_path / "iso"
+    live = tmp_path / "live"
+    iso.mkdir()
+    live.mkdir()
+    (iso / "worker.py").write_text("import os\n\ndef run():\n    os.system('echo hi')\n", encoding="utf-8")
+    (iso / "tests").mkdir()
+    (iso / "tests" / "test_ok.py").write_text("def test_ok():\n    assert True\n", encoding="utf-8")
+    decision = evaluate_preflight(
+        command=_pytest_cmd(iso),
+        isolated_root=iso,
+        live_root=live,
+        allow_network=False,
+        env={},
+        cwd=iso,
+        sandboxed=False,
+    )
+    assert decision.verdict == Verdict.BLOCK.value
+    assert any("os.system" in r or "system" in r for r in decision.blocked_reasons)
+    sandboxed = evaluate_preflight(
+        command=_pytest_cmd(iso),
+        isolated_root=iso,
+        live_root=live,
+        allow_network=False,
+        env={},
+        cwd=iso,
+        sandboxed=True,
+    )
+    assert sandboxed.verdict == Verdict.BLOCK.value
+
+
+def test_allowlist_yaml_is_ready_to_paste(tmp_path: Path):
+    from policies.sable import allowlist_entries_from_hits, format_allow_in_tests_yaml
+
+    iso, live = _tree_with_subprocess_run(tmp_path)
+    decision = evaluate_preflight(
+        command=_pytest_cmd(iso),
+        isolated_root=iso,
+        live_root=live,
+        allow_network=False,
+        env={},
+        cwd=iso,
+        sandboxed=False,
+    )
+    assert decision.verdict == Verdict.BLOCKED_ENV.value
+    yaml_text = decision.allowlist_yaml
+    assert yaml_text.startswith("sable:")
+    assert "allow_in_tests:" in yaml_text
+    assert "path: tests/unit/test_isolation.py" in yaml_text
+    assert "call: subprocess" in yaml_text or "call: subprocess.run" in yaml_text
+    entries = allowlist_entries_from_hits(decision.environment_reasons)
+    assert entries
+    assert format_allow_in_tests_yaml(entries) == yaml_text
+
+
+def test_runtime_guard_allows_loopback_and_blocks_external(tmp_path: Path):
+    """Loopback destinations stay reachable; any other destination is blocked."""
+    import socket
+    import subprocess
+
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    guard = install_runtime_guards(work_dir)
+    script = work_dir / "probe.py"
+    script.write_text(
+        "import os, runpy, socket, sys\n"
+        "os.environ['NO_NETWORK'] = '1'\n"
+        f"runpy.run_path({str(guard)!r})\n"
+        "def try_connect(host, port=1):\n"
+        "    s = socket.socket(socket.AF_INET if ':' not in host.strip('[]') and not host.startswith('::') else socket.AF_INET6, socket.SOCK_STREAM)\n"
+        "    s.settimeout(0.2)\n"
+        "    try:\n"
+        "        s.connect((host, port))\n"
+        "        return 'connected'\n"
+        "    except RuntimeError as exc:\n"
+        "        return f'blocked:{exc}'\n"
+        "    except OSError as exc:\n"
+        "        return f'oserror:{type(exc).__name__}'\n"
+        "    finally:\n"
+        "        s.close()\n"
+        "results = {}\n"
+        "for host in ('127.0.0.1', 'localhost', '1.1.1.1', 'example.com'):\n"
+        "    results[host] = try_connect(host)\n"
+        "try:\n"
+        "    s6 = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)\n"
+        "    s6.settimeout(0.2)\n"
+        "    try:\n"
+        "        s6.connect(('::1', 1))\n"
+        "        results['::1'] = 'connected'\n"
+        "    except RuntimeError as exc:\n"
+        "        results['::1'] = f'blocked:{exc}'\n"
+        "    except OSError:\n"
+        "        results['::1'] = 'oserror'\n"
+        "    finally:\n"
+        "        s6.close()\n"
+        "except OSError as exc:\n"
+        "    results['::1'] = f'skip:{type(exc).__name__}'\n"
+        "print(results)\n"
+        "ok_loop = all(not results[h].startswith('blocked') for h in ('127.0.0.1', 'localhost'))\n"
+        "ok_ext = results['1.1.1.1'].startswith('blocked') and results['example.com'].startswith('blocked')\n"
+        "ok_v6 = results['::1'].startswith('blocked') is False or results['::1'].startswith('skip')\n"
+        "sys.exit(0 if ok_loop and ok_ext and ok_v6 else 1)\n",
+        encoding="utf-8",
+    )
+    proc = subprocess.run([sys.executable, str(script)], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "blocked" in proc.stdout

@@ -379,12 +379,12 @@ def design(
         raw = None
 
     plan.llm_status = llm_status
-    if not raw:
-        return plan
-    parsed = parse_yaml_block(raw)
-    if not parsed:
-        plan.llm_status = "fallback: invalid YAML"
-        return plan
-    result = _from_llm(parsed, plan)
-    result.llm_status = "ok"
-    return result
+    # Do not replace the heuristic test plan with an LLM plan: that is not
+    # deterministic. Status is kept for the report.
+    if raw:
+        parsed = parse_yaml_block(raw)
+        if not parsed:
+            plan.llm_status = "fallback: invalid YAML"
+        else:
+            plan.llm_status = "ok"
+    return plan

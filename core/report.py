@@ -213,6 +213,21 @@ def render_summary_markdown(report: FinalReport | dict[str, Any]) -> str:
         f"- **Languages:** {', '.join(languages)}",
         f"- **Runtime:** {os_name}, Python {py_ver}, Node {node_ver}",
     ]
+    policy = (getattr(report, "policy", None) or {}) if not isinstance(report, dict) else (report.get("policy") or {})
+    allowlist = ""
+    if isinstance(policy, dict):
+        allowlist = str(policy.get("allowlist_yaml") or "")
+    if allowlist:
+        lines += [
+            "",
+            "## Sandbox required (not a product defect)",
+            "",
+            "Tests were not executed because the sandbox is unavailable. Paste this into the operator config, or enable bubblewrap, and re-run:",
+            "",
+            "```yaml",
+            allowlist,
+            "```",
+        ]
 
     if breakdown:
         for lang_name, counts in breakdown.items():

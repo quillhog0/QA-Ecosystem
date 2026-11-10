@@ -75,6 +75,8 @@ def llm_enabled(config: dict[str, Any]) -> bool:
         return False
     if config.get("dry_run", True) and not llm.get("call_in_dry_run", False):
         return False
+    if provider == "mock":
+        return True
     if provider == "openrouter":
         return bool(os.environ.get("OPENROUTER_API_KEY"))
     if provider == "local":
@@ -93,6 +95,9 @@ def complete(
         return None
     llm = config.get("llm") or {}
     provider = str(llm.get("provider") or "none").lower()
+    if provider == "mock":
+        response = str(llm.get("mock_response") or os.environ.get("QA_LLM_MOCK_RESPONSE") or "")
+        return response or None
     model = str(llm.get("model") or config.get("model") or "openai/gpt-4o-mini")
     timeout = float(llm.get("timeout_seconds") or 45)
     body = {

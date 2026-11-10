@@ -73,7 +73,10 @@ def sanitized_env(*, allow_network: bool) -> dict[str, str]:
         env["HTTP_PROXY"] = "http://127.0.0.1:9"
         env["HTTPS_PROXY"] = "http://127.0.0.1:9"
         env["ALL_PROXY"] = "http://127.0.0.1:9"
-        env["NO_PROXY"] = ""
+        # Keep the dead proxy for off-box URLs, but do not intercept loopback
+        # HTTP used by in-process test servers (127.0.0.1/::1/localhost).
+        env["NO_PROXY"] = "127.0.0.1,::1,localhost"
+        env["no_proxy"] = "127.0.0.1,::1,localhost"
     return env
 
 

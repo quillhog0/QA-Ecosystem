@@ -1402,7 +1402,51 @@ def _rescope_lexi(
     return report
 
 
+
+_DUNDER_RE = re.compile(r"^__\w+__$")
+_SPHINX_INVENTORY = frozenset({"genindex", "modindex", "py-modindex"})
+_SPHINX_REF_RE = re.compile(r":(?:ref|doc|mod|std:ref):`(?:[^`]*:)?{name}`")
+
+
+def _is_sphinx_role_line(ident: str, line: str) -> bool:
+    if not line:
+        return False
+    if re.search(rf":(?:ref|doc|mod):`(?:[^`]*:)?{re.escape(ident)}`", line):
+        return True
+    return False
+
+
+def _should_omit_doc_term(
+    ident: str,
+    *,
+    mentions: dict[str, list[_Mention]],
+    docs_plain: str,
+) -> bool:
+    """Drop doc-word noise that is not an API promise.
+
+    Sphinx inventory refs, dunder methods, placeholders, example identifiers,
+    historical-only mentions, and prose-only listed/negated words are not
+    product claims.
+    """
+    found = mentions.get(ident) or []
+    if _DUNDER_RE.match(ident):
+        return True
+    if ident in _SPHINX_INVENTORY:
+        return True
+    if ident == "search" and found and all(_is_sphinx_role_line(ident, m.line or "") for m in found):
+        return True
+    if found and all(getattr(m, "historical", False) for m in found):
+        return True
+    if _is_doc_code_example_ident(ident, docs_plain) or _is_placeholder(ident, docs_plain):
+        return True
+    # Do not drop every prose-only mention: disclaimed APIs and a clearly
+    # missing identifier still need to be visible, just not as a high veto
+    # (_missing_code_severity already downgrades them).
+    return False
+
+
 def _heuristic_drift(
+
     *,
     docs_root: Path,
     project_root: Path,
@@ -1574,6 +1618,8 @@ def _heuristic_drift(
             # missing project code.
             continue
         if ident in code_text_content:
+            if _should_omit_doc_term(ident, mentions=mentions, docs_plain=docs_plain):
+                continue
             doc_file, doc_line = _mention_location(ident, mentions)
             findings.append(
                 DriftFinding(
@@ -1602,6 +1648,8 @@ def _heuristic_drift(
             # The name exists in a repository data file (a JSON fixture, a
             # seed file): real project content, so never a veto.
             severity = "low"
+        if _should_omit_doc_term(ident, mentions=mentions, docs_plain=docs_plain):
+            continue
         findings.append(
             DriftFinding(
                 kind="missing_code",
@@ -1792,12 +1840,13 @@ def inspect(
         raw = None
 
     report.llm_status = llm_status
-    if not raw:
-        return _rescope_lexi(report, docs_allowlist, changed_code)
-    parsed = parse_yaml_block(raw)
-    if not parsed:
-        report.llm_status = "fallback: invalid YAML"
-        return _rescope_lexi(report, docs_allowlist, changed_code)
-    result = _from_llm(parsed, report)
-    result.llm_status = "ok"
-    return _rescope_lexi(result, docs_allowlist, changed_code)
+    # LLM output is no longer merged into the drift report: it could add or
+    # upgrade findings and change a deterministic result. Ambiguous items are
+    # triaged later (downgrade or annotate only) in agents.triage.
+    if raw:
+        parsed = parse_yaml_block(raw)
+        if not parsed:
+            report.llm_status = "fallback: invalid YAML"
+        else:
+            report.llm_status = "ok"
+    return _rescope_lexi(report, docs_allowlist, changed_code)

@@ -563,22 +563,23 @@ def test_a_failing_test_keeps_the_veto_despite_a_missing_dependency(tmp_path: Pa
 
 
 def test_dangerous_code_plus_a_missing_dependency_is_a_veto(tmp_path: Path):
-    """Sable's pre-flight BLOCK outranks any environmental explanation, and the
-    suite is never executed."""
+    """Test-only ops the sandbox would confine become BLOCKED_ENV, not a
+    product VETO. The suite is never executed unsandboxed."""
     from core.report import exit_code_for
 
     vesper, packet, handle, work_dir, report = _env_loop_inputs(tmp_path, dangerous=True)
 
     def never_run(*args, **kwargs):
-        raise AssertionError("nova.execute must not run after a pre-flight BLOCK")
+        raise AssertionError("nova.execute must not run after a pre-flight environment block")
 
     with patch("agents.nova.execute", side_effect=never_run):
         vesper._loop(packet, handle, work_dir, report)
 
-    assert report.verdict == Verdict.VETO.value
-    assert exit_code_for(report.verdict) == 1
-    assert _role(vesper.role_results, "sable", "preflight")[0].verdict == Verdict.BLOCK.value
+    assert report.verdict == Verdict.BLOCKED_ENV.value
+    assert exit_code_for(report.verdict) == 2
+    assert _role(vesper.role_results, "sable", "preflight")[0].verdict == Verdict.BLOCKED_ENV.value
     assert not _role(vesper.role_results, "nova", "execute")
+    assert report.policy.get("allowlist_yaml")
 
 
 def test_a_non_pytest_command_keeps_the_veto_when_environment_blocked(tmp_path: Path):
@@ -594,7 +595,7 @@ def test_a_non_pytest_command_keeps_the_veto_when_environment_blocked(tmp_path: 
     assert post.verdict == Verdict.BLOCK.value
     assert post.details["checks"]["pytest_only"] is False
     # A policy block is not an environment stop: the skip reason stays the baseline.
-    assert report.mutation["reason"] == "baseline tests did not pass"
+    assert str(report.mutation["reason"]).startswith("baseline tests did not pass")
 
 
 def test_an_unexplained_empty_collection_still_vetoes(tmp_path: Path):
@@ -665,8 +666,22 @@ def test_a_required_sandbox_that_cannot_start_blocks_and_releases_the_copy(tmp_p
 
 
 def test_a_required_sandbox_that_cannot_start_still_vetoes_dangerous_code(tmp_path: Path):
-    """Precedence is monotonic: VETO > BLOCKED_ENV > CLEAR."""
+    """Test-only confined ops become BLOCKED_ENV when bwrap cannot start.
+    Production os.system still VETOes (see the source_dangerous test)."""
     project = mini_project(tmp_path / "proj", dangerous=True)
+    with patch("core.sandbox.get_sandbox_status", return_value=(False, "unavailable", "bwrap not found")), \
+         patch("agents.nova.execute", side_effect=AssertionError("must not execute")):
+        report = Vesper(_required_sandbox_config(tmp_path)).run(project, project / "docs")
+
+    assert report.verdict == Verdict.BLOCKED_ENV.value
+    assert not Path(report.isolated_root).exists()
+    preflight = [item for item in report.role_results if item.role == "sable" and item.stage == "preflight"]
+    assert preflight[0].verdict == Verdict.BLOCKED_ENV.value
+
+
+def test_a_required_sandbox_that_cannot_start_still_vetoes_source_os_system(tmp_path: Path):
+    """os.system in production source still VETOes even when the sandbox cannot start."""
+    project = mini_project(tmp_path / "proj", source_dangerous=True)
     with patch("core.sandbox.get_sandbox_status", return_value=(False, "unavailable", "bwrap not found")), \
          patch("agents.nova.execute", side_effect=AssertionError("must not execute")):
         report = Vesper(_required_sandbox_config(tmp_path)).run(project, project / "docs")

@@ -39,7 +39,7 @@ def test_incidents_directory_caps_drift_at_low(tmp_path: Path):
         encoding="utf-8",
     )
     sev = _run(docs, tmp_path)
-    assert sev.get("calculate_platform_fee_lamports") == "low"
+    assert "calculate_platform_fee_lamports" not in sev
 
 
 def test_same_term_in_ordinary_doc_stays_high(tmp_path: Path):
@@ -66,7 +66,7 @@ def test_historical_cap_holds_even_in_strict_mode(tmp_path: Path):
         encoding="utf-8",
     )
     sev = _run(docs, tmp_path, strict=True)
-    assert sev.get("settle_pending_payouts") == "low"
+    assert "settle_pending_payouts" not in sev
 
 
 def test_term_in_incident_and_ordinary_doc_stays_high(tmp_path: Path):
@@ -140,7 +140,7 @@ def test_changelog_stem_is_historical(tmp_path: Path):
         "# Changelog\n\n## 1.2.0\n- Added `rotate_api_keys` command.\n", encoding="utf-8"
     )
     sev = _run(docs, tmp_path)
-    assert sev.get("rotate_api_keys") == "low"
+    assert "rotate_api_keys" not in sev
 
 
 def test_postmortem_named_file_is_historical(tmp_path: Path):
@@ -151,7 +151,7 @@ def test_postmortem_named_file_is_historical(tmp_path: Path):
         "# Postmortem\n\n`reconcile_ledger_balance` drifted overnight.\n", encoding="utf-8"
     )
     sev = _run(docs, tmp_path)
-    assert sev.get("reconcile_ledger_balance") == "low"
+    assert "reconcile_ledger_balance" not in sev
 
 
 # --- the path classifier itself is shape-based, not name-based ----------------
